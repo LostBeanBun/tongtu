@@ -1,0 +1,484 @@
+# 通途（Tongtu）
+
+> 天堑变通途 —— 轻量的 Steam / GitHub 网络加速。
+
+面向境内网络的 **Steam 社区**与 **GitHub 及其附属站点**加速工具（Windows x64，独立实现、绿色单文件）：
+用「干净解析 + 双模式接管 + 无 SNI 反代」绕过 DNS 污染与 SNI 封锁。
+
+> 📖 面向使用者的完整教程见 **[USAGE.md](USAGE.md)**。本文档偏原理与开发。
+>
+> ⚠️ **仅供个人学习与技术研究使用**，请勿用作其他用途。详见文末[使用范围与免责声明](#使用范围与免责声明)。
+
+---
+
+## 特性
+
+- **本地正向代理**：白名单域名经干净 DoH 解析后直连，避免系统 DNS 被污染。
+- **两种接管模式**
+  - *系统代理模式*：接管浏览器等走系统代理的程序，**无需管理员权限**。
+  - *Hosts 模式*：为 Steam 客户端等不走代理的程序覆盖 hosts，**需要管理员权限**。
+- **无 SNI 反代（本地 MITM）**：对 SNI 被封锁的域名在本地解密，出站拨号**剥离 SNI**，靠 `Host` 头路由。
+- **多来源优选 IP**：静态优选 + 远程优选（GitHub520）+ 多端点 DoH 并查。
+- **开机自启**：HKCU Run 键（无需管理员）或最高权限计划任务，`--hidden` 不显示界面窗口。
+- **零参数即开**：双击 exe（或不带子命令运行）就等同于 `start`，显示自己的窗口（点 × 只隐藏）。
+- **双击不出现 cmd 窗口**：exe 以图形子系统编译，双击时 Windows 根本不会创建控制台窗口；
+  从终端启动则照常在终端里看到日志，界面就绪后进程主动脱离控制台，**关掉那个终端窗口不会结束通途**。
+- **异常退出不留错配置**：接管系统代理 / hosts 期间会拉起一个同名「监护进程」，
+  主进程一旦崩溃或被强杀，它立刻把系统代理与 hosts 还原成原来的样子；注销 / 关机由窗口消息触发还原
+  （进程被强杀来不及还原时，下次启动也会自动清理遗留状态）。
+- **CLI + 系统托盘**：托盘右键菜单承载全部可配置项，点一下即开/关并写回配置。
+- **常规窗口界面**：标准的系统标题栏（跟随深浅色）+ 不透明窗口底 + 自绘状态条
+  （状态点 + 文字 + 一条与卡片对齐的发丝分隔线）+ 圆角日志卡片与发丝描边；
+  按显示器 DPI 渲染，窗口位置与大小记忆到下次启动。菜单（托盘右键、窗口右键）也跟随系统主题。
+  配色按「深浅同色相只差明度 / 一个颜色只干一件事 / 对比度达 WCAG」三条规矩校准，
+  状态词还会按健康度变色（运行中 · 部分生效 · 已停止）。
+
+---
+
+## 加速原理（A + B）
+
+### A．干净解析 + 双模式接管
+
+系统 DNS 对受污染域名会返回假 IP（例如把 `steamcommunity.com` 解析到 Facebook 的地址）。本工具改用 **DoH（DNS over HTTPS）** 并查多个端点，并把结果作为直连候选：
+
+- **系统代理模式**：本地代理接到 `CONNECT host:443` 后，用干净 IP 直连（不走系统 DNS）。
+- **Hosts 模式**：把白名单域名写入 hosts；受 SNI 封锁的域名指向 `127.0.0.1`，由本地监听接管。
+
+### B．无 SNI 反代（MITM）
+
+GFW 会对特定域名做 **SNI 阻断**：同一 IP 换 SNI 即被 RST。既然 ClientHello 里的 SNI 是触发点，工具就：
+
+1. 本地自签 CA 为白名单域名签发证书，对客户端**本地解密**（仅在 HTTPS 上）；
+2. 出站时 `tls.Config{ServerName: ""}`，**ClientHello 不携带 SNI**；
+3. 用原始 `Host` 头让上游按域名路由。
+
+仅对配置 `mitm.domains` 列出的域名解密，**其余流量端到端隧道、不解密**。
+
+默认反代域名：`*.steamcommunity.com`、`raw.githubusercontent.com`、`gist.github.com`、`github.com`
+（`api.github.com` 未封锁 SNI，保持走隧道，更快）。
+
+---
+
+## 环境要求
+
+- Windows 10/11 x64
+- 构建需 Go 1.21+；运行只需 `tongtu.exe`
+
+## 构建
+
+**推荐**：使用自带脚本（自动设置工具链与代理，注入版本号）：
+
+```powershell
+.\build.ps1                 # 生成 dist\tongtu.exe（默认版本 0.1.0）
+.\build.ps1 -Version 0.2.0  # 指定版本号
+```
+
+或手动（**注意 `-H windowsgui`**：没有它就会编译成控制台程序，双击时会出现一个 cmd 窗口）：
+
+```powershell
+$env:PATH = "$env:LOCALAPPDATA\Programs\Go\bin;$env:PATH"
+$env:GOPROXY = "https://goproxy.cn,direct"
+go build -trimpath -ldflags "-s -w -H windowsgui -X main.Version=0.1.0" -o dist\tongtu.exe .\cmd\tongtu
+```
+
+测试（跨平台可跑：Windows 专属部分用 `_windows.go` / `_other.go` 成对桩隔离，因此 Linux CI 也能 `go vet` 与编译）：
+
+```powershell
+go test ./...
+go vet ./...
+```
+
+界面部分不只是「能编译」：状态条与卡片会**画到内存 DC 上逐像素断言**（状态点颜色、卡片底色与
+圆角、发丝线所在行、内边距、文字色系），配色则按 WCAG 对比度与色相一致性校验，
+日志的排版与分级配色走纯逻辑单测（`logview_test.go`），日志控件的实际颜色则用
+`EM_GETCHARFORMAT` 直接读回断言（深浅两套配色都验）——
+参见 `cmd/tongtu/palette_windows_test.go`、`window_windows_test.go`、`logview_test.go`。
+
+### 代码结构
+
+```
+cmd/tongtu/            CLI 入口 + 全部界面/托盘装配 + 监护进程（Windows 专属文件用 _windows.go 后缀）
+  main.go              进程入口：DPI、控制台、监护进程分支
+  root.go              cobra 根命令、日志装配（控制台/文件/窗口三路）
+  start.go / stop.go   启动与停止的生命周期（status.go / test.go / cert.go / autostart.go 是各子命令）
+  window*.go           自绘窗口：状态条、日志卡片、主题、右键菜单
+  logview.go           日志显示层（排版规则、分级配色、启动摘要）——纯逻辑，跨平台可测
+  guard*.go            监护进程：主进程异常退出时还原系统设置
+internal/app/         核心编排：本地代理 + 系统代理/hosts 双模式
+internal/proxy/       正向代理（HTTP 转发 + HTTPS CONNECT，按白名单分流；含无 SNI 反代）
+internal/resolver/    DoH 解析（多端点、缓存、熔断）+ 静态/远程优选 IP
+internal/rules/       各服务的域名白名单
+internal/hosts/       系统 hosts 的托管块写入与还原（原子写）
+internal/sysproxy/    系统代理（HKCU 注册表）接管与还原
+internal/mitm/        无 SNI 反代所需的本地根证书（CA）
+internal/control/     仅回环的本地控制 API（status / mode / shutdown）
+internal/tray/        托盘图标与右键菜单
+internal/autostart/   开机自启（HKCU Run / 最高权限计划任务）
+internal/icon/        应用图标（托盘与窗口共用）
+tools/genicon/        把图标重绘成多尺寸 ICO（开发工具）
+```
+
+### 图标资源
+
+`cmd/tongtu/rsrc_windows_amd64.syso` 是编译进 exe 的图标资源（资源管理器 / 任务栏 / Alt+Tab 里显示的那个图标），
+由 `internal/icon/icon.ico` 生成，已随仓库提供，**平时构建不需要任何额外工具**。
+
+改了图标后按下面两步重新生成（`rsrc` 只在重新生成时需要）：
+
+```powershell
+go run ./tools/genicon internal/icon/icon.ico      # 重绘 ICO（16/32/48 三档）
+go install github.com/akavel/rsrc@latest           # 只需一次，安装资源编译器
+rsrc -arch amd64 -ico internal/icon/icon.ico -o cmd/tongtu/rsrc_windows_amd64.syso
+```
+
+---
+
+## 快速开始
+
+### 系统代理模式（推荐，无需管理员）
+
+```powershell
+dist\tongtu.exe start            # 默认同时尝试接管系统代理与 hosts
+# 仅接管系统代理（不动 hosts）：
+dist\tongtu.exe start --no-hosts
+```
+
+首次启动会提示安装本地根证书（无 SNI 反代所需，安装到**当前用户** Root 存储，无需管理员）。
+也可不反代直接跑：`--no-mitm`。
+
+查看状态 / 停止：
+
+```powershell
+dist\tongtu.exe status
+dist\tongtu.exe stop             # 还原系统代理与 hosts
+```
+
+### Hosts 模式（需要管理员）
+
+以**管理员**身份：
+
+```powershell
+dist\tongtu.exe start --no-sysproxy   # 只接管 hosts
+```
+
+仅当以管理员运行时 hosts 才会写入；否则会打印告警并降级（系统代理模式仍可用）。
+
+### 验证效果
+
+```powershell
+dist\tongtu.exe test steamcommunity.com github.com
+```
+
+---
+
+## 命令参考
+
+| 命令 | 说明 |
+|---|---|
+| `tongtu`（不带参数） | 等同 `tongtu start`——双击 exe 即为此 |
+| `tongtu start` | 启动服务（`--no-sysproxy` / `--no-hosts` / `--no-mitm` / `--no-tray` / `--hidden`） |
+| `tongtu stop` | 停止服务并还原系统代理与 hosts |
+| `tongtu status` | 查看运行状态（`--json` 输出原始 JSON） |
+| `tongtu test [域名...]` | 测试干净解析、TCP 连通性与经代理的 HTTPS 访问 |
+| `tongtu cert install` | 生成（如不存在）并安装本地根证书 |
+| `tongtu cert status` | 查看证书状态 |
+| `tongtu cert uninstall` | 移除本地根证书（幂等） |
+| `tongtu autostart on` | 开启开机自启（默认：当前用户；`--elevated` 则用最高权限计划任务） |
+| `tongtu autostart off` | 关闭开机自启 |
+| `tongtu autostart status` | 查看开机自启状态 |
+| `tongtu version` | 显示版本号 |
+
+全局标志：`--config <路径>`（默认 `%APPDATA%\tongtu\config.yaml`）。
+`--no-tray` / `--no-sysproxy` / `--no-hosts` / `--no-mitm` / `--hidden` 挂在根命令上，
+所以 `tongtu --no-hosts` 与 `tongtu start --no-hosts` 等价。
+
+### 系统托盘
+
+不带参数运行（或双击 exe）后，托盘右键菜单承载**全部可配置项**，点一下即开/关，
+改动立即生效并写回 `config.yaml`：
+
+```
+通途 网络加速
+────────────────
+系统代理模式          [✓]
+Hosts 模式            [✓]
+无 SNI 反代            [✓]
+────────────────
+加速 Steam            [✓]
+加速 GitHub           [✓]
+────────────────
+开机自启              [✓]
+开机自启（最高权限）    [ ]
+────────────────
+显示/隐藏窗口
+打开配置文件
+打开配置目录
+────────────────
+退出
+```
+
+- 菜单中的勾选状态每 3 秒与运行时同步（也能反映控制 API 的改动与启动时的接管失败）。
+- 「开机自启（最高权限）」需要计划任务权限；非管理员运行时该项为灰色不可点。
+- 所有菜单操作失败都会弹出提示框（开机自启没有界面时同样可见）。
+- **双击 exe 启动后显示的是通途自己的窗口**（承载启动信息与运行日志，不是黑底控制台），
+  **双击时不会出现 cmd 窗口**：exe 以图形子系统编译。**点窗口的 × 只是隐藏窗口**，
+  服务与托盘继续运行。想再看日志：左键点托盘图标，或托盘右键 →「显示/隐藏窗口」。
+  （控制台窗口做不到「只关窗口」：Windows 在控制台窗口被关闭时会直接结束该进程，
+  `CTRL_CLOSE_EVENT` 拦不住；所以双击启动改用自绘窗口。）
+- **退出**只能走托盘右键「退出」或 `tongtu stop`。
+- **从终端启动**（`tongtu` 或 `tongtu start`）：日志先打在终端里；界面与托盘就绪后进程会
+  **主动脱离控制台**，此后**关闭该终端窗口不再影响通途**（终端里也不再收到 `Ctrl+C`，
+  请用托盘「退出」或 `tongtu stop`）。`--no-tray` 时刻意保留终端作为唯一界面。
+
+### 通途窗口（界面）
+
+双击 exe 后显示的就是这个窗口，从上到下只有两部分：
+
+```
+┌───────────────────────────────────────────────────────────────────────────┐
+│  通途 Tongtu 0.1.0  运行中     ● 系统代理   ○ Hosts   ○ 无SNI反代          │
+│  服务组 steam、github  ·  活跃隧道 2  ·  ↓1.2 MB ↑34 KB                    │
+├───────────────────────────────────────────────────────────────────────────┤
+│  15:07:02  信息  已启用系统代理  ·  listen=127.0.0.1:19180                 │
+│  15:07:03  警告  hosts 接管失败  ·  err=需要管理员权限                      │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+- **两行状态条**：第一行是「标题 + 状态词 + 三个开关」，第二行是「服务组 / 活跃隧道 / 上下行流量」。
+  窗口变窄时按段截断（先丢流量、再丢隧道数，服务组尽量留住），不会整条信息消失。
+- **日志分级配色**（`cmd/tongtu/logview.go` 是显示层，独立于文件日志）：时间戳用弱化色，
+  级别词固定两个汉字（`调试` / `信息` / `警告` / `错误`）并按语义上色（错误红、警告橙、其余中性），
+  正文用一级文字色，`k=v` 属性用次要色；一行太长时属性缩进换行（续行以 `· ` 开头），
+  避免日志挤成一片。着色靠系统自带的 `msftedit.dll`（`RICHEDIT50W`），
+  取不到时自动退回普通文本控件——功能不变，只是没有颜色。
+  文件日志与控制台仍是结构化文本（`time=… level=… msg=… k=v`），诊断时用得上。
+- **常规窗口样式**：用系统标准的标题栏（跟随深浅色），客户区由我们自己铺**不透明**主题底色，
+  里面放一张圆角日志卡片（圆角底色 + 外围一圈 1 像素发丝描边，日志控件再内缩一圈留出内边距，
+  文字与滚动条都不贴边）；状态条是**自绘**的（状态点 + 文字，下方一条与卡片对齐的发丝分隔线）。
+  圆角交给系统默认处理，不额外做特效。
+- **为什么没有「液态玻璃」/系统材质**（真机实测，Windows 11 24H2 + GDI 自绘，留档避免以后又试一遍）：
+  `DwmExtendFrameIntoClientArea(-1)` 会把整块客户区变成 DWM 的「玻璃」，GDI 画上去的像素会被
+  按材质的不透明度重新合成——实色被冲淡到 60%~80%，深色主题下浅色文字直接糊到看不见；
+  壁纸偏亮时材质本身还会发白（整个窗口蒙一层白纱）。只设 `DWMWA_SYSTEMBACKDROP_TYPE`（云母）
+  不伸框虽然客户区安全，但省下的只是一层标题栏磨砂；未公开的 `SetWindowCompositionAttribute`
+  （亚克力）在新版 Windows 上返回成功却不生效，同样会冲淡客户区。GDI 自绘的窗口就老老实实
+  用系统默认外观：配色才落得准、文字才够清楚。
+- **配色的三条规矩**（把「好看」变成可度量的规则，回归测试见 `cmd/tongtu/palette_windows_test.go`）：
+  1. **深浅同色相、只差明度**：中性色统一为冷灰（H≈240°），语义色深浅两套共用色相——
+     浅色压深一档（压在亮底上够黑），深色用「提升层」变体（压在暗底上够亮）。切换主题像
+     同一套设计的两种明度，而不是两种风格。
+  2. **一个颜色只干一件事**：状态点只表「开关状态」（**绿 = 开，灰 = 关**），文字只用文字色阶
+     （正文 / 次要 / 弱化三级），强调色只给标题。不再出现「整行彩色文字」这类配色噪音。
+  3. **对比度按 WCAG 校准**：正文 ≥7:1、次要文字 ≥4.5:1、弱化文字与状态点 ≥3.5:1；
+     测试会逐个色对算对比度，改坏一个色值就会红。
+- **状态词也是状态位**：标题后面那个词跟着健康度变色——`运行中`（绿）、`部分生效`（橙，例如
+  非管理员下 hosts 接管失败）、`已停止`（灰）。颜色只是强化，词本身写明了状态，不依赖颜色单通道。
+- **顶部状态条**：每 3 秒刷新一次，一眼看清三个开关、当前服务组、活跃隧道数与上下行流量
+  （和托盘菜单里的勾选一致）。
+- **改变窗口大小不会打乱阅读位置**：停在末尾的继续跟随最新（像 `tail -f`），往上翻看的留在原处
+  ——日志控件在缩放后会把视图重置，因此布局时会把它补回来。
+- **深浅色主题**：跟随 Windows 的「应用模式」（设置 → 个性化 → 颜色）；深色下标题栏、滚动条
+  以及**系统绘制的菜单**（托盘右键、窗口右键）都会一起变深。运行中切换主题会当场生效（无需重启），
+  界面切换时复用的是同一批 GDI 对象，因此反复切换也不会泄漏资源。
+- **高分屏清晰**：进程声明为 per-monitor DPI 感知，窗口在不同缩放的显示器之间拖动会自动换字体与布局；
+  发丝线保持 1 物理像素（高 DPI 下更精致），状态点与圆角则随 DPI 放大。
+- **能被截屏工具正确抓取**：自绘窗口同时实现 `WM_PRINTCLIENT`，因此 PrintWindow / 共享软件 /
+  录屏工具抓到的是完整画面（状态条 + 日志卡片描边俱在），而不是一片空白。
+- **日志区操作**：`Ctrl+A` 全选、`Ctrl+C` 复制；右键有「复制 / 全选 / 清空日志」。
+  - 正在**划选文本**时，新日志不会打断你的选区；
+  - 正在**往上翻看历史**时，新日志不会把视图拽回末尾；停在末尾时则自动跟随（像 `tail -f`）。
+- **窗口位置与大小**会记住，存放在 `%APPDATA%\tongtu\window.json`（删掉即恢复默认 860×520）；
+  窗口最小 460×260，避免缩到看不见内容。
+- 任务栏与资源管理器里 `tongtu.exe` 显示的是通途自己的图标（帆船），不再是系统默认图标。
+
+### 开机自启
+
+```powershell
+tongtu autostart on              # 无需管理员：写入 HKCU Run 键，登录时以当前用户启动（系统代理模式）
+tongtu autostart on --elevated   # 需管理员：创建「最高权限」计划任务，登录时以管理员启动（hosts 模式亦可用，无 UAC 弹窗）
+tongtu autostart off
+tongtu autostart status
+```
+
+- 自启命令为 `tongtu.exe start --hidden`（不显示界面窗口，只保留托盘图标）。
+- `--hidden` 仍会创建一个**不可见的窗口**：注销 / 关机时系统通过它（`WM_QUERYENDSESSION`）
+  通知通途先还原系统代理与 hosts，避免「关机时留下指向本地代理的注册表项」。
+- 两种机制互斥：开启一种会自动移除另一种，避免重复启动。
+- 若要在开机后自动为 **Steam 客户端**（需要 hosts 模式）加速，请以管理员身份执行 `tongtu autostart on --elevated`。
+- `--hidden` 模式下首次运行**不会**弹出根证书安装提示；如需无 SNI 反代，请先手动执行一次 `tongtu cert install`。
+
+---
+
+## 配置说明
+
+`%APPDATA%\tongtu\config.yaml`（带版本号，升级时自动备份为 `config.yaml.vN.bak` 并重建）：
+
+```yaml
+version: 4
+listen: 127.0.0.1:19180        # 本地代理监听
+control: 127.0.0.1:19181       # 控制 API（仅回环）
+system_proxy: true             # 启动时接管系统代理
+hosts: true                    # 启动时接管 hosts（需管理员）
+services: [steam, github]      # 启用的服务组
+hosts_refresh_minutes: 30      # hosts IP 刷新周期
+dns:
+  endpoints:                   # DoH 端点（境内可达者在前）
+    - https://doh.pub/dns-query
+    - https://223.5.5.5/resolve
+    - https://dns.alidns.com/resolve
+    - https://1.1.1.1/dns-query
+    - https://8.8.8.8/dns-query
+  timeout_sec: 5
+  cache_min_sec: 60
+  cache_max_sec: 600
+  remote_hosts:                # 远程优选 IP 列表（hosts 格式）
+    - https://raw.hellogithub.com/hosts
+  static_hosts:                # 静态优选 IP，优先级最高
+    gist.github.com:     [140.82.112.3, 140.82.113.3, 140.82.114.3]
+    github.com:          [140.82.112.3, 140.82.113.3, 140.82.114.3]
+    steamcommunity.com:  [104.89.103.51, 184.30.89.225]
+mitm:
+  enabled: true
+  auto_cert: true              # 首次启动提示安装本地根证书
+  domains:                     # 需要本地解密的域名（支持 "*.example.com"）
+    - '*.steamcommunity.com'
+    - raw.githubusercontent.com
+    - gist.github.com
+    - github.com
+log:
+  level: info                  # debug / info / warn / error
+  file: ""                     # 空=不写文件（仍会进界面窗口；终端启动时也会打到终端）
+```
+
+> 界面窗口（通途自己的窗口）里**始终**能看到日志，即使 `log.file` 为空；
+> `file` 只是额外再存一份到磁盘（排查启动失败时很有用，可设成 `%APPDATA%\tongtu\tongtu.log`）。
+
+> 新增的内置默认 `dns.static_hosts` 与 `mitm.domains` 会在加载时**合并**进已有配置（保留你的自定义项）。
+
+---
+
+## 证书说明
+
+- 证书与私钥：`%APPDATA%\tongtu\ca.crt` / `ca.key`。
+- 安装目标：**当前用户**受信任的根证书存储（`certutil -user -addstore Root`），**无需管理员权限**。
+- 仅用于本地 MITM；`tongtu stop` / `cert uninstall` 可移除。
+- Firefox 使用独立证书库，需在「设置 → 隐私与安全 → 证书」手动导入 `ca.crt`。
+
+---
+
+## 系统状态的接管与还原
+
+tongtu 会临时修改**系统代理**与 **hosts**，因此会尽最大努力保证"停下来就干净"——
+**无论进程怎么退出，都不会留下指向已停止代理的错误配置**：
+
+| 退出方式 | 谁来还原 | 时机 |
+|---|---|---|
+| `tongtu stop` / 托盘「退出」 | 主进程自己 | 立即 |
+| `Ctrl+C`（终端启动时） | 主进程自己 | 立即 |
+| 点窗口的 × / Alt+F4 | **不退出程序**，只隐藏窗口 | — |
+| 关闭启动它的终端窗口 | 界面就绪后进程已脱离控制台，**不受影响** | — |
+| **注销 / 关机** | 窗口收到 `WM_QUERYENDSESSION` → 主流程还原（最多等 4 秒）后才放行结束会话 | 会话结束前 |
+| **崩溃 / 被任务管理器强杀** | **监护进程**（同名 exe 的隐藏子进程）等到主进程退出后立即还原 | 毫秒级 |
+| 断电 / 蓝屏 / 直接拔电 | 无法执行任何代码；**下次启动自动清理** | 下次 `start` / `stop` |
+
+细节：
+
+- **监护进程**：一旦接管了系统代理或 hosts，主进程就拉起 `tongtu.exe __guard --guard-pid <pid> --guard-token <token>`。
+  它只做一件事——等待主进程句柄进入已通知状态，然后调用与「下次启动」相同的清理逻辑。
+  清理是**幂等**的：如果主进程已经优雅还原过，它就是空操作（不会误动新实例的状态）。
+- **令牌防误清**：`%APPDATA%\tongtu\guard.json` 记录「当前这轮接管」的令牌。新实例启动时会先改写令牌，
+  于是上一轮残留的监护进程会发现"已经换人"而选择什么都不做。
+- **状态文件**：接管前的系统代理原值存在 `%APPDATA%\tongtu\sysproxy.json`，hosts 的托管块有明确的
+  起止标记；还原即"按文件里的原值写回"和"移除托管块"。
+- **遗留清理先确认"没人管了"**：清理（启动兜底与 `tongtu stop` 的兜底分支）之前先看两件事——
+  状态文件里记的代理地址是否还连得上（还连得上就说明那轮接管的进程仍在跑，代理端口是它开的），
+  以及 `guard.json` 里的主进程是否还活着。任一成立就整轮跳过：否则会把**另一个实例**正在用的
+  系统代理静默清掉，而对方界面照旧显示「已启用」。多实例（换了控制端口/配置文件）时尤其重要。
+  - 残留的窄情形：对方**只接管了 hosts**（系统代理没开），而 `guard.json` 已被本实例启动时覆盖。
+    此时本轮的兜底清理可能短暂移除对方的托管块；对方会在下一次状态刷新（数秒内）自行补回，
+    属自愈，不会造成持续影响。两个实例同时接管同一份系统状态本身就是互相覆盖，不做进一步协调。
+- **hosts 原子写入**：先写同目录临时文件再改名覆盖，避免"清空后还没写完就被强杀"导致 hosts 被截断。
+- 监护进程只在**确实接管了系统状态**时才会存在（托盘里手动打开开关时也会自动补上），
+  不接管时不会多一个进程。
+
+因此：**不运行时不会残留任何接管状态**；进程退出后不占用 CPU/内存（监护进程完成还原后自行退出）。
+
+## 已知限制
+
+- **github.com 主站可能被限速**：这是网络层速率限制，非代理问题；可达性由无 SNI 反代保证。
+- **1.1.1.1 / 8.8.8.8 在境内通常不可达**：仅作后备；本工具有端点熔断，失败端点会在冷却期内被跳过。
+- **SNI 封锁是间歇性的**：网络窗口可能变化，工具会按 DNS 污染/封锁情况自动选择候选 IP。
+- Hosts 模式写入系统 hosts、绑定 `:443`/`:80` 需要管理员（低端口绑定本身非管理员也可，但写 hosts 必须管理员）。
+
+---
+
+## 故障排查
+
+- **curl 报 `CRYPT_E_NO_REVOCATION_CHECK`**：schannel 对本地 CA 无吊销点。加 `--ssl-no-revoke`（浏览器与 Steam 客户端无此问题）。
+- **某个站点失败**：`tongtu test <域名>` 查看干净解析与经代理访问；如需固定 IP，加入 `dns.static_hosts`。
+- **改坏了配置**：删除/改名 `config.yaml`，下次启动会按默认重建；历史版本在 `config.yaml.vN.bak`。
+- **双击后没看到窗口？** 窗口可能在屏幕边缘（位置被记住了，删掉 `%APPDATA%\tongtu\window.json` 即恢复默认），
+  也可能启动失败：图形子系统下没有终端，失败信息会以**系统对话框**弹出（若在另一个会话/无桌面环境启动，
+  则写入日志文件：把 `log.file` 设成一个路径，例如 `%APPDATA%\tongtu\tongtu.log`）。
+- **关掉终端后进程还在？** 这是**预期行为**：界面就绪后通途会主动脱离控制台，避免"关终端＝被杀进程"。
+  要退出请用托盘右键「退出」或 `tongtu stop`。
+- **怎么确认没有残留？** 检查 `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings` 的
+  `ProxyEnable` 是否为 `0`、hosts 里是否还有 `tongtu managed block` 标记，以及
+  `%APPDATA%\tongtu` 下是否还有 `sysproxy.json` / `guard.json`。有残留时执行一次 `tongtu stop` 即可清理。
+
+---
+
+## 使用范围与免责声明
+
+**本项目仅供个人学习与技术研究使用，请勿用作其他用途。**
+
+- 做这个项目的目的是学习 Go 网络编程、Windows 桌面程序开发，以及 TLS 反代（出口剥离 SNI）的原理与
+  工程细节；代码里保留了大量「为什么这么做」的注释与回归测试，希望对你自学也有用。
+- 请**不要**把它用于商业用途，也**不要**用它访问或传播违法内容；使用时请遵守当地法律法规，以及
+  Steam、GitHub 等相关网站的服务条款。
+- 它会在你的机器上**临时修改系统代理与 hosts**，并在启用无 SNI 反代时**安装一张本地根证书**。
+  这些行为都可查、可关，退出时会还原（见上文「系统状态的接管与还原」），但请确认你理解它们。
+- 加速效果取决于你的网络环境与上游状态，作者不保证可用性；因使用本项目造成的任何直接或间接后果，
+  由使用者自行承担，作者不提供担保与支持承诺。
+
+---
+
+## 致谢
+
+代理、DoH 解析、hosts 接管、MITM 反代、窗口与托盘这些部分，都是直接调用 Go 标准库与 Windows API
+实现的；而「能像正常桌面程序一样跑起来」这件事，靠的是这些开源项目：
+
+- [fyne.io/systray](https://github.com/fyne-io/systray)（Apache-2.0）—— 系统托盘图标与右键菜单；
+- [spf13/cobra](https://github.com/spf13/cobra)（Apache-2.0）+
+  [spf13/pflag](https://github.com/spf13/pflag)（BSD-3-Clause）—— 命令行与子命令框架；
+- [golang.org/x/sys](https://pkg.go.dev/golang.org/x/sys)（BSD-3-Clause）—— Win32 / 注册表 / 控制台的系统调用绑定；
+- [gopkg.in/yaml.v3](https://github.com/go-yaml/yaml)（MIT + Apache-2.0）—— 配置解析；
+- [godbus/dbus](https://github.com/godbus/dbus)（BSD-2-Clause）与
+  [inconshreveable/mousetrap](https://github.com/inconshreveable/mousetrap)（Apache-2.0）—— 上述组件的间接依赖；
+- [Go 语言及其标准库](https://go.dev/)（BSD-3-Clause）。
+
+数据与工具：远程优选 IP 的默认数据来自 [GitHub520](https://github.com/521xueweihan/GitHub520)
+（社区维护的优选 IP 列表，本项目只在运行时读取）；解析走公开的 DoH 端点；开发期用到
+[akavel/rsrc](https://github.com/akavel/rsrc)（MIT，生成 exe 图标资源）与
+[staticcheck](https://staticcheck.dev/)（MIT，静态检查）。
+
+完整的版本 / 许可证 / 用途清单（分发二进制时请一并保留）见 **[THIRD-PARTY.md](THIRD-PARTY.md)**。
+
+---
+
+## 许可证
+
+以 **GNU General Public License v3.0**（GPL-3.0）发布，版权归通途（Tongtu）贡献者所有
+（`Copyright (C) 2026 Tongtu authors`），许可证全文见 [LICENSE](LICENSE)。
+
+为什么选它：
+
+- 本项目**静态链接**了 Apache-2.0 / BSD / MIT 等宽松许可的第三方库（清单见
+  [THIRD-PARTY.md](THIRD-PARTY.md)）：这些协议都与 GPL-3.0 兼容，可以一起分发，条件是保留其声明；
+- 它是**强著佐权**协议：任何人都可以免费使用、修改、再分发，但**再分发时必须同样以 GPL-3.0
+  提供完整源码**，衍生作品不能闭源——代码始终公开可读，与本项目「仅供个人学习」的初衷一致；
+- GPL-3.0 允许「用」而不允许「据为己有」：如果你想让别人也能闭源集成（例如做成商业产品），
+  可把 License 换成 Apache-2.0 等宽松协议——本项目代码全部自写，换协议只需替换 `LICENSE` 与本节说明。
+
+> 关于商标：文档中出现的 Steam、GitHub 等名称属于各自所有者，本项目与它们没有从属或背书关系。
+

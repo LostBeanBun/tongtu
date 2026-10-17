@@ -1,0 +1,173 @@
+//go:build windows
+
+// Package sysproxy 负责接管/还原 Windows 系统代理设置（HKCU 注册表）。
+package sysproxy
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
+)
+
+const regPath = `Software\Microsoft\Windows\CurrentVersion\Internet Settings`
+
+// Values 保存系统代理相关的注册表原值（指针区分“不存在”与“零值”）。
+type Values struct {
+	ProxyEnable   *uint   `json:"proxy_enable,omitempty"`
+	ProxyServer   *string `json:"proxy_server,omitempty"`
+	ProxyOverride *string `json:"proxy_override,omitempty"`
+}
+
+type stateFile struct {
+	Saved   Values    `json:"saved"`
+	Addr    string    `json:"addr"`
+	SavedAt time.Time `json:"saved_at"`
+}
+
+var wininet = windows.NewLazySystemDLL("wininet.dll")
+
+func broadcast() {
+	// INTERNET_OPTION_SETTINGS_CHANGED / INTERNET_OPTION_REFRESH
+	optChanged := wininet.NewProc("InternetSetOptionW")
+	optChanged.Call(0, 39, 0, 0)
+	optChanged.Call(0, 37, 0, 0)
+}
+
+// StatePath 返回崩溃恢复状态文件路径。
+func StatePath() string {
+	base := os.Getenv("APPDATA")
+	if base == "" {
+		base = "."
+	}
+	return filepath.Join(base, "tongtu", "sysproxy.json")
+}
+
+// SavedAddr 返回状态文件里记录的接管地址（上一轮 Enable 写入的代理地址）。
+//
+// 用来判断这轮接管是否还「活着」：代理端口还连得上，就说明当初接管它的进程仍在运行，
+// 这份状态不是崩溃遗留，不该被清理（见 app.RecoverStale）。
+func SavedAddr() (string, bool) {
+	data, err := os.ReadFile(StatePath())
+	if err != nil {
+		return "", false
+	}
+	var sf stateFile
+	if err := json.Unmarshal(data, &sf); err != nil || sf.Addr == "" {
+		return "", false
+	}
+	return sf.Addr, true
+}
+
+func readValues() (*Values, error) {
+	k, err := registry.OpenKey(registry.CURRENT_USER, regPath, registry.QUERY_VALUE)
+	if err != nil {
+		return nil, fmt.Errorf("打开注册表 %s: %w", regPath, err)
+	}
+	defer k.Close()
+	v := &Values{}
+	if enable, _, err := k.GetIntegerValue("ProxyEnable"); err == nil {
+		x := uint(enable)
+		v.ProxyEnable = &x
+	}
+	if s, _, err := k.GetStringValue("ProxyServer"); err == nil {
+		v.ProxyServer = &s
+	}
+	if s, _, err := k.GetStringValue("ProxyOverride"); err == nil {
+		v.ProxyOverride = &s
+	}
+	return v, nil
+}
+
+func apply(v *Values) error {
+	k, err := registry.OpenKey(registry.CURRENT_USER, regPath, registry.SET_VALUE)
+	if err != nil {
+		return fmt.Errorf("打开注册表（需要写权限）: %w", err)
+	}
+	defer k.Close()
+
+	if v.ProxyEnable != nil {
+		if err := k.SetDWordValue("ProxyEnable", uint32(*v.ProxyEnable)); err != nil {
+			return err
+		}
+	} else {
+		_ = k.DeleteValue("ProxyEnable")
+	}
+	if v.ProxyServer != nil {
+		if err := k.SetStringValue("ProxyServer", *v.ProxyServer); err != nil {
+			return err
+		}
+	} else {
+		_ = k.DeleteValue("ProxyServer")
+	}
+	if v.ProxyOverride != nil {
+		if err := k.SetStringValue("ProxyOverride", *v.ProxyOverride); err != nil {
+			return err
+		}
+	} else {
+		_ = k.DeleteValue("ProxyOverride")
+	}
+	broadcast()
+	return nil
+}
+
+// Enable 将系统代理指向 addr，保存原值（同时落盘以便崩溃后恢复）。
+func Enable(addr string) (*Values, error) {
+	prev, err := readValues()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(StatePath()), 0o755); err != nil {
+		return nil, err
+	}
+	data, _ := json.Marshal(stateFile{Saved: *prev, Addr: addr, SavedAt: time.Now()})
+	if err := os.WriteFile(StatePath(), data, 0o644); err != nil {
+		return nil, fmt.Errorf("写入代理状态文件: %w", err)
+	}
+	bypass := "localhost;127.0.0.1;::1;<local>"
+	next := &Values{
+		ProxyEnable:   ptr(uint(1)),
+		ProxyServer:   ptr(addr),
+		ProxyOverride: ptr(bypass),
+	}
+	if err := apply(next); err != nil {
+		return nil, fmt.Errorf("设置系统代理失败: %w", err)
+	}
+	return prev, nil
+}
+
+// Disable 恢复系统代理。saved 为 nil 时读取状态文件（用于崩溃恢复），
+// 恢复成功后删除状态文件。
+func Disable(saved *Values) error {
+	if saved == nil {
+		data, err := os.ReadFile(StatePath())
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil // 无待恢复状态
+			}
+			return err
+		}
+		var st stateFile
+		if err := json.Unmarshal(data, &st); err != nil {
+			return fmt.Errorf("解析代理状态文件: %w", err)
+		}
+		saved = &st.Saved
+	}
+	if err := apply(saved); err != nil {
+		return fmt.Errorf("还原系统代理失败: %w", err)
+	}
+	_ = os.Remove(StatePath())
+	return nil
+}
+
+// Active 报告是否存在待恢复的代理状态文件。
+func Active() bool {
+	_, err := os.Stat(StatePath())
+	return err == nil
+}
+
+func ptr[T any](v T) *T { return &v }

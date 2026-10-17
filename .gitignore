@@ -1,0 +1,19 @@
+# 构建产物（build.ps1 输出，不入库）
+/dist/
+*.exe
+
+# 测试与覆盖率产物
+*.test
+*.out
+coverage.txt
+
+# 编辑器 / 操作系统杂项
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+
+# 注意：cmd/tongtu/rsrc_windows_amd64.syso 是**故意入库**的图标资源
+# （见 README「图标资源」一节），因此这里不要忽略 *.syso。

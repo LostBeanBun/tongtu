@@ -1,0 +1,32 @@
+{
+  "id": "steam",
+  "name": "Steam",
+  "domains": [
+    "steamcommunity.com",
+    "*.steamcommunity.com",
+    "steampowered.com",
+    "*.steampowered.com",
+    "steamstatic.com",
+    "*.steamstatic.com",
+    "steamusercontent.com",
+    "*.steamusercontent.com",
+    "steam-chat.com",
+    "*.steam-chat.com",
+    "steam-content.com",
+    "*.steam-content.com",
+    "steamserver.net",
+    "*.steamserver.net"
+  ],
+  "hosts": [
+    "steamcommunity.com",
+    "www.steamcommunity.com",
+    "help.steamcommunity.com",
+    "login.steampowered.com",
+    "store.steampowered.com",
+    "api.steampowered.com",
+    "help.steampowered.com",
+    "checkout.steampowered.com",
+    "cdn.steamstatic.com",
+    "community.fastly.steamstatic.com"
+  ]
+}
