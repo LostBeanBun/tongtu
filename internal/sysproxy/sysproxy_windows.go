@@ -8,11 +8,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
+
+// requiredBypass 是接管期间必须留在「跳过代理」列表里的条目：
+// 回环地址与 <local> 不该经本地代理绕一圈。
+var requiredBypass = []string{"localhost", "127.0.0.1", "::1", "<local>"}
 
 const regPath = `Software\Microsoft\Windows\CurrentVersion\Internet Settings`
 
@@ -128,7 +133,7 @@ func Enable(addr string) (*Values, error) {
 	if err := os.WriteFile(StatePath(), data, 0o644); err != nil {
 		return nil, fmt.Errorf("写入代理状态文件: %w", err)
 	}
-	bypass := "localhost;127.0.0.1;::1;<local>"
+	bypass := mergeBypass(prev.ProxyOverride)
 	next := &Values{
 		ProxyEnable:   ptr(uint(1)),
 		ProxyServer:   ptr(addr),
@@ -168,6 +173,42 @@ func Disable(saved *Values) error {
 func Active() bool {
 	_, err := os.Stat(StatePath())
 	return err == nil
+}
+
+// mergeBypass 生成接管期间的「跳过代理」列表：把必须跳过的条目合并进用户原有列表，
+// 而不是整段替换。
+//
+// 用户可能在 ProxyOverride 里配了内网/域名绕过项（如 10.*、*.corp.local）；
+// 接管时直接覆盖会把这些流量也塞进本地代理。原值已在 sysproxy.json 里备份、退出时会
+// 还原，但**运行期间**同样该保留用户原有的绕过语义。
+func mergeBypass(existing *string) string {
+	if existing == nil {
+		return strings.Join(requiredBypass, ";")
+	}
+	out := splitBypass(*existing)
+	have := make(map[string]bool, len(out)+len(requiredBypass))
+	for _, e := range out {
+		have[strings.ToLower(e)] = true
+	}
+	for _, e := range requiredBypass {
+		if k := strings.ToLower(e); !have[k] {
+			out = append(out, e)
+			have[k] = true
+		}
+	}
+	return strings.Join(out, ";")
+}
+
+// splitBypass 拆分 ProxyOverride（分号分隔；忽略空白与空项）。
+func splitBypass(s string) []string {
+	parts := strings.Split(s, ";")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func ptr[T any](v T) *T { return &v }

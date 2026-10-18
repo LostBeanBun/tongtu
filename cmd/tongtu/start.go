@@ -68,8 +68,14 @@ var startCmd = &cobra.Command{
 		}
 
 		var mitmCA *mitm.CA
-		if cfg.MITM.Enabled && !flagNoMITM {
-			mitmCA = ensureMITMCert(cfg, log, !flagHidden)
+		mitmNote := ""
+		switch {
+		case flagNoMITM:
+			if cfg.MITM.Enabled {
+				mitmNote = "本次按 --no-mitm 跳过"
+			}
+		case cfg.MITM.Enabled:
+			mitmCA, mitmNote = ensureMITMCert(cfg, log, !flagHidden)
 		}
 		wantSys := cfg.SystemProxy && !flagNoSysProxy
 		wantHosts := cfg.Hosts && !flagNoHosts
@@ -79,6 +85,8 @@ var startCmd = &cobra.Command{
 			SysProxy:   wantSys,
 			HostsMode:  wantHosts,
 			MITMCA:     mitmCA,
+			MITMNote:   mitmNote,
+			Warmup:     true,
 			ConfigPath: flagConfig,
 			Log:        log,
 		})
@@ -134,7 +142,12 @@ var startCmd = &cobra.Command{
 		// 因此这里只描述「事实」，两种呈现都从 rows 生成，不会出现两处说法不一致。
 		title := "通途已启动"
 		mitm := modeRow("无SNI反代", cfg.MITM.Enabled, st.MITM, "已启用", "未启用", "未生效（详见日志）")
-		if st.MITM && wantHosts && !st.MITMLocal {
+		switch {
+		case !st.MITM && mitmNote != "":
+			// 未启用就把「为什么」直接写进摘要，别让用户去翻日志猜
+			mitm.Mark = markWarn
+			mitm.Value = mitmNote
+		case st.MITM && wantHosts && !st.MITMLocal:
 			mitm.Mark = markWarn // 本地 :443 没起来时反代只对系统代理路径有效
 			mitm.Value = "仅系统代理路径可用（本地 :443 未就绪）"
 		}
@@ -288,12 +301,12 @@ func bringUpUI(ready <-chan struct{}, log *slog.Logger, show bool) {
 
 // ensureMITMCert 确保本地根证书可用：加载/生成 CA，未安装时（交互启动下）提示安装。
 // interactive 为 false（如开机自启的 --hidden 模式）时不提示，仅记录日志。
-// 返回 nil 表示本次不启用无 SNI 反代。
-func ensureMITMCert(cfg *config.Config, log *slog.Logger, interactive bool) *mitm.CA {
+// 返回的 note 在「本次不启用反代」时说明原因（用于启动摘要/状态显示），成功时为空串。
+func ensureMITMCert(cfg *config.Config, log *slog.Logger, interactive bool) (*mitm.CA, string) {
 	ca, err := mitm.LoadOrCreate(config.Dir())
 	if err != nil {
 		log.Error("本地 CA 不可用，本次不启用无 SNI 反代", "err", err)
-		return nil
+		return nil, "根证书加载失败，详见日志"
 	}
 	installed, _ := mitm.Installed(ca)
 	if !installed && cfg.MITM.AutoCert && interactive {
@@ -301,17 +314,23 @@ func ensureMITMCert(cfg *config.Config, log *slog.Logger, interactive bool) *mit
 		if askInstallCert(certPath) {
 			if err := mitm.Install(ca); err != nil {
 				log.Error("安装根证书失败，本次不启用无 SNI 反代", "err", err)
-				return nil
+				return nil, "根证书安装失败，详见日志"
 			}
 			installed = true
 			log.Info("已安装本地根证书")
 		}
 	}
 	if !installed {
-		log.Warn("未安装本地根证书，本次不启用无 SNI 反代（steamcommunity / raw 仍不可用；执行 tongtu cert install 可手动安装）")
-		return nil
+		if !interactive {
+			// 开机自启等非交互方式下无人可问，这里必须把「怎么办」说清楚
+			log.Warn("未安装本地根证书，本次不启用无 SNI 反代（非交互启动不会自动安装）",
+				"修复", "执行 tongtu cert install 后重启通途")
+		} else {
+			log.Warn("未安装本地根证书，本次不启用无 SNI 反代（steamcommunity / raw 仍不可用；执行 tongtu cert install 可手动安装）")
+		}
+		return nil, "缺根证书，执行 tongtu cert install 后重启"
 	}
-	return ca
+	return ca, ""
 }
 
 // askInstallCert 询问是否安装本地根证书。

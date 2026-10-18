@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,8 +28,9 @@ type Status struct {
 	UptimeSec   int64             `json:"uptime_sec"`
 	SystemProxy bool              `json:"system_proxy"`
 	Hosts       bool              `json:"hosts"`
-	MITM        bool              `json:"mitm"`       // 无 SNI 反代是否启用
-	MITMLocal   bool              `json:"mitm_local"` // hosts 直连用本地 :443 是否就绪
+	MITM        bool              `json:"mitm"`                // 无 SNI 反代是否启用
+	MITMNote    string            `json:"mitm_note,omitempty"` // 反代未启用的原因（启用时为空）
+	MITMLocal   bool              `json:"mitm_local"`          // hosts 直连用本地 :443 是否就绪
 	Services    []string          `json:"services"`
 	Proxy       proxy.Snapshot    `json:"proxy"`
 	DNS         []resolver.Health `json:"dns"`
@@ -41,6 +43,8 @@ type Options struct {
 	SysProxy   bool     // 是否接管系统代理
 	HostsMode  bool     // 是否接管 hosts
 	MITMCA     *mitm.CA // 无 SNI 反代根证书；nil 表示不启用
+	MITMNote   string   // 反代未能启用的原因（启用时留空；用于给用户交代，不参与逻辑）
+	Warmup     bool     // 启动后在后台预热反代/白名单域名（见 proxy.Warm）
 	ConfigPath string   // 配置文件路径（托盘切换后持久化用；空则用默认路径）
 	Log        *slog.Logger
 }
@@ -57,9 +61,12 @@ type App struct {
 	svcIDs  []string
 
 	mitmCa         *mitm.CA
+	mitmNote       string   // 反代未启用的原因（启用成功时清空）
 	mitmLocalNames []string // 命中反代名单、需写 127.0.0.1 的 hosts 主机
 	mitmLocal443   bool
 	mitmLocal80    bool
+
+	warm bool // 启动后是否预热反代/白名单域名
 
 	mu           sync.Mutex
 	ln           net.Listener
@@ -105,6 +112,8 @@ func New(opts Options) *App {
 		svcIDs:       append([]string(nil), opts.Config.Services...),
 		wantSysProxy: opts.SysProxy,
 		wantHosts:    opts.HostsMode,
+		mitmNote:     opts.MITMNote,
+		warm:         opts.Warmup,
 	}
 	// 无 SNI 反代：SNI 封锁域名本地解密、出站剥离 SNI（候选 IP 来自干净 DoH）
 	if opts.MITMCA != nil {
@@ -124,7 +133,36 @@ func (a *App) configureMITM(ca *mitm.CA) {
 		return rules.MatchPatterns(host, a.cfg.MITM.Domains)
 	})
 	a.mitmCa = ca
+	a.mitmNote = "" // 已启用，「未启用原因」不再适用
 	a.mitmLocalNames = a.mitmLocalNamesFor(a.rs)
+}
+
+// warmHosts 返回启动预热的候选主机名：hosts 覆盖名单 + 非通配的反代域名。
+// 通配模式（如 *.steamcommunity.com）无法枚举，靠 hosts 名单里的具体主机覆盖。
+func (a *App) warmHosts() []string {
+	seen := make(map[string]bool)
+	var out []string
+	add := func(h string) {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h == "" || seen[h] {
+			return
+		}
+		seen[h] = true
+		out = append(out, h)
+	}
+	if a.rs != nil {
+		for _, h := range a.rs.Hosts() {
+			add(h)
+		}
+	}
+	if a.cfg != nil {
+		for _, d := range a.cfg.MITM.Domains {
+			if !strings.Contains(d, "*") {
+				add(d)
+			}
+		}
+	}
+	return out
 }
 
 // mitmLocalNamesFor 返回「命中反代名单」的 hosts 主机名（这些需写 127.0.0.1）。
@@ -184,6 +222,13 @@ func (a *App) Start() error {
 			a.hostsOn = true
 			go a.hm.Run(ctx)
 		}
+	}
+
+	// 后台预热：把反代域名的「候选竞速」成本从第一次真实访问提前到启动时。
+	// 预热写入的优选/解析缓存与真实请求共用，因此第一个请求能直接走快路径。
+	// ctx 随 Shutdown 取消，退出时预热自动中止。
+	if a.warm {
+		go a.px.Warm(ctx, a.warmHosts(), 4)
 	}
 	return nil
 }
@@ -435,6 +480,7 @@ func (a *App) Status() Status {
 		SystemProxy: a.sysOn,
 		Hosts:       a.hostsOn,
 		MITM:        a.mitmCa != nil,
+		MITMNote:    a.mitmNote,
 		MITMLocal:   a.mitmLocal443,
 		Services:    append([]string(nil), a.svcIDs...),
 		DNS:         a.res.Health(),

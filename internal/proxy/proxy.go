@@ -68,6 +68,9 @@ type Proxy struct {
 	// allowLoopback 仅供测试：允许候选 IP 为回环地址（注入本地假上游）
 	allowLoopback bool
 
+	// warmPort 仅供测试：启动预热拨号的目标端口（生产恒为 443）。
+	warmPort string
+
 	localMu sync.Mutex
 	ln443   net.Listener
 	ln80    net.Listener
@@ -115,13 +118,24 @@ func NewWithLookup(rs *rules.Set, lookup LookupFunc, log *slog.Logger) *Proxy {
 			pr.Out.Host = pr.Out.URL.Host
 			pr.Out.Header.Del("Proxy-Connection")
 		},
-		Transport: p.tr,
+		Transport:      p.tr,
+		ModifyResponse: stripAltSvc,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			p.log.Debug("HTTP 转发失败", "host", r.Host, "err", err)
 			http.Error(w, "bad gateway: "+err.Error(), http.StatusBadGateway)
 		},
 	}
 	return p
+}
+
+// stripAltSvc 删除上游响应里的 Alt-Svc 广告（HTTP/3 提示）。
+//
+// 为什么要删：hosts 模式下反代域名被指向 127.0.0.1，而本地只监听 TCP；浏览器若读到
+// Alt-Svc 会去尝试 QUIC(UDP:443)，白白多一次注定失败的握手（表现为首次加载多等几秒）。
+// 经代理的 HTTPS 看不到响应头（端到端加密），那里由浏览器「走代理时不用 QUIC」兜住。
+func stripAltSvc(resp *http.Response) error {
+	resp.Header.Del("Alt-Svc")
+	return nil
 }
 
 // SetRules 运行时替换白名单规则（托盘切换加速服务组时调用）。并发安全。

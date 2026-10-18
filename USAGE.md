@@ -194,6 +194,9 @@ tongtu autostart status
 
 - 自启命令为 `tongtu.exe start --hidden`：**不显示界面窗口**，只保留托盘图标
   （仍会创建一个不可见窗口，用于接收注销/关机通知，见第 8 节）。
+- 自启是非交互启动，**不会**弹出「是否安装根证书」的询问。若本机还没装过根证书，反代将不启用，
+  此时启动摘要、`tongtu status` 与窗口状态条会明确写出「缺根证书，执行 `tongtu cert install` 后重启」——
+  先手动执行一次 `tongtu cert install` 即可（见第 7 节）。
 - 两种方式互斥，开启一种会自动移除另一种，避免重复启动。
 - 想让**开机后 Steam 客户端也自动可用**，请用管理员 PowerShell 执行 `tongtu autostart on --elevated`。
 
@@ -337,6 +340,15 @@ Firefox 需按 §7 手动导入。
 3. 是否把域名加成了 `*.steampowered.com` —— **不要这样写**：`login.steampowered.com` 剥离 SNI 后握手会直接失败，
    登录页会被一起弄坏。要加域名请逐个实测。
 
+**Q：第一次点开商店要转好几秒，之后很快？**
+这是反代的「冷启动」：第一次要现查干净 DoH、再逐个候选做 TCP + 无 SNI 探测。启动后通途会在后台
+**预热**（做完同样的探测并把结果缓存起来），所以正常使用中第一次访问就已经很快
+（实测 `store.steampowered.com`：冷启动首次 3.4 秒 → 预热后 0.89 秒）。刚启动的一两秒内属于预热窗口。
+
+**Q：`tongtu status` 显示「无SNI反代: 关（缺根证书…）」？**
+本机还没安装根证书，而且**开机自启等非交互启动不会弹窗询问**。执行一次 `tongtu cert install`，
+重启通途即可；Firefox 需按 §7 手动导入。
+
 **Q：curl 报 `CRYPT_E_NO_REVOCATION_CHECK`？**
 这是 schannel 对本地 CA 无吊销点导致，加 `--ssl-no-revoke` 即可；浏览器与 Steam 客户端无此问题。
 
@@ -400,6 +412,7 @@ tongtu cert uninstall        # 移除本地根证书
 
 系统 DNS 对受污染域名会返回假 IP，GFW 还会对特定域名做 SNI 阻断。通途用 **DoH 干净解析 + 多来源优选 IP**
 拿到真实可用地址直连；对 SNI 被封锁的域名，则用**本地 CA 解密 + 出站剥离 SNI** 的方式反代过去。
+启动后还会在后台**预热**一遍（反代域名先做完候选竞速），所以点开商店的第一次访问也不必等。
 详见 [README.md](README.md) 的「加速原理」。
 
 ---

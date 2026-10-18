@@ -24,6 +24,43 @@
 
 （无）
 
+## [0.0.3] - 2026-10-18
+
+### 修复
+
+- **系统代理的「跳过代理」列表不再被整段替换**（`internal/sysproxy`）：接管期间改为把
+  `localhost;127.0.0.1;::1;<local>` **合并**进用户原有的 `ProxyOverride`。此前运行期间用户配置的
+  内网绕过项（如 `192.168.*;10.*;*.corp.local`）会被顶掉，这些流量被硬塞进本地代理绕一圈。
+- **剥离上游 `Alt-Svc` 响应头**（`internal/proxy`）：hosts 模式下反代域名指向 `127.0.0.1`，而本地只
+  监听 TCP；浏览器读到 `Alt-Svc` 会去尝试注定失败的 QUIC(UDP:443)，白等几秒。
+
+### 新增
+
+- **启动预热**（`internal/proxy.Warm` + `app.Start`）：启动后在后台对 hosts 名单与反代域名做
+  预解析/预拨号，命中结果写进与真实请求**共用**的优选缓存；预热与真实请求复用同一套候选来源与
+  优选缓存（`dialOneNoSNI`），因此结果直接生效。预热尽力而为、可随退出取消，失败只记日志。
+- **反代未启用的原因会直接显示**：新增 `app.Status.MITMNote`，`tongtu status`、启动摘要都会写明
+  「缺根证书，执行 `tongtu cert install` 后重启」。此前开机自启（非交互）时证书装不上只会留一条
+  日志，用户看到的是「反代莫名不工作」。
+
+### 测试
+
+- `internal/sysproxy`：`TestMergeBypassKeepsUserEntries`、`TestMergeBypassDedupes`、
+  `TestMergeBypassAllPresent`、`TestMergeBypassNil`、`TestSplitBypass`。
+- `internal/proxy`：`TestWarmPrefillsGoodIP`、`TestWarmNonMITMHostWarmsResolver`、
+  `TestWarmHonorsCancel`、`TestPlainHTTPStripsAltSvc`、`TestMITMStripsAltSvc`。
+
+### 验证记录（本机实测）
+
+- 系统代理：运行期 `ProxyOverride` = 用户原值（`localhost;127.*;192.168.*;10.*;172.16.*…;<local>`）
+  + `127.0.0.1;::1`；停止后逐字还原，无 `sysproxy.json` / `guard.json` 残留、无残留进程。
+- 预热：`log.level=debug` 下 27 个主机名全部完成预热；反代域名写入优选 IP
+  （`github.com` → 20.205.243.166、`gist.github.com` → 140.82.114.3、`store.steampowered.com` → 23.x）。
+- 延迟：`store.steampowered.com` 冷启动首次 3.4 s → 预热后 0.89 s；`steamcommunity.com` 0.77 s（均 200）。
+- 响应头：反代路径已无 `Alt-Svc`。
+- 非交互缺证书：独立 `%APPDATA%` 启动 → 日志给出「执行 tongtu cert install 后重启通途」，
+  `tongtu status` 显示「无SNI反代: 关（缺根证书，执行 tongtu cert install 后重启）」。
+
 ## [0.0.2] - 2026-10-18
 
 ### 新增

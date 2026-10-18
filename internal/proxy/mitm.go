@@ -74,7 +74,8 @@ func (p *Proxy) EnableMITM(ca *mitm.CA, match func(host string) bool) {
 			}
 			pr.Out.Header.Del("Proxy-Connection")
 		},
-		Transport: mtr,
+		Transport:      mtr,
+		ModifyResponse: stripAltSvc,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			p.log.Warn("无 SNI 反代失败", "host", r.Host, "err", err)
 			http.Error(w, "bad gateway: "+err.Error(), http.StatusBadGateway)
@@ -241,24 +242,7 @@ func (p *Proxy) dialTLSNoSNI(ctx context.Context, network, addr string) (net.Con
 
 	// 单个候选：TCP + 无 SNI TLS 握手
 	dialOne := func(cctx context.Context, ip net.IP) (net.Conn, error) {
-		raw, derr := p.dialer.DialContext(cctx, network, net.JoinHostPort(ip.String(), port))
-		if derr != nil {
-			return nil, derr
-		}
-		// 关键：ServerName 为空 → ClientHello 不携带 SNI 扩展
-		tc := tls.Client(raw, &tls.Config{
-			ServerName:         "",
-			InsecureSkipVerify: true, // 无法在无 SNI 下校验证书；对浏览器的正确性由本地 MITM 证书保证
-			NextProtos:         []string{"http/1.1"},
-			MinVersion:         tls.VersionTLS12,
-		})
-		hctx, cancel := context.WithTimeout(cctx, 8*time.Second)
-		defer cancel()
-		if herr := tc.HandshakeContext(hctx); herr != nil {
-			_ = raw.Close()
-			return nil, herr
-		}
-		return tc, nil
+		return p.dialOneNoSNI(cctx, network, port, ip)
 	}
 
 	// 快路径：已知优选 IP 直接拨号，完全跳过 DoH 查询（显著降低二次请求延迟）。
@@ -282,6 +266,29 @@ func (p *Proxy) dialTLSNoSNI(ctx context.Context, network, addr string) (net.Con
 	p.rememberGood(host, winIP)
 	p.log.Debug("无 SNI 拨号成功", "host", host, "ip", winIP)
 	return c, nil
+}
+
+// dialOneNoSNI 建立到单个候选 IP 的 TCP 连接并完成「不携带 SNI」的 TLS 握手。
+// 供真实请求与启动预热（warm.go）共用，保证两条路径的候选语义与优选缓存完全一致。
+func (p *Proxy) dialOneNoSNI(cctx context.Context, network, port string, ip net.IP) (net.Conn, error) {
+	raw, derr := p.dialer.DialContext(cctx, network, net.JoinHostPort(ip.String(), port))
+	if derr != nil {
+		return nil, derr
+	}
+	// 关键：ServerName 为空 → ClientHello 不携带 SNI 扩展
+	tc := tls.Client(raw, &tls.Config{
+		ServerName:         "",
+		InsecureSkipVerify: true, // 无法在无 SNI 下校验证书；对浏览器的正确性由本地 MITM 证书保证
+		NextProtos:         []string{"http/1.1"},
+		MinVersion:         tls.VersionTLS12,
+	})
+	hctx, cancel := context.WithTimeout(cctx, 8*time.Second)
+	defer cancel()
+	if herr := tc.HandshakeContext(hctx); herr != nil {
+		_ = raw.Close()
+		return nil, herr
+	}
+	return tc, nil
 }
 
 // mitmCandidates 返回候选 IP：静态/远程优选在前，其后是干净 DoH 并查结果。
