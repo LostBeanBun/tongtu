@@ -10,9 +10,11 @@ package tray
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"fyne.io/systray"
@@ -25,22 +27,27 @@ import (
 // errLastService 表示用户试图关闭最后一个加速服务组。
 var errLastService = errors.New("至少要保留一个加速服务")
 
+// ErrElevationCancelled 表示用户在 UAC 弹窗里点了取消（不是失败，不需要报错弹框）。
+var ErrElevationCancelled = errors.New("用户取消了 UAC 授权")
+
 // Run 启动系统托盘（内部 goroutine 阻塞直至 Exit）。
 // onQuit 在用户点击「退出」时触发，由调用方负责停止服务。
 // ready 在托盘菜单就绪后调用一次（可为 nil）；调用方据此确认「托盘真的可用」，
 // 之后才把界面从控制台窗口换成通途自己的窗口，避免既没有界面又没有托盘。
 // onWindow 为「显示/隐藏窗口」（可为 nil，表示当前平台没有独立窗口，菜单项不出现）。
+// onRestartElevated 为「以管理员身份重启」（可为 nil）：调用方应当先优雅还原再退出，
+// 最后在控制端口释放之后拉起提权实例（见 RelaunchElevated 的说明）。
 //
 // 注意：fyne.io/systray 的消息循环（创建托盘窗口并 GetMessage）必须始终运行在同一个
 // 操作系统线程上，否则 Windows 收不到鼠标事件——表现为「托盘图标可见，但左右键无反应」。
 // 这里用 LockOSThread 把本 goroutine 钉在其线程上，保证消息循环不会因 Go 调度迁移线程。
-func Run(a *app.App, onQuit func(), ready func(), onWindow func() error) {
+func Run(a *app.App, onQuit func(), ready func(), onWindow func() error, onRestartElevated func()) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
 	done := make(chan struct{})
 	systray.Run(func() {
-		onReady(a, onQuit, done, onWindow)
+		onReady(a, onQuit, done, onWindow, onRestartElevated)
 		if ready != nil {
 			ready()
 		}
@@ -63,13 +70,14 @@ type menu struct {
 	github   *systray.MenuItem
 	auto     *systray.MenuItem
 	autoElev *systray.MenuItem
+	elev     *systray.MenuItem
 	window   *systray.MenuItem
 	openCfg  *systray.MenuItem
 	openDir  *systray.MenuItem
 	quit     *systray.MenuItem
 }
 
-func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() error) {
+func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() error, onRestartElevated func()) {
 	systray.SetIcon(icon.ICO)
 	systray.SetTitle("通途")
 	systray.SetTooltip("通途（Tongtu）· 网络加速（Steam / GitHub）")
@@ -91,11 +99,14 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 	m.github = systray.AddMenuItemCheckbox("加速 GitHub", "github.com、raw.githubusercontent.com 等", false)
 	systray.AddSeparator()
 
-	// —— 开机自启 ——
+	// —— 开机自启 / 权限 ——
 	m.auto = systray.AddMenuItemCheckbox("开机自启", "登录时以当前用户身份自动启动（无需管理员）", false)
 	m.autoElev = systray.AddMenuItemCheckbox("开机自启（最高权限）", "登录时以管理员身份启动，hosts 模式亦可用且无 UAC 弹窗", false)
-	if !autostart.IsAdmin() {
+	m.elev = systray.AddMenuItem("以管理员身份重启", "先还原系统设置并退出，再弹 UAC 以管理员权限重新启动（Hosts 模式随之生效）")
+	if autostart.IsAdmin() {
 		m.autoElev.Disable() // 非管理员无法创建“最高权限”计划任务
+		m.elev.Disable()
+		m.elev.SetTitle("以管理员身份重启（当前已是管理员）")
 	}
 	systray.AddSeparator()
 
@@ -125,6 +136,7 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 
 	// syncState 同步「运行状态」相关勾选。轮询是为了反映控制 API 的变更，
 	// 以及启动时接管失败的实际情况（例如未以管理员身份运行时 hosts 未生效）。
+	// 顺带刷新托盘悬停提示：不打开窗口也能看到状态与流量。
 	syncState := func() {
 		st := a.Status()
 		setCheck(m.sys, st.SystemProxy)
@@ -132,6 +144,7 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 		setCheck(m.mitm, st.MITM)
 		setCheck(m.steam, contains(st.Services, "steam"))
 		setCheck(m.github, contains(st.Services, "github"))
+		systray.SetTooltip(tooltipText(st))
 	}
 
 	// refreshAuto 同步「开机自启」勾选。schtasks 每次查询都要新建进程，开销较大，
@@ -157,7 +170,7 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 		}
 	}
 
-	go clickLoop(a, m, done, onQuit, onWindow, syncReq, syncState, refreshAuto, fail)
+	go clickLoop(a, m, done, onQuit, onWindow, onRestartElevated, syncReq, syncState, refreshAuto, fail)
 
 	// 周期同步勾选状态（反映控制 API 的变更与启动失败的实际情况）
 	go func() {
@@ -176,11 +189,16 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 
 // clickLoop 是唯一读写菜单项的 goroutine。
 func clickLoop(a *app.App, m *menu, done chan struct{}, onQuit func(), onWindow func() error,
-	syncReq chan struct{}, syncState, refreshAuto func(), fail func(string)) {
+	onRestartElevated func(), syncReq chan struct{}, syncState, refreshAuto func(), fail func(string)) {
 	// 没有「显示/隐藏窗口」菜单项时 windowCh 为 nil，对应分支永不触发。
 	var windowCh chan struct{}
 	if m.window != nil {
 		windowCh = m.window.ClickedCh
+	}
+	// 平台不支持提权重启（或调用方没提供回调）时 elevCh 为 nil，分支同样永不触发。
+	var elevCh chan struct{}
+	if m.elev != nil && !m.elev.Disabled() && onRestartElevated != nil {
+		elevCh = m.elev.ClickedCh
 	}
 	for {
 		select {
@@ -248,6 +266,14 @@ func clickLoop(a *app.App, m *menu, done chan struct{}, onQuit func(), onWindow 
 				fail("显示/隐藏窗口失败：\n" + err.Error())
 			}
 
+		case <-elevCh:
+			// 先问一次再退出：UAC 被取消时用户至少是知情同意的，不会「点了菜单程序就没了」。
+			if !confirmRestartElevated() {
+				continue
+			}
+			onRestartElevated()
+			return
+
 		case <-m.openCfg.ClickedCh:
 			if err := openInNotepad(a.ConfigPath()); err != nil {
 				fail("打开配置文件失败：\n" + err.Error() + "\n路径：" + a.ConfigPath())
@@ -314,4 +340,43 @@ func contains(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// tooltipText 生成托盘悬停提示：不打开窗口就能看到运行状态与流量。
+//
+// 只报「实际状态」（接管成功与否），不写「期望状态」——期望由菜单勾选表达；
+// 期望却没生效时状态条会用橙色写出「部分生效」，两处各司其职。
+func tooltipText(st app.Status) string {
+	state := "已停止"
+	if st.Running {
+		state = "运行中"
+	}
+	return fmt.Sprintf("通途 Tongtu · %s · 系统代理%s · Hosts%s · 反代%s · ↓%s ↑%s",
+		state, mark(st.SystemProxy), mark(st.Hosts), mark(st.MITM),
+		shortBytes(st.Proxy.BytesIn), shortBytes(st.Proxy.BytesOut))
+}
+
+func mark(on bool) string {
+	if on {
+		return "✓"
+	}
+	return "✗"
+}
+
+// shortBytes 是托盘提示专用的紧凑体积写法（↓1.2M ↑340K）。
+// 与状态条里的「1.2 MiB」刻意区分：提示行要短，状态条要严谨。
+// 整数不带小数点（340K 而不是 340.0K），因为托盘提示的宽度是硬约束。
+func shortBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%dB", n)
+	}
+	suffix := []string{"K", "M", "G", "T"}
+	div, i := int64(unit), 0
+	for v := n / unit; v >= unit && i < len(suffix)-1; v /= unit {
+		div *= unit
+		i++
+	}
+	num := strings.TrimSuffix(fmt.Sprintf("%.1f", float64(n)/float64(div)), ".0")
+	return num + suffix[i]
 }

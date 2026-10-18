@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -14,6 +15,20 @@ const (
 	createNoWindow         = 0x08000000
 	createBreakawayFromJob = 0x01000000
 )
+
+// inJobObject 报告当前进程是否运行在作业对象里。
+//
+// 用途：监护进程「无法脱离作业对象」时（CreateProcess 带 CREATE_BREAKAWAY_FROM_JOB 失败），
+// 说明所处的作业对象不允许脱离——崩溃/强杀时监护进程会跟着主进程一起结束，
+// 日志里带上它便于判断到底是「作业对象限制」还是别的原因。
+func inJobObject() bool {
+	var in int32
+	r, _, _ := kernel32.NewProc("IsProcessInJob").Call(
+		uintptr(windows.CurrentProcess()),
+		0,
+		uintptr(unsafe.Pointer(&in)))
+	return r != 0 && in != 0
+}
 
 // stillActive 是 GetExitCodeProcess 表示「进程还在跑」的返回值（STILL_ACTIVE）。
 const stillActive = 259

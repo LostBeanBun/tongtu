@@ -17,13 +17,18 @@ import (
 
 	"tongtu/internal/control"
 	"tongtu/internal/resolver"
+	"tongtu/internal/rules"
 )
 
 // defaultTestHosts 覆盖 Steam 与 GitHub 及其主要附属站点。
 var defaultTestHosts = []string{
 	"steamcommunity.com",
+	"www.steamcommunity.com",
+	"help.steamcommunity.com",
 	"store.steampowered.com",
+	"login.steampowered.com",
 	"cdn.steamstatic.com",
+	"avatars.steamstatic.com",
 	"github.com",
 	"api.github.com",
 	"codeload.github.com",
@@ -31,6 +36,7 @@ var defaultTestHosts = []string{
 	"objects.githubusercontent.com",
 	"avatars.githubusercontent.com",
 	"gist.githubusercontent.com",
+	"gist.github.com",
 }
 
 var testCmd = &cobra.Command{
@@ -56,6 +62,9 @@ var testCmd = &cobra.Command{
 			StaticHosts: cfg.DNS.StaticHosts,
 		}, quiet)
 
+		// 反代名单就是配置里的 mitm.domains（含内置默认值）。
+		mitmPatterns := cfg.MITM.Domains
+
 		proxyUp := control.Running(cfg.Listen)
 		if proxyUp {
 			fmt.Printf("检测到本地代理 %s，额外测试经代理的 HTTPS 访问\n\n", cfg.Listen)
@@ -65,15 +74,15 @@ var testCmd = &cobra.Command{
 		}
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(w, "域名\t解析IP(干净)\tDNS\tTCP:443\tHTTPS(经代理)")
+		fmt.Fprintln(w, "域名\t解析IP(干净)\tDNS\tTCP:443\t直连HTTPS\t经代理\t无SNI反代")
 		for _, h := range hosts {
-			testOne(w, res, cfg.Listen, proxyUp, h)
+			testOne(w, res, cfg.Listen, proxyUp, cfg.MITM.Enabled, mitmPatterns, h)
 		}
 		return w.Flush()
 	},
 }
 
-func testOne(w *tabwriter.Writer, res *resolver.Resolver, proxyAddr string, proxyUp bool, host string) {
+func testOne(w *tabwriter.Writer, res *resolver.Resolver, proxyAddr string, proxyUp, mitmOn bool, mitmPatterns []string, host string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -83,7 +92,7 @@ func testOne(w *tabwriter.Writer, res *resolver.Resolver, proxyAddr string, prox
 	ips := res.LookupAll(ctx, host)
 	dnsMs := time.Since(t0).Milliseconds()
 	if len(ips) == 0 {
-		fmt.Fprintf(w, "%s\t-\t失败\t-\t-\n", host)
+		fmt.Fprintf(w, "%s\t-\t失败\t-\t-\t-\t%s\n", host, mitmMark(mitmOn, mitmPatterns, host))
 		return
 	}
 	ip := ips[0]
@@ -99,6 +108,13 @@ func testOne(w *tabwriter.Writer, res *resolver.Resolver, proxyAddr string, prox
 		tcpStr = fmt.Sprintf("%dms", time.Since(t1).Milliseconds())
 		_ = conn.Close()
 	}
+	// 直连（真 SNI）能不能通：反代名单就是为「不通」的域名准备的。
+	directStr := "-"
+	if s, err := httpsDirect(ctx, host); err != nil {
+		directStr = "失败: " + shortErr(err)
+	} else {
+		directStr = s
+	}
 
 	proxyStr := "-"
 	if proxyUp {
@@ -108,7 +124,44 @@ func testOne(w *tabwriter.Writer, res *resolver.Resolver, proxyAddr string, prox
 			proxyStr = s
 		}
 	}
-	fmt.Fprintf(w, "%s\t%s\t%dms\t%s\t%s\n", host, ipStr, dnsMs, tcpStr, proxyStr)
+	fmt.Fprintf(w, "%s\t%s\t%dms\t%s\t%s\t%s\t%s\n", host, ipStr, dnsMs, tcpStr, directStr, proxyStr,
+		mitmMark(mitmOn, mitmPatterns, host))
+}
+
+// mitmMark 标注该域名会不会走无 SNI 反代：✓ 走、– 直连（配置里没开反代时统一显示「未启用」）。
+func mitmMark(mitmOn bool, patterns []string, host string) string {
+	if !mitmOn {
+		return "未启用"
+	}
+	if rules.MatchPatterns(host, patterns) {
+		return "✓"
+	}
+	return "–"
+}
+
+// httpsDirect 直接（不经代理、带真 SNI）发一次 HTTPS 请求，成功返回 HTTP 状态描述。
+func httpsDirect(ctx context.Context, host string) (string, error) {
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:               nil, // 关键：绕开系统代理与本地代理，看真实直连结果
+			TLSHandshakeTimeout: 8 * time.Second,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Timeout: 10 * time.Second,
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+host+"/", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+	return fmt.Sprintf("HTTP %d", resp.StatusCode), nil
 }
 
 // httpsViaProxy 通过本地代理发起一次 HTTPS 请求，成功返回 HTTP 状态描述。

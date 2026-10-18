@@ -13,3 +13,6 @@ func waitProcessExit(int) bool { return false }
 
 // processAlive 非 Windows 平台没有「别的实例仍持有系统状态」这回事。
 func processAlive(int) bool { return false }
+
+// inJobObject 非 Windows 平台没有作业对象。
+func inJobObject() bool { return false }

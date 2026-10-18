@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -87,6 +88,8 @@ var startCmd = &cobra.Command{
 
 		quit := make(chan struct{}, 1)
 		shutdownDone := make(chan struct{})
+		// restartElevated 由托盘菜单写入（见下方 tray.Run 的回调），在主流程退出后读取。
+		restartElevated := false
 		signalQuit := func() {
 			select {
 			case quit <- struct{}{}:
@@ -140,8 +143,11 @@ var startCmd = &cobra.Command{
 			modeRow("系统代理", wantSys, st.SystemProxy, "已接管", "未启用", "未接管（接管失败，详见日志）"),
 			modeRow("Hosts", wantHosts, st.Hosts, "已生效", "未启用", "未生效（需要以管理员身份运行）"),
 			mitm,
-			{Mark: markInfo, Label: "服务组", Value: strings.Join(st.Services, "、")},
 		}
+		if row, ok := guardRow(guardBreakawayFailed()); ok {
+			rows = append(rows, row)
+		}
+		rows = append(rows, summaryRow{Mark: markInfo, Label: "服务组", Value: strings.Join(st.Services, "、")})
 		if cfg.Log.File != "" {
 			rows = append(rows, summaryRow{Mark: markInfo, Label: "日志文件", Value: cfg.Log.File})
 		}
@@ -164,12 +170,17 @@ var startCmd = &cobra.Command{
 				toggleWindow = toggleLogWindow
 			}
 			ready := make(chan struct{}, 1)
+			// restartElevated 由托盘菜单写入、在主流程退出后读取：
+			// 中间隔着 quit 通道的收发，天然有 happens-before，不需要额外加锁。
 			go tray.Run(a, signalQuit, func() {
 				select {
 				case ready <- struct{}{}:
 				default:
 				}
-			}, toggleWindow)
+			}, toggleWindow, func() {
+				restartElevated = true
+				signalQuit()
+			})
 			fmt.Println("  托盘图标已就绪（右键可退出并还原系统设置）")
 			// 双击启动的实例在托盘就绪后弹出通途自己的窗口；随后与控制台分离，
 			// 于是「关掉启动它的终端窗口」不再影响运行（详见 bringUpUI）。
@@ -199,6 +210,10 @@ var startCmd = &cobra.Command{
 		var errs []error
 		if err := a.Shutdown(ctx); err != nil {
 			errs = append(errs, err)
+		} else {
+			// 状态还原成功：顺手回收本轮监护令牌，别在数据目录里留下陈旧文件。
+			// 还原失败时故意留着——监护进程还能凭它做兜底还原。
+			releaseGuard()
 		}
 		if err := cs.Shutdown(ctx); err != nil {
 			errs = append(errs, err)
@@ -208,6 +223,20 @@ var startCmd = &cobra.Command{
 		}
 		// 通知「注销/关机」路径：还原已经完成，可以放行会话结束了。
 		close(shutdownDone)
+		// 「以管理员身份重启」放在最后一步：此时系统状态已还原、控制端口也已释放，
+		// 提权后的新实例才不会因为「tongtu 已在运行」而立刻退出。
+		if restartElevated {
+			switch err := tray.RelaunchElevated(); {
+			case err == nil:
+				log.Info("已请求以管理员身份重启通途")
+			case errors.Is(err, tray.ErrElevationCancelled):
+				log.Info("已取消以管理员身份重启")
+			default:
+				log.Error("以管理员身份重启失败", "err", err)
+				messageBox("通途 Tongtu — 提权重启失败",
+					err.Error()+"\n\n请手动用「以管理员身份运行」重新打开通途。", mbOK|mbIconError)
+			}
+		}
 		if len(errs) > 0 {
 			return errs[0]
 		}
@@ -349,6 +378,19 @@ func windowStatusOf(a *app.App, cfg *config.Config) windowStatus {
 			fmt.Sprintf("↓%s ↑%s", humanBytes(st.Proxy.BytesIn), humanBytes(st.Proxy.BytesOut)),
 		},
 	}
+}
+
+// guardRow 生成「崩溃防护」摘要行：只在监护进程无法脱离作业对象时出现。
+// 一切正常时不出现——没消息就是好消息，摘要里不塞无用的行。
+func guardRow(breakawayFailed bool) (summaryRow, bool) {
+	if !breakawayFailed {
+		return summaryRow{}, false
+	}
+	return summaryRow{
+		Mark:  markWarn,
+		Label: "崩溃防护",
+		Value: "受限（监护进程无法脱离当前启动方式；异常退出要等下次启动才还原）",
+	}, true
 }
 
 // modeRow 生成「开关类」摘要行：已生效=✓、配置要开但没生效=！、没配置开=·。

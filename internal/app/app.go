@@ -114,6 +114,11 @@ func New(opts Options) *App {
 }
 
 // configureMITM 装配无 SNI 反代（初始化阶段或持有 a.mu 时调用）。
+//
+// 「哪些域名要反代」只看配置里的 mitm.domains（含内置默认值，见 config.Default）：
+// 反代是有代价的——本地解密 + 出站剥离 SNI——只该用在实测被 SNI 封锁的域名上。
+// 尤其不能图省事写 *.steampowered.com：login.steampowered.com 这类站点必须带 SNI，
+// 剥离后握手直接失败（实测 tls: internal error），会把本来正常的页面一起弄坏。
 func (a *App) configureMITM(ca *mitm.CA) {
 	a.px.EnableMITM(ca, func(host string) bool {
 		return rules.MatchPatterns(host, a.cfg.MITM.Domains)

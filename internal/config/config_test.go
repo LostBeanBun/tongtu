@@ -64,3 +64,63 @@ func TestDefaultSanity(t *testing.T) {
 		t.Fatalf("默认配置应通过校验: %v", err)
 	}
 }
+
+// matchAny 判断 host 是否命中任一通配模式（与 rules.matchPattern 同规则：*.a.com 含裸域 a.com）。
+func matchAny(host string, patterns []string) bool {
+	for _, p := range patterns {
+		if strings.HasPrefix(p, "*.") {
+			base := p[2:]
+			if host == base || strings.HasSuffix(host, "."+base) {
+				return true
+			}
+			continue
+		}
+		if p == host {
+			return true
+		}
+	}
+	return false
+}
+
+// TestDefaultReverseProxyCoversBlockedHosts 是「必须走无 SNI 反代」名单的契约测试。
+//
+// 名单来自实测（见 CHANGELOG 0.0.1）：这些域名真 SNI 直连会被阻断，
+// 少写一个的后果就是用户打开 Steam 商店/社区一直转圈，所以在这里钉死。
+func TestDefaultReverseProxyCoversBlockedHosts(t *testing.T) {
+	cfg := Default()
+	for _, host := range []string{
+		"store.steampowered.com",  // 直连超时/断流，反代实测 200
+		"avatars.steamstatic.com", // 直连 RST，反代实测正常
+		"steamcommunity.com",      // 通配要覆盖裸域
+		"www.steamcommunity.com",
+		"help.steamcommunity.com",
+		"github.com",
+		"raw.githubusercontent.com",
+		"gist.github.com",
+	} {
+		if !matchAny(host, cfg.MITM.Domains) {
+			t.Errorf("默认反代名单缺少 %s", host)
+		}
+	}
+	// 反向断言：绝不能写成 *.steampowered.com。
+	// login.steampowered.com 剥离 SNI 后握手直接失败（实测 tls: internal error），
+	// 用通配会把本来正常的登录页一起弄坏。
+	if matchAny("login.steampowered.com", cfg.MITM.Domains) {
+		t.Error("默认反代名单不该把 login.steampowered.com 卷进来（别写 *.steampowered.com）")
+	}
+	if matchAny("checkout.steampowered.com", cfg.MITM.Domains) {
+		t.Error("checkout.steampowered.com 直连可用，不该反代")
+	}
+	// 兜底 IP：这几个域名的干净 DoH 答案不可达，没有兜底就只有超时。
+	for _, host := range []string{
+		"steamcommunity.com",
+		"www.steamcommunity.com",
+		"help.steamcommunity.com",
+		"github.com",
+		"gist.github.com",
+	} {
+		if len(cfg.DNS.StaticHosts[host]) == 0 {
+			t.Errorf("默认兜底 IP 缺少 %s", host)
+		}
+	}
+}

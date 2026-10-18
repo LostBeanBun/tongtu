@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -108,6 +109,10 @@ type guardRunner struct {
 	token   string
 	started bool
 	alive   bool
+	// breakawayFailed 记录监护进程是否因为作业对象限制而没能脱离主进程。
+	// 不能脱离时它会随主进程一起被结束，崩溃防护实际失效——必须在界面与日志里说清楚，
+	// 不能让用户以为「有监护进程就万无一失」。
+	breakawayFailed bool
 }
 
 var guard = &guardRunner{}
@@ -129,6 +134,9 @@ func claimGuard() string {
 	if err := config.EnsureDir(); err != nil {
 		return token
 	}
+	// 上一轮监护进程若被作业对象一起带走、或整棵进程树被强杀，令牌文件会留在原地。
+	// 留着本身无害（下面就会覆盖），但会让「上一轮到底跑到哪一步」变得含糊，先回收并记一笔。
+	recycleStaleGuard()
 	gi := guardInfo{PID: os.Getpid(), Token: token, At: time.Now()}
 	data, err := json.Marshal(gi)
 	if err != nil {
@@ -136,6 +144,58 @@ func claimGuard() string {
 	}
 	_ = os.WriteFile(guardStatePath(), data, 0o644)
 	return token
+}
+
+// recycleStaleGuard 回收「主人已经不在了」的陈旧令牌文件，返回是否真的删掉了。
+//
+// 正常退出时令牌由监护进程回收（见 runGuard）；只有监护进程也没能活到那一步时才会残留。
+func recycleStaleGuard() bool {
+	gi, err := readGuardInfo()
+	if err != nil {
+		return false
+	}
+	if gi.PID == os.Getpid() || processAlive(gi.PID) {
+		return false
+	}
+	if err := os.Remove(guardStatePath()); err != nil {
+		return false
+	}
+	guardLog("回收上一轮陈旧令牌 pid=%d（该进程已退出）", gi.PID)
+	return true
+}
+
+// releaseGuard 在优雅退出时回收本轮令牌：只删属于自己的那一轮。
+//
+// 必须比对 PID 与令牌——用户「退出后立刻重启」时，新实例可能已经写下新令牌，
+// 旧实例这一刻绝不能删：否则新实例的监护进程会读到空文件而放弃还原。
+func releaseGuard() {
+	gi, err := readGuardInfo()
+	if err != nil {
+		return
+	}
+	guard.mu.Lock()
+	token := guard.token
+	guard.mu.Unlock()
+	if token == "" || gi.PID != os.Getpid() || gi.Token != token {
+		return
+	}
+	if err := os.Remove(guardStatePath()); err == nil {
+		guardLog("主进程优雅退出，已回收本轮令牌 pid=%d", os.Getpid())
+	}
+}
+
+// guardBreakawayFailed 报告监护进程是否因为作业对象限制而无法脱离主进程。
+// 为真时异常退出（崩溃/强杀）只能靠下次启动的 RecoverStale 兜底。
+func guardBreakawayFailed() bool {
+	guard.mu.Lock()
+	defer guard.mu.Unlock()
+	return guard.breakawayFailed
+}
+
+func (g *guardRunner) markBreakawayFailed() {
+	g.mu.Lock()
+	g.breakawayFailed = true
+	g.mu.Unlock()
 }
 
 // startGuard 在确实接管了系统状态（系统代理 / hosts）时拉起监护进程。
@@ -176,8 +236,19 @@ func startGuard(log *slog.Logger) {
 	cmd.SysProcAttr = guardSysProcAttr(true)
 	err = cmd.Start()
 	if err != nil {
+		// 作业对象不允许脱离：退回普通启动。此时监护进程会随主进程一起被结束，
+		// 崩溃防护实际失效——必须明确告诉用户，别让人以为有保障。
 		cmd.SysProcAttr = guardSysProcAttr(false)
 		err = cmd.Start()
+		if err == nil {
+			guard.markBreakawayFailed()
+			guardLog("监护进程无法脱离作业对象，已退回普通启动（崩溃防护受限 in_job=%v）", inJobObject())
+			if log != nil {
+				log.Warn("崩溃防护受限：当前启动方式下监护进程无法脱离作业对象，"+
+					"异常退出（崩溃/强杀）后系统代理与 hosts 要等下次启动才还原",
+					"建议", "从资源管理器双击启动，或改用「开机自启（最高权限）」")
+			}
+		}
 	}
 	if err != nil {
 		guard.markDead()
@@ -261,6 +332,11 @@ func runGuard(pid int, token string) {
 
 	gi, err := readGuardInfo()
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// 主进程优雅退出时会自己回收令牌（见 releaseGuard）：这时无需还原。
+			guardLog("令牌已被主进程回收（优雅退出），无需还原")
+			return
+		}
 		guardLog("读取令牌失败（%v），跳过还原", err)
 		return
 	}

@@ -1,7 +1,9 @@
 # build.ps1 — 编译 Tongtu（Windows x64 单文件）
 # 用法:
-#   .\build.ps1                 # 使用默认版本号 0.1.0
-#   .\build.ps1 -Version 0.2.0  # 指定版本号
+#   .\build.ps1                 # 版本号自动读取仓库根目录的 VERSION
+#   .\build.ps1 -Version 0.2.0  # 临时指定版本号（不改 VERSION 文件）
+#
+# 改版本号请用 .\bump.ps1（同时更新 VERSION 与 version.go，见 CHANGELOG.md 开头的规则）。
 #
 # 关键：-H windowsgui 让 exe 走「图形子系统」。
 # 这样双击时 Windows 根本不会给通途创建 cmd 窗口（不是隐藏，是没有），
@@ -9,11 +11,22 @@
 # 从终端运行时，程序自己用 AttachConsole 接到父进程的控制台，
 # CLI 输出照常可见（见 cmd/tongtu/console_windows.go）。
 param(
-    [string]$Version = "0.1.0",
+    [string]$Version = "",
     [string]$Output  = "dist\tongtu.exe"
 )
 
 $ErrorActionPreference = "Stop"
+
+# 默认版本号来自 VERSION（单一权威来源；version_test.go 会检查它没跟代码漂移）
+if (-not $Version) {
+    $vf = Join-Path $PSScriptRoot "VERSION"
+    if (Test-Path $vf) {
+        $Version = (Get-Content $vf -Raw).Trim()
+    } else {
+        $Version = "0.0.0-dev"
+    }
+}
+if ($Version -notmatch '^\d+\.\d+\.\d+') { throw "版本号格式不对: $Version" }
 
 # Go 工具链（若未在 PATH 中，尝试默认安装位置）
 if (-not (Get-Command go -ErrorAction SilentlyContinue)) {

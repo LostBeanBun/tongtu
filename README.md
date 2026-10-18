@@ -54,8 +54,20 @@ GFW 会对特定域名做 **SNI 阻断**：同一 IP 换 SNI 即被 RST。既然
 
 仅对配置 `mitm.domains` 列出的域名解密，**其余流量端到端隧道、不解密**。
 
-默认反代域名：`*.steamcommunity.com`、`raw.githubusercontent.com`、`gist.github.com`、`github.com`
-（`api.github.com` 未封锁 SNI，保持走隧道，更快）。
+默认反代域名：`*.steamcommunity.com`、`store.steampowered.com`、`avatars.steamstatic.com`、
+`raw.githubusercontent.com`、`gist.github.com`、`github.com`。
+
+> 名单是按实测结果定的，只收「真 SNI 被阻断、剥离 SNI 后按 Host 头仍能正常响应」的域名：
+> - `store.steampowered.com` 真 SNI 直连会超时、或只收到十几 KB 就断流，反代后实测 **200**；
+> - `avatars.steamstatic.com`（Steam 头像）直连被 RST，反代后正常；
+> - `api.steampowered.com`、`cdn.steamstatic.com`、`login.steampowered.com`、`checkout.steampowered.com`
+>   等未封锁 SNI，**保持隧道**，更快也更稳。
+>
+> ⚠️ 不要图省事写 `*.steampowered.com`：`login.steampowered.com` 剥离 SNI 后握手会**直接失败**
+> （实测 `tls: internal error`），登录页会被一起弄坏。要加域名请逐个确认。
+>
+> 另外，`www` / `help.steamcommunity.com` 的干净 DoH 答案会落在不可达的机房（TCP:443 全超时），
+> 因此 `dns.static_hosts` 里给了实测可用的兜底 IP；没有它就只有「竞速全部失败 → 十几秒后 502」。
 
 ---
 
@@ -69,8 +81,8 @@ GFW 会对特定域名做 **SNI 阻断**：同一 IP 换 SNI 即被 RST。既然
 **推荐**：使用自带脚本（自动设置工具链与代理，注入版本号）：
 
 ```powershell
-.\build.ps1                 # 生成 dist\tongtu.exe（默认版本 0.1.0）
-.\build.ps1 -Version 0.2.0  # 指定版本号
+.\build.ps1                 # 生成 dist\tongtu.exe（版本号自动读取 VERSION）
+.\build.ps1 -Version 0.0.9  # 临时指定版本号（不改 VERSION 文件）
 ```
 
 或手动（**注意 `-H windowsgui`**：没有它就会编译成控制台程序，双击时会出现一个 cmd 窗口）：
@@ -78,7 +90,7 @@ GFW 会对特定域名做 **SNI 阻断**：同一 IP 换 SNI 即被 RST。既然
 ```powershell
 $env:PATH = "$env:LOCALAPPDATA\Programs\Go\bin;$env:PATH"
 $env:GOPROXY = "https://goproxy.cn,direct"
-go build -trimpath -ldflags "-s -w -H windowsgui -X main.Version=0.1.0" -o dist\tongtu.exe .\cmd\tongtu
+go build -trimpath -ldflags "-s -w -H windowsgui -X main.Version=$(Get-Content VERSION -Raw).Trim()" -o dist\tongtu.exe .\cmd\tongtu
 ```
 
 测试（跨平台可跑：Windows 专属部分用 `_windows.go` / `_other.go` 成对桩隔离，因此 Linux CI 也能 `go vet` 与编译）：
@@ -116,6 +128,8 @@ internal/tray/        托盘图标与右键菜单
 internal/autostart/   开机自启（HKCU Run / 最高权限计划任务）
 internal/icon/        应用图标（托盘与窗口共用）
 tools/genicon/        把图标重绘成多尺寸 ICO（开发工具）
+tools/crash-test.ps1  崩溃防护验收：强杀主进程，验证系统状态被自动还原
+VERSION               版本号（唯一权威来源，见 bump.ps1 / CHANGELOG.md）
 ```
 
 ### 图标资源
@@ -132,6 +146,22 @@ rsrc -arch amd64 -ico internal/icon/icon.ico -o cmd/tongtu/rsrc_windows_amd64.sy
 ```
 
 ---
+
+## 版本与变更记录
+
+版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)，唯一的权威来源是仓库根目录的
+[`VERSION`](VERSION)：
+
+```powershell
+.\bump.ps1 patch   # 修 bug、小改动       0.0.1 -> 0.0.2
+.\bump.ps1 minor   # 新增功能、行为有变化  0.0.2 -> 0.1.0
+.\bump.ps1 major   # 达到可发布状态       0.4.0 -> 1.0.0
+```
+
+`bump.ps1` 会同时改写 `VERSION` 与 `cmd/tongtu/version.go`（`version_test.go` 保证两者不漂移），
+`build.ps1` 自动读取 `VERSION` 并把版本号写进 exe（`tongtu version` 可见）。
+每个版本的改动记在 [CHANGELOG.md](CHANGELOG.md)；`0.0.x` 属开发期，配置与命令行为都可能变，
+到 `1.0.0` 才承诺向后兼容。
 
 ## 快速开始
 
@@ -210,6 +240,8 @@ Hosts 模式            [✓]
 开机自启              [✓]
 开机自启（最高权限）    [ ]
 ────────────────
+以管理员身份重启
+────────────────
 显示/隐藏窗口
 打开配置文件
 打开配置目录
@@ -218,7 +250,12 @@ Hosts 模式            [✓]
 ```
 
 - 菜单中的勾选状态每 3 秒与运行时同步（也能反映控制 API 的改动与启动时的接管失败）。
+- **鼠标悬停在托盘图标上**就能看到实时状态与流量，不用打开窗口：
+  `通途 Tongtu · 运行中 · 系统代理✓ · Hosts✗ · 反代✓ · ↓1.2M ↑340K`（体积用紧凑写法，提示行只有一行宽）。
 - 「开机自启（最高权限）」需要计划任务权限；非管理员运行时该项为灰色不可点。
+- **「以管理员身份重启」**（非管理员时可点）：先弹窗确认 → 还原系统代理与 hosts 并退出当前实例 →
+  释放控制端口后再弹 UAC 拉起提权实例。顺序是刻意安排的：先退出再提权，新实例才不会撞上
+  「tongtu 已在运行」；若在 UAC 里点了取消，只是本次重启作罢（不弹错误框），需要时手动再启动一次。
 - 所有菜单操作失败都会弹出提示框（开机自启没有界面时同样可见）。
 - **双击 exe 启动后显示的是通途自己的窗口**（承载启动信息与运行日志，不是黑底控制台），
   **双击时不会出现 cmd 窗口**：exe 以图形子系统编译。**点窗口的 × 只是隐藏窗口**，
@@ -236,7 +273,7 @@ Hosts 模式            [✓]
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────┐
-│  通途 Tongtu 0.1.0  运行中     ● 系统代理   ○ Hosts   ○ 无SNI反代          │
+│  通途 Tongtu 0.0.2  运行中     ● 系统代理   ○ Hosts   ○ 无SNI反代          │
 │  服务组 steam、github  ·  活跃隧道 2  ·  ↓1.2 MB ↑34 KB                    │
 ├───────────────────────────────────────────────────────────────────────────┤
 │  15:07:02  信息  已启用系统代理  ·  listen=127.0.0.1:19180                 │
@@ -334,14 +371,18 @@ dns:
   remote_hosts:                # 远程优选 IP 列表（hosts 格式）
     - https://raw.hellogithub.com/hosts
   static_hosts:                # 静态优选 IP，优先级最高
-    gist.github.com:     [140.82.112.3, 140.82.113.3, 140.82.114.3]
-    github.com:          [140.82.112.3, 140.82.113.3, 140.82.114.3]
-    steamcommunity.com:  [104.89.103.51, 184.30.89.225]
+    gist.github.com:          [140.82.112.3, 140.82.113.3, 140.82.114.3]
+    github.com:               [140.82.112.3, 140.82.113.3, 140.82.114.3]
+    steamcommunity.com:       [104.89.103.51, 184.30.89.225]
+    www.steamcommunity.com:   [104.89.103.51, 184.30.89.225]
+    help.steamcommunity.com:  [104.89.103.51, 184.30.89.225]
 mitm:
   enabled: true
   auto_cert: true              # 首次启动提示安装本地根证书
   domains:                     # 需要本地解密的域名（支持 "*.example.com"）
     - '*.steamcommunity.com'
+    - store.steampowered.com   # 真 SNI 直连被阻断
+    - avatars.steamstatic.com  # 头像：直连 RST
     - raw.githubusercontent.com
     - gist.github.com
     - github.com
@@ -387,7 +428,15 @@ tongtu 会临时修改**系统代理**与 **hosts**，因此会尽最大努力�
   它只做一件事——等待主进程句柄进入已通知状态，然后调用与「下次启动」相同的清理逻辑。
   清理是**幂等**的：如果主进程已经优雅还原过，它就是空操作（不会误动新实例的状态）。
 - **令牌防误清**：`%APPDATA%\tongtu\guard.json` 记录「当前这轮接管」的令牌。新实例启动时会先改写令牌，
-  于是上一轮残留的监护进程会发现"已经换人"而选择什么都不做。
+  于是上一轮残留的监护进程会发现"已经换人"而选择什么都不做。优雅退出时主进程会**回收自己的令牌**
+  （比对 PID + 令牌，因此绝不会删掉刚启动的新实例写下的令牌）；若上一轮连令牌都没来得及回收
+  （监护进程被一起带走），下次启动会识别出"主人已经不在了"并顺手回收、记进 `guard.log`。
+- **监护进程也可能被限制**：某些启动方式（IDE、CI、任务计划、被作业对象包住的终端）下，
+  子进程无法脱离作业对象，会随主进程一起被结束——此时崩溃防护实际失效。通途检测到这种情况会在
+  日志里告警，并在启动摘要里显示「崩溃防护：受限（…异常退出要等下次启动才还原）」，不会让人误以为万无一失。
+- **自己验证一遍**：`.\tools\crash-test.ps1` 会快照当前网络设置 → 启动 → `taskkill /F` 强杀主进程 →
+  断言系统代理 / hosts / guard.json / 残留进程都在规定时间内清理干净 → 打印检查表并还原快照。
+  它还会区分「环境限制」与「代码问题」（前者会看到 `guard.log` 里提到作业对象）。
 - **状态文件**：接管前的系统代理原值存在 `%APPDATA%\tongtu\sysproxy.json`，hosts 的托管块有明确的
   起止标记；还原即"按文件里的原值写回"和"移除托管块"。
 - **遗留清理先确认"没人管了"**：清理（启动兜底与 `tongtu stop` 的兜底分支）之前先看两件事——
@@ -406,6 +455,8 @@ tongtu 会临时修改**系统代理**与 **hosts**，因此会尽最大努力�
 ## 已知限制
 
 - **github.com 主站可能被限速**：这是网络层速率限制，非代理问题；可达性由无 SNI 反代保证。
+- **个别域名的干净 DoH 答案不可达**：例如 `www` / `help.steamcommunity.com` 会解析到国内打不通的机房，
+  这类域名由 `dns.static_hosts` 的实测兜底 IP 兜住；如果你的线路也打不通，换成自己实测可用的 IP 即可。
 - **1.1.1.1 / 8.8.8.8 在境内通常不可达**：仅作后备；本工具有端点熔断，失败端点会在冷却期内被跳过。
 - **SNI 封锁是间歇性的**：网络窗口可能变化，工具会按 DNS 污染/封锁情况自动选择候选 IP。
 - Hosts 模式写入系统 hosts、绑定 `:443`/`:80` 需要管理员（低端口绑定本身非管理员也可，但写 hosts 必须管理员）。
@@ -415,7 +466,13 @@ tongtu 会临时修改**系统代理**与 **hosts**，因此会尽最大努力�
 ## 故障排查
 
 - **curl 报 `CRYPT_E_NO_REVOCATION_CHECK`**：schannel 对本地 CA 无吊销点。加 `--ssl-no-revoke`（浏览器与 Steam 客户端无此问题）。
-- **某个站点失败**：`tongtu test <域名>` 查看干净解析与经代理访问；如需固定 IP，加入 `dns.static_hosts`。
+- **某个站点失败**：`tongtu test <域名>` 一行就能看出卡在哪：`解析IP(干净)` 是否被污染、
+  `TCP:443` 是否可达、`直连HTTPS`（真 SNI）是否被阻断、`经代理` 是否正常、`无SNI反代`（✓/–）有没有命中。
+  典型结论：
+  - 直连失败 + 经代理成功 + 反代为 ✓ → 正常，就是这个域名必须走反代；
+  - 直连失败 + 经代理也失败 + 反代为 – → 该域名也需要反代，把它加进 `mitm.domains`（注意逐个验证，
+    别用 `*.steampowered.com` 这种通配）；
+  - TCP:443 不可达 → 候选 IP 不可用，加入 `dns.static_hosts` 固定一个实测可用的 IP。
 - **改坏了配置**：删除/改名 `config.yaml`，下次启动会按默认重建；历史版本在 `config.yaml.vN.bak`。
 - **双击后没看到窗口？** 窗口可能在屏幕边缘（位置被记住了，删掉 `%APPDATA%\tongtu\window.json` 即恢复默认），
   也可能启动失败：图形子系统下没有终端，失败信息会以**系统对话框**弹出（若在另一个会话/无桌面环境启动，

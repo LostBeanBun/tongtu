@@ -120,7 +120,7 @@ tongtu start
 ### 验证与停止
 
 ```powershell
-tongtu test            # 测试内置域名清单（干净解析 / TCP / 经代理访问）
+tongtu test            # 测试内置域名清单（干净解析 / TCP / 直连 / 经代理 / 是否反代）
 tongtu status          # 查看运行状态、DNS 端点健康度、流量
 tongtu stop            # 停止并还原系统代理与 hosts
 ```
@@ -128,11 +128,17 @@ tongtu stop            # 停止并还原系统代理与 hosts
 `tongtu test` 输出示例：
 
 ```
-域名                解析IP(干净)      DNS    TCP:443  HTTPS(经代理)
-steamcommunity.com  104.89.103.51 +3  120ms  35ms     HTTP 200
-github.com          140.82.112.3 +5   98ms   42ms     HTTP 200
+域名                  解析IP(干净)          DNS     TCP:443  直连HTTPS  经代理     无SNI反代
+steamcommunity.com    104.89.103.51 +4     2046ms  42ms     失败: ...  HTTP 200   ✓
+store.steampowered.com 23.63.226.116        2009ms  43ms     HTTP 200   HTTP 200   ✓
+login.steampowered.com 23.35.148.144 +5     2066ms  43ms     HTTP 302   HTTP 302   –
+github.com            140.82.112.3 +3      2009ms  249ms    HTTP 200   HTTP 200   ✓
 ...
 ```
+
+- `直连HTTPS` 是**绕过代理、带真 SNI** 的结果：它失败而 `经代理` 成功，说明该域名正是被 SNI 阻断、
+  必须走反代（`无SNI反代` 为 ✓）；两个都失败说明这个域名也该进 `mitm.domains`。
+- `无SNI反代` 一列：`✓` = 走本地解密 + 出站剥离 SNI，`–` = 保持隧道（更快），`未启用` = `--no-mitm` 或关闭了反代。
 
 ---
 
@@ -151,7 +157,7 @@ github.com          140.82.112.3 +5   98ms   42ms     HTTP 200
 | `tongtu autostart on` | 开启开机自启（当前用户；`--elevated` 用最高权限计划任务） |
 | `tongtu autostart off` | 关闭开机自启 |
 | `tongtu autostart status` | 查看开机自启状态 |
-| `tongtu version` | 显示版本号 |
+| `tongtu version` | 显示版本号（版本规则与每次改动见仓库的 `VERSION` 与 `CHANGELOG.md`） |
 
 **`start` 的可选标志**（这些标志挂在根命令上，因此 `tongtu --no-hosts` 与 `tongtu start --no-hosts` 等价）：
 
@@ -218,14 +224,18 @@ dns:
   remote_hosts:                # 远程优选 IP 列表（hosts 格式）
     - https://raw.hellogithub.com/hosts
   static_hosts:                # 静态优选 IP（优先级最高）
-    gist.github.com:     [140.82.112.3, 140.82.113.3, 140.82.114.3]
-    github.com:          [140.82.112.3, 140.82.113.3, 140.82.114.3]
-    steamcommunity.com:  [104.89.103.51, 184.30.89.225]
+    gist.github.com:          [140.82.112.3, 140.82.113.3, 140.82.114.3]
+    github.com:               [140.82.112.3, 140.82.113.3, 140.82.114.3]
+    steamcommunity.com:       [104.89.103.51, 184.30.89.225]
+    www.steamcommunity.com:   [104.89.103.51, 184.30.89.225]
+    help.steamcommunity.com:  [104.89.103.51, 184.30.89.225]
 mitm:
   enabled: true
   auto_cert: true              # 首次启动提示安装本地根证书
   domains:                     # 需要本地解密的域名（支持 "*.example.com"）
     - '*.steamcommunity.com'
+    - store.steampowered.com   # 真 SNI 直连被阻断（一直转圈/断流）
+    - avatars.steamstatic.com  # 头像域：直连被 RST
     - raw.githubusercontent.com
     - gist.github.com
     - github.com
@@ -245,7 +255,10 @@ log:
     example.com: [1.2.3.4, 5.6.7.8]
   ```
 - **不想装根证书**：把 `mitm.enabled` 设为 `false`（或启动加 `--no-mitm`）。此时被 SNI 封锁的
-  `steamcommunity.com`、`github.com` 等将无法访问。
+  `steamcommunity.com`、`store.steampowered.com`、`github.com` 等将无法访问。
+- **要加自己的反代域名**：加进 `mitm.domains`，但请**逐个实测**——只有「真 SNI 被阻断、
+  剥离 SNI 后按 Host 头仍能正常响应」的域名才适合，别用 `*.steampowered.com` 这类通配
+  （`login.steampowered.com` 会被弄坏）。
 - **排查问题**：临时把 `log.level` 设为 `debug`，并把 `file` 设为路径（如 `C:\Users\你\tongtu.log`）。
 
 > 新增的内置默认 `dns.static_hosts` 与 `mitm.domains` 会在加载时**合并**进你已有的配置，不会覆盖你的自定义项。
@@ -309,12 +322,20 @@ Firefox 使用独立证书库，需在「设置 → 隐私与安全 → 证书 �
 
 **Q：执行 `start` 后浏览器还是打不开 GitHub / Steam 社区？**
 1. 确认服务仍在运行：`tongtu status`（或看托盘图标在不在）。
-2. `tongtu test` 看目标域名是否 `HTTP 200`。
+2. `tongtu test <域名>` 看它卡在哪一列（干净解析 / TCP / 直连 / 经代理 / 是否走反代）。
 3. 若是浏览器走了独立代理插件，请关闭它或改为「使用系统代理」。
 
 **Q：`steamcommunity.com` / `github.com` 仍失败？**
 这两个域名靠「无 SNI 反代」，需要根证书。执行 `tongtu cert install`，浏览器（非 Firefox）随后应能访问；
 Firefox 需按 §7 手动导入。
+
+**Q：Steam 商店（`store.steampowered.com`）或社区页面仍打不开？**
+商店页在境内直连会被 SNI 阻断（表现为一直转圈、或只下载了几十 KB 就断），因此它默认就在反代名单里。
+`tongtu test store.steampowered.com` 出现「直连失败、经代理 200、反代 ✓」即为正常。若经代理仍失败，依次检查：
+1. 根证书是否装了（`tongtu cert status`）；
+2. `mitm.enabled` 是否为 `true`（托盘菜单里的「无 SNI 反代」）；
+3. 是否把域名加成了 `*.steampowered.com` —— **不要这样写**：`login.steampowered.com` 剥离 SNI 后握手会直接失败，
+   登录页会被一起弄坏。要加域名请逐个实测。
 
 **Q：curl 报 `CRYPT_E_NO_REVOCATION_CHECK`？**
 这是 schannel 对本地 CA 无吊销点导致，加 `--ssl-no-revoke` 即可；浏览器与 Steam 客户端无此问题。

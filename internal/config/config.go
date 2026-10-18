@@ -90,13 +90,25 @@ func Default() *Config {
 				"gist.github.com":    {"140.82.112.3", "140.82.113.3", "140.82.114.3"},
 				"steamcommunity.com": {"104.89.103.51", "184.30.89.225"},
 				"github.com":         {"140.82.112.3", "140.82.113.3", "140.82.114.3"},
+				// www/help 的干净 DoH 答案实测落在不可达机房（TCP:443 全超时），
+				// 不带兜底就是「反代竞速全部失败 → 15 秒后 502」，与主域同机房 IP 实测可用。
+				"www.steamcommunity.com":  {"104.89.103.51", "184.30.89.225"},
+				"help.steamcommunity.com": {"104.89.103.51", "184.30.89.225"},
 			},
 		},
 		MITM: MITMConfig{
 			Enabled:  true,
 			AutoCert: true,
+			// 只列实测「真 SNI 被阻断、剥离 SNI 后按 Host 头仍能正常响应」的域名。
+			//
+			// 两条必须同时成立：store.steampowered.com 直连实测超时（或只收到十几 KB 就断流），
+			// 反代后 200；avatars.steamstatic.com 直连 RST，反代后正常。
+			// 而 login.steampowered.com 剥离 SNI 后握手直接失败，因此**不能**图省事写
+			// *.steampowered.com——那会把登录页一起拖下水。
 			Domains: []string{
 				"*.steamcommunity.com",
+				"store.steampowered.com",
+				"avatars.steamstatic.com",
 				"raw.githubusercontent.com",
 				"gist.github.com",
 				"github.com",

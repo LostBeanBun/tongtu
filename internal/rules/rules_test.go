@@ -73,3 +73,29 @@ func TestLoadUnknownService(t *testing.T) {
 		t.Fatal("空服务组应报错")
 	}
 }
+
+// TestHostsCoverSteamStoreHosts 提醒：hosts 名单要覆盖到「必须走反代」的主机。
+//
+// 反代域名在 hosts 模式下会写 127.0.0.1（见 app.mitmLocalNamesFor），
+// 名单里少了某个主机，Steam 客户端走 hosts 时就绕不过 SNI 封锁。
+func TestHostsCoverSteamStoreHosts(t *testing.T) {
+	set, err := Load([]string{"steam"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	hosts := make(map[string]bool)
+	for _, h := range set.Hosts() {
+		hosts[h] = true
+	}
+	for _, want := range []string{
+		"store.steampowered.com",  // 商店：直连被 SNI 阻断，走反代
+		"avatars.steamstatic.com", // 头像：直连 RST，走反代
+		"steamcommunity.com",
+		"www.steamcommunity.com",
+		"help.steamcommunity.com",
+	} {
+		if !hosts[want] {
+			t.Errorf("hosts 名单缺少 %s", want)
+		}
+	}
+}
