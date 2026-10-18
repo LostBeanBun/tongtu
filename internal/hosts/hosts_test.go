@@ -43,6 +43,66 @@ func newTestManager(t *testing.T, path string, names []string) *Manager {
 	return New(path, names, res, time.Hour, nil)
 }
 
+// TestApplyLocalHostsIPv6 本地捕捉（反代）主机名在 IPv6 回环监听就绪时要同时写 ::1：
+// 只写 127.0.0.1 时域名自带的 AAAA 仍然生效，IPv6 优先的客户端会绕过本地捕捉。
+func TestApplyLocalHostsIPv6(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hosts")
+	if err := os.WriteFile(path, []byte("原始内容\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := newTestManager(t, path, []string{"steamcommunity.com", "api.steampowered.com"})
+
+	m.SetLocalHosts([]string{"steamcommunity.com"})
+
+	// 未开 IPv6：本地主机名只写 127.0.0.1
+	if _, err := m.Apply(context.Background()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	block := readHosts(t, path)
+	if !strings.Contains(block, "127.0.0.1\tsteamcommunity.com") {
+		t.Fatalf("本地主机名应写 127.0.0.1:\n%s", block)
+	}
+	if strings.Contains(block, "::1\tsteamcommunity.com") {
+		t.Fatalf("未开 IPv6 时不应写 ::1:\n%s", block)
+	}
+
+	// 开启 IPv6：本地主机名同时写 ::1，非本地主机名不受影响
+	m.SetLocalIPv6(true)
+	if _, err := m.Apply(context.Background()); err != nil {
+		t.Fatalf("Apply(IPv6): %v", err)
+	}
+	block = readHosts(t, path)
+	if !strings.Contains(block, "::1\tsteamcommunity.com") {
+		t.Fatalf("IPv6 就绪后应写 ::1:\n%s", block)
+	}
+	if !strings.Contains(block, "127.0.0.1\tsteamcommunity.com") {
+		t.Fatalf("IPv4 条目应保留:\n%s", block)
+	}
+	if strings.Contains(block, "::1\tapi.steampowered.com") {
+		t.Fatalf("非本地主机名不该写 ::1（真实 IP 只覆盖 IPv4）:\n%s", block)
+	}
+	if !strings.Contains(block, "93.184.216.34\tapi.steampowered.com") {
+		t.Fatalf("非本地主机名应写解析到的真实 IP:\n%s", block)
+	}
+	// 关回去要能清掉 ::1
+	m.SetLocalIPv6(false)
+	if _, err := m.Apply(context.Background()); err != nil {
+		t.Fatalf("Apply(back): %v", err)
+	}
+	if strings.Contains(readHosts(t, path), "::1\tsteamcommunity.com") {
+		t.Fatal("关闭 IPv6 后 ::1 条目应被移除")
+	}
+}
+
+func readHosts(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
 func TestApplyAndRemove(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hosts")
 	orig := "# original hosts\n127.0.0.1 localhost\n"

@@ -74,6 +74,10 @@ type Proxy struct {
 	localMu sync.Mutex
 	ln443   net.Listener
 	ln80    net.Listener
+	// ln443v6 / ln80v6 是尽力而为的 `[::1]` 回环监听：IPv6 优先的客户端会先连 ::1。
+	// 绑不上时保持为 nil，hosts 里也就不会写 ::1（见 hosts.Manager.SetLocalIPv6）。
+	ln443v6 net.Listener
+	ln80v6  net.Listener
 }
 
 // LookupFunc 解析主机名到 IP 列表（生产实现为 resolver.Resolver.Lookup）。

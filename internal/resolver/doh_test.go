@@ -3,6 +3,7 @@ package resolver
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -91,6 +92,35 @@ func TestLookupPublicFiltersPrivate(t *testing.T) {
 	// Lookup 本身保留私网结果（直连场景可能合法）
 	if _, err := r.Lookup(context.Background(), "steamcommunity.com"); err != nil {
 		t.Fatalf("Lookup: %v", err)
+	}
+}
+
+// TestPublicV4DropsIPv6AndPrivate 覆盖 hosts 模式取址的口径：只保留公网 IPv4。
+// IPv6 必须被滤掉——写进 hosts 的地址会成为客户端首选，而我们没有干净来源校验 AAAA。
+func TestPublicV4DropsIPv6AndPrivate(t *testing.T) {
+	ips := []net.IP{
+		net.ParseIP("140.82.112.3"),        // 公网 v4：保留
+		net.ParseIP("::ffff:140.82.113.3"), // 4-in-6：压成 v4 保留
+		net.ParseIP("2606:50c0:8002::154"), // 纯 v6：滤掉
+		net.ParseIP("192.168.1.10"),        // 私网：滤掉
+		net.ParseIP("127.0.0.1"),           // 回环：滤掉
+		net.ParseIP("::1"),                 // v6 回环：滤掉
+		net.ParseIP("0.0.0.0"),             // 未指定：滤掉
+	}
+	got := publicV4(ips)
+	if len(got) != 2 {
+		t.Fatalf("期望保留 2 个公网 IPv4，实际 %d: %v", len(got), got)
+	}
+	if got[0].String() != "140.82.112.3" || got[1].String() != "140.82.113.3" {
+		t.Fatalf("保留结果不对: %v", got)
+	}
+	for _, ip := range got {
+		if ip.To4() == nil {
+			t.Fatalf("不应保留 IPv6: %v", ip)
+		}
+	}
+	if out := publicV4([]net.IP{net.ParseIP("2606:50c0:8002::154")}); len(out) != 0 {
+		t.Fatalf("全 v6 输入应返回空: %v", out)
 	}
 }
 

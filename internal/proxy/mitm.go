@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -320,9 +321,18 @@ func (p *Proxy) mitmCandidates(ctx context.Context, host string) []net.IP {
 			continue
 		}
 		seen[key] = true
-		out = append(out, ip.To4())
+		out = append(out, normalizeCandidate(ip))
 	}
 	return out
+}
+
+// normalizeCandidate 把 4-in-6 形式的地址压成 IPv4，其余（真正的 IPv6）原样保留。
+// 注意不能直接写 ip.To4()：对 IPv6 它返回 nil，会把候选变成空地址。
+func normalizeCandidate(ip net.IP) net.IP {
+	if v4 := ip.To4(); v4 != nil {
+		return v4
+	}
+	return ip
 }
 
 const goodTTL = 10 * time.Minute
@@ -351,6 +361,9 @@ func (p *Proxy) forgetGood(host string) {
 
 // ListenLocal443 绑定 127.0.0.1:443：hosts 模式下让不走系统代理的程序
 // （如 Steam 客户端）直连本地完成 MITM。绑定失败返回错误（调用方降级为真实 IP）。
+//
+// 同时尽力而为地再绑一份 [::1]:443：域名自己的 AAAA 记录会让 IPv6 优先的客户端
+// 绕过本地捕捉（详见 hosts.Manager.SetLocalIPv6）。
 func (p *Proxy) ListenLocal443() error {
 	if !p.MITMEnabled() {
 		return fmt.Errorf("MITM 未启用")
@@ -363,6 +376,7 @@ func (p *Proxy) ListenLocal443() error {
 	p.ln443 = ln
 	p.localMu.Unlock()
 	go p.acceptLoop(ln, true)
+	p.listenLocalIPv6(443, true)
 	return nil
 }
 
@@ -376,20 +390,50 @@ func (p *Proxy) ListenLocal80() error {
 	p.ln80 = ln
 	p.localMu.Unlock()
 	go p.acceptLoop(ln, false)
+	p.listenLocalIPv6(80, false)
 	return nil
+}
+
+// listenLocalIPv6 尽力而为地绑定 [::1]:port，返回是否成功。
+// 失败只记 Debug：这只影响「IPv6 优先的客户端是否被本地捕捉」，不影响 IPv4 路径。
+func (p *Proxy) listenLocalIPv6(port int, isTLS bool) bool {
+	addr := net.JoinHostPort("::1", strconv.Itoa(port))
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		p.log.Debug("本地 IPv6 回环监听不可用（hosts 只写 IPv4）", "addr", addr, "err", err)
+		return false
+	}
+	p.localMu.Lock()
+	if isTLS {
+		p.ln443v6 = ln
+	} else {
+		p.ln80v6 = ln
+	}
+	p.localMu.Unlock()
+	go p.acceptLoop(ln, isTLS)
+	p.log.Debug("本地 IPv6 回环监听已就绪", "addr", addr)
+	return true
+}
+
+// LocalIPv6Up 报告 [::1]:443 的本地监听是否就绪（决定 hosts 里是否写 ::1）。
+func (p *Proxy) LocalIPv6Up() bool {
+	p.localMu.Lock()
+	defer p.localMu.Unlock()
+	return p.ln443v6 != nil
 }
 
 // CloseLocal 关闭本地直连监听。
 func (p *Proxy) CloseLocal() {
 	p.localMu.Lock()
 	ln443, ln80 := p.ln443, p.ln80
+	ln443v6, ln80v6 := p.ln443v6, p.ln80v6
 	p.ln443, p.ln80 = nil, nil
+	p.ln443v6, p.ln80v6 = nil, nil
 	p.localMu.Unlock()
-	if ln443 != nil {
-		_ = ln443.Close()
-	}
-	if ln80 != nil {
-		_ = ln80.Close()
+	for _, ln := range []net.Listener{ln443, ln80, ln443v6, ln80v6} {
+		if ln != nil {
+			_ = ln.Close()
+		}
 	}
 }
 

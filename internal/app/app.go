@@ -244,6 +244,7 @@ func (a *App) Start() error {
 
 // startLocalMITM 启动 hosts 直连用的本地 MITM 监听（需持有 a.mu）。
 // :443 绑定成功后，反代域名在 hosts 中写 127.0.0.1；失败则降级为真实 IP。
+// [::1] 也尽力绑一份：域名自带的 AAAA 会让 IPv6 优先的客户端绕过本地捕捉。
 func (a *App) startLocalMITM() {
 	if a.mitmCa == nil || a.mitmLocal443 {
 		return
@@ -254,12 +255,15 @@ func (a *App) startLocalMITM() {
 	}
 	a.mitmLocal443 = true
 	a.hm.SetLocalHosts(a.mitmLocalNames)
+	// 只有在 [::1]:443 确实绑上时才让 hosts 写 ::1（否则会让客户端先撞一次拒连）
+	a.hm.SetLocalIPv6(a.px.LocalIPv6Up())
 	if err := a.px.ListenLocal80(); err != nil {
 		a.log.Debug("本地 :80 监听失败（HTTP 直连转发不可用，不影响 HTTPS）", "err", err)
 	} else {
 		a.mitmLocal80 = true
 	}
-	a.log.Info("hosts 直连 MITM 已就绪", "domains", len(a.mitmLocalNames))
+	a.log.Info("hosts 直连 MITM 已就绪",
+		"domains", len(a.mitmLocalNames), "ipv6", a.px.LocalIPv6Up())
 }
 
 // stopLocalMITM 关闭本地直连监听（需持有 a.mu）。
@@ -270,6 +274,7 @@ func (a *App) stopLocalMITM() {
 	a.px.CloseLocal()
 	a.mitmLocal443, a.mitmLocal80 = false, false
 	a.hm.SetLocalHosts(nil) // 还原为真实 IP 解析
+	a.hm.SetLocalIPv6(false)
 }
 
 // Shutdown 优雅停止：还原 hosts、还原系统代理、关闭监听。幂等。
@@ -454,6 +459,7 @@ func (a *App) SetServices(ids []string) error {
 	if a.mitmCa != nil {
 		a.mitmLocalNames = a.mitmLocalNamesFor(rs)
 		a.hm.SetLocalHosts(a.mitmLocalNames)
+		a.hm.SetLocalIPv6(a.mitmLocal443 && a.px.LocalIPv6Up())
 	}
 	if a.hostsOn {
 		a.applyHostsLocked("切换加速服务")

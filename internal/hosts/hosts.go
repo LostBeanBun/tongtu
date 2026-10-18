@@ -42,7 +42,8 @@ type Manager struct {
 	// retryInterval 是刷新失败后的重试间隔（正常时用 interval）。
 	retryInterval time.Duration
 
-	local map[string]bool // 这些主机名强制写 127.0.0.1（本地 MITM 直连）
+	local   map[string]bool // 这些主机名强制写 127.0.0.1（本地 MITM 直连）
+	localV6 bool            // 本地 IPv6 回环监听就绪时，本地主机名同时写 ::1
 
 	mu sync.Mutex
 }
@@ -69,7 +70,7 @@ func New(path string, names []string, res *resolver.Resolver, interval time.Dura
 	}
 }
 
-// SetLocalHosts 设置强制指向 127.0.0.1 的主机名（本地 MITM 直连场景）。
+// SetLocalHosts 设置强制指向本机回环的主机名（本地 MITM 直连场景）。
 func (m *Manager) SetLocalHosts(names []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -79,6 +80,27 @@ func (m *Manager) SetLocalHosts(names []string) {
 			m.local[n] = true
 		}
 	}
+}
+
+// SetLocalIPv6 决定本地捕捉的主机名是否同时写 `::1`。
+//
+// 为什么要写：只写 127.0.0.1 时，域名自己的 AAAA 记录仍然生效，而客户端
+// （Windows/Chromium 的 Happy Eyeballs）**优先 IPv6** —— 于是它连的是真实 IPv6 边缘，
+// 既不经过本地 :443 捕捉、又可能正好撞上 SNI 封锁，表现为「hosts 模式对这个域名不生效」。
+// 写入 `::1` 会把该域名的 AAAA 也指向本地，前提是本地确实监听了 `[::1]`（否则不要写：
+// 一个没人监听的 ::1 只会让客户端先失败再回退）。见 app.startLocalMITM。
+func (m *Manager) SetLocalIPv6(on bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.localV6 = on
+}
+
+// localIPs 返回本地捕捉主机名要写入的地址列表。
+func localIPs(v6 bool) []net.IP {
+	if v6 {
+		return []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback}
+	}
+	return []net.IP{net.IPv4(127, 0, 0, 1)}
 }
 
 // SetHosts 替换需要覆盖的主机名列表（托盘切换加速服务组时调用）。
@@ -109,7 +131,7 @@ func (m *Manager) Apply(ctx context.Context) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// 本地 MITM 主机不解析，直接指向 127.0.0.1
+	// 本地 MITM 主机不解析，直接指向本机回环（IPv6 回环监听就绪时同时写 ::1）
 	var resolveNames []string
 	for _, n := range m.names {
 		if !m.local[n] {
@@ -123,7 +145,7 @@ func (m *Manager) Apply(ctx context.Context) (bool, error) {
 		}
 	}
 	for n := range m.local {
-		ips[n] = []net.IP{net.IPv4(127, 0, 0, 1)}
+		ips[n] = localIPs(m.localV6)
 	}
 	if len(ips) == 0 {
 		return false, fmt.Errorf("hosts 名单全部解析失败，已保持现有内容不变")

@@ -12,6 +12,12 @@
 `bump.ps1` 会同时改写 `VERSION` 与 `cmd/tongtu/version.go`（`version_test.go` 会检查两者没有漂移），
 `build.ps1` 会读取 `VERSION` 并用 `-ldflags -X main.Version=...` 写进 exe。
 
+### Git 标签约定
+
+**只为重要更新版本打 tag**，即功能成型、对外发布、配置或命令行为有里程碑变化的版本（如 `v0.1.0`、`v1.0.0`）；
+`0.0.x` 的日常迭代**只提交推送、不打 tag**。打标签用 annotated 形式：`git tag -a vX.Y.Z -m "通途 vX.Y.Z"`。
+（仓库里已存在的 `v0.0.3` / `v0.0.4` 是早期「每版都打」留下的，保留即可，新的迭代不再这样。）
+
 ## 版本阶段
 
 | 阶段 | 规则 | 承诺 |
@@ -23,6 +29,43 @@
 ## [未发布]
 
 （无）
+
+## [0.0.5] - 2026-10-18
+
+### 修复
+
+- **hosts 模式不再被「IPv6 优先」绕过**（`internal/proxy`、`internal/hosts`、`internal/app`）：
+  之前反代域名在 hosts 里只写 `127.0.0.1`，而**域名自己的 AAAA 记录仍然生效**——Windows / Chromium 走
+  Happy Eyeballs 时优先 IPv6，于是客户端连的是真实 IPv6 边缘：既不经过本地 `:443` 接管，又可能正好撞上
+  SNI 封锁（`raw.githubusercontent.com` 就是这种域名）。现在本地监听除了 `127.0.0.1:443/:80` 还会尽力绑一份
+  `[::1]:443/:80`，绑上时反代域名在 hosts 里**同时写 `::1`**，把该域名的 AAAA 也指向本地；
+  绑不上（本机没有 IPv6 回环）就退化为只写 IPv4，行为与之前完全一致。
+- **候选 IP 归一化不再把 IPv6 变成空地址**（`internal/proxy`）：`mitmCandidates` 里直接写了 `ip.To4()`，
+  而它对 IPv6 返回 `nil`——一旦有 IPv6 候选就会去拨 `"<nil>:443"`。现在只把 4-in-6 压成 IPv4，
+  真正的 IPv6 原样保留。
+
+### 变更
+
+- **DoH 全部失败时的系统解析兜底放宽到 IPv4+IPv6**（`internal/resolver`）：`Lookup` 的回退从 `ip4` 改为 `ip`，
+  只有 AAAA 记录的域名在系统代理路径上也能拿到可用地址走 IPv6 直连（此前会直接报解析失败）。
+- **hosts 模式的「指向优选 IP」条目仍然只写 IPv4**（`LookupPublic` 现在显式滤掉 IPv6）：写进 hosts 的地址
+  会成为客户端**首选**（IPv6 优先），而我们没有干净来源校验 AAAA（DoH 查询只取 A 记录），写错比不写更糟。
+
+### 测试
+
+- `internal/hosts`：`TestApplyLocalHostsIPv6`（开 / 关 IPv6 时本地主机名的写入与清理，非本地主机名不受影响）。
+- `internal/proxy`：`TestNormalizeCandidateKeepsIPv6`、`TestListenLocalIPv6MarksFlag`。
+- `internal/resolver`：`TestPublicV4DropsIPv6AndPrivate`。
+
+### 验证记录（本机实测）
+
+- 非管理员启动（`hosts: true`，写入 hosts 预期被拒），本地监听起在了四个地址上：
+  `127.0.0.1:80`、`127.0.0.1:443`、`[::1]:80`、`[::1]:443`；日志 `hosts 直连 MITM 已就绪 domains=8 ipv6=true`。
+- 从 PowerShell 对 **`[::1]:443`** 发起真实 TLS 握手（`SslStream.AuthenticateAsClient("steamcommunity.com")`）：
+  握手成功（TLS 1.3），证书 `Subject=CN=steamcommunity.com`、`Issuer=CN=Tongtu Local Root CA`；同一条连接上发
+  `GET /` 得到 `HTTP/1.1 200 OK`（出站走了无 SNI 反代，日志 `预热完成（无 SNI 反代优选）`）。
+  即「IPv6 回环 → 本地解密 → 无 SNI 出站」整条链路可用。
+- 收尾：`stop` 后 0 个 tongtu 进程、0 个 443/80 监听、无 `sysproxy.json` / `guard.json`，注册表回到原值。
 
 ## [0.0.4] - 2026-10-18
 

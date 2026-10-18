@@ -11,7 +11,7 @@
 #   - 0.x.y        功能成型但未定稿：新增功能抬 minor，修复抬 patch
 #   - 1.0.0        可发布：配置格式与命令行为承诺向后兼容
 #
-# 只改版本号不会提交任何东西；改完记得补 CHANGELOG.md 与 git tag。
+# 只改版本号不会提交任何东西；改完记得补 CHANGELOG.md 并提交推送（tag 只给重要版本打）。
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string]$Target
@@ -57,4 +57,5 @@ Write-Host ""
 Write-Host "别忘了：" -ForegroundColor Yellow
 Write-Host "  1. 在 CHANGELOG.md 顶部补这一版的条目"
 Write-Host "  2. .\build.ps1  重新构建（会自动读取 VERSION）"
-Write-Host "  3. git add -A && git commit -m `"版本 $new`" && git tag v$new"
+Write-Host "  3. git add -A && git commit -m `"版本 $new`" && git push"
+Write-Host "     （v0.0.x 日常迭代不打 tag；重要版本再加 `"git tag -a v$new -m ...`" 并推送标签）" -ForegroundColor Gray

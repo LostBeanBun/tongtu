@@ -153,6 +153,7 @@ func (r *Resolver) mergeRemote(host string, out []net.IP) []net.IP {
 }
 
 // Lookup 查询 host 的 A 记录（IPv4），带缓存；DoH 全部失败时回退系统 DNS。
+// 回退可以用到 IPv6 地址（只有 AAAA 的域名在直连路径上仍然可用）。
 func (r *Resolver) Lookup(ctx context.Context, host string) ([]net.IP, error) {
 	host = normalizeHost(host)
 	if host == "" {
@@ -178,8 +179,9 @@ func (r *Resolver) Lookup(ctx context.Context, host string) ([]net.IP, error) {
 		return ips, nil
 	}
 
-	// 全部 DoH 端点失败：回退系统 DNS，保证可用性优先（回退结果不写缓存）
-	ips, err := net.DefaultResolver.LookupIP(ctx, "ip4", host)
+	// 全部 DoH 端点失败：回退系统 DNS，保证可用性优先（回退结果不写缓存）。
+	// 网络参数用 "ip"（IPv4+IPv6）：只有 AAAA 的域名也能拿到可用地址走 IPv6 直连。
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
 	if err != nil {
 		return nil, fmt.Errorf("DoH 解析失败且系统 DNS 失败 (%s): %w", strings.Join(errs, "; "), err)
 	}
@@ -187,23 +189,37 @@ func (r *Resolver) Lookup(ctx context.Context, host string) ([]net.IP, error) {
 	return ips, nil
 }
 
-// LookupPublic 与 Lookup 相同，但额外过滤私网地址（供 hosts 模式使用）。
+// LookupPublic 与 Lookup 相同，但只保留公网 IPv4（供 hosts 模式使用）。
+//
+// 为什么把 IPv6 也滤掉：写进 hosts 的地址会成为客户端的**首选**（IPv6 优先），
+// 而我们没有干净来源可以校验 AAAA（DoH 查询只取 A 记录）；写错一个不可达/被污染的
+// 地址比不写更糟。反代域名走另一条路——那里写的是本机回环 `::1`（见 hosts.SetLocalIPv6）。
 func (r *Resolver) LookupPublic(ctx context.Context, host string) ([]net.IP, error) {
 	ips, err := r.Lookup(ctx, host)
 	if err != nil {
 		return nil, err
 	}
+	out := publicV4(ips)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%s 未解析到公网 IPv4 地址", host)
+	}
+	return out, nil
+}
+
+// publicV4 只保留公网 IPv4：滤掉 IPv6（含 4-in-6）、私网、回环与未指定地址。
+func publicV4(ips []net.IP) []net.IP {
 	out := make([]net.IP, 0, len(ips))
 	for _, ip := range ips {
+		v4 := ip.To4()
+		if v4 == nil {
+			continue
+		}
 		if ip.IsPrivate() || ip.IsLoopback() || ip.IsUnspecified() {
 			continue
 		}
-		out = append(out, ip)
+		out = append(out, v4)
 	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("%s 未解析到公网地址", host)
-	}
-	return out, nil
+	return out
 }
 
 // LookupAll 并查全部 DoH 端点并合并去重，返回干净候选 IP（命中缓存时直接返回）。

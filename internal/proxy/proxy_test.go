@@ -181,6 +181,42 @@ func TestConnectDirectSkipsLookup(t *testing.T) {
 	}
 }
 
+// TestNormalizeCandidateKeepsIPv6 候选 IP 归一化不能把 IPv6 变成空地址。
+// 之前这里直接写 ip.To4()，而它对 IPv6 返回 nil——一旦有 IPv6 候选就会拨号到 "<nil>"。
+func TestNormalizeCandidateKeepsIPv6(t *testing.T) {
+	v4 := normalizeCandidate(net.ParseIP("140.82.112.3"))
+	if v4.To4() == nil || v4.String() != "140.82.112.3" {
+		t.Fatalf("IPv4 应原样保留: %v", v4)
+	}
+	mapped := normalizeCandidate(net.ParseIP("::ffff:140.82.113.3"))
+	if mapped.To4() == nil || mapped.String() != "140.82.113.3" {
+		t.Fatalf("4-in-6 应压成 IPv4: %v", mapped)
+	}
+	v6 := normalizeCandidate(net.ParseIP("2606:50c0:8002::154"))
+	if v6 == nil || v6.To4() != nil || v6.String() != "2606:50c0:8002::154" {
+		t.Fatalf("IPv6 应保留（不能变成 nil）: %v", v6)
+	}
+}
+
+// TestListenLocalIPv6MarksFlag IPv6 回环监听就绪后 LocalIPv6Up 为真——它决定 hosts 里是否写 ::1。
+// 用端口 0 让系统挑空闲端口，避免与真实的 :443/:80 冲突。
+func TestListenLocalIPv6MarksFlag(t *testing.T) {
+	p := NewWithLookup(mustRules(t), failLookup(t, "本测试不应解析"), discardLog())
+	if p.LocalIPv6Up() {
+		t.Fatal("初始不应报告 IPv6 监听就绪")
+	}
+	if !p.listenLocalIPv6(0, true) {
+		t.Skip("本机没有 IPv6 回环，跳过")
+	}
+	if !p.LocalIPv6Up() {
+		t.Fatal("监听成功后应报告就绪")
+	}
+	p.CloseLocal()
+	if p.LocalIPv6Up() {
+		t.Fatal("关闭后不应再报告就绪")
+	}
+}
+
 // TestMITMStripsSNI 验证无 SNI 反代：客户端用真实 SNI 发起 CONNECT，
 // 本地解密后由本代理转发，但出站 TLS 握手不携带 SNI。
 func TestMITMStripsSNI(t *testing.T) {
