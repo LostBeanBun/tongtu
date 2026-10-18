@@ -21,7 +21,10 @@ func SavedAddr() (string, bool) { return "", false }
 func Enable(addr string) (*Values, error) { return nil, ErrUnsupported }
 
 // Disable 在非 Windows 平台返回 ErrUnsupported。
-func Disable(saved *Values) error { return ErrUnsupported }
+func Disable(saved *Values) (bool, error) { return false, ErrUnsupported }
 
 // Active 始终返回 false。
 func Active() bool { return false }
+
+// Held 在非 Windows 平台始终报告「未持有」。
+func Held(addr string) (bool, error) { return false, nil }

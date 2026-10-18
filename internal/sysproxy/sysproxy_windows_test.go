@@ -52,3 +52,29 @@ func TestSplitBypass(t *testing.T) {
 		t.Errorf("拆分结果错误: %#v", got)
 	}
 }
+
+// TestHeldIn 只有「代理开着且地址就是接管地址」才算仍由通途持有。
+func TestHeldIn(t *testing.T) {
+	on, off := uint(1), uint(0)
+	ours, theirs := "127.0.0.1:19180", "127.0.0.1:7890"
+	cases := []struct {
+		name string
+		v    *Values
+		want bool
+	}{
+		{"仍由通途持有", &Values{ProxyEnable: &on, ProxyServer: &ours}, true},
+		{"别的程序接管", &Values{ProxyEnable: &on, ProxyServer: &theirs}, false},
+		{"用户关掉了代理", &Values{ProxyEnable: &off, ProxyServer: &ours}, false},
+		{"地址被删", &Values{ProxyEnable: &on}, false},
+		{"开关被删", &Values{ProxyServer: &ours}, false},
+		{"空值", nil, false},
+	}
+	for _, c := range cases {
+		if got := heldIn(c.v, ours); got != c.want {
+			t.Errorf("%s: heldIn = %v, want %v", c.name, got, c.want)
+		}
+	}
+	if heldIn(&Values{ProxyEnable: &on, ProxyServer: &ours}, "") {
+		t.Error("接管地址为空时不应算作持有")
+	}
+}

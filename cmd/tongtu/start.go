@@ -48,9 +48,21 @@ var startCmd = &cobra.Command{
 			return err
 		}
 
-		// 单实例：控制端口可达即视为已有实例
-		if control.Running(cfg.Control) {
+		// 单实例：控制端口上确实跑着通途就退出。
+		// 端口被「别的程序」占用时不该误报成「通途已在运行」——直接换一个空闲端口继续，
+		// 并把新地址写回配置，使 tongtu status / stop 之后仍能连上本实例。
+		occupied, foreign := control.ProbeControl(cfg.Control)
+		if occupied && !foreign {
 			return fmt.Errorf("tongtu 已在运行（如需重启请先执行 tongtu stop）")
+		}
+		if foreign {
+			if addr, ok := control.FreeLoopbackAddr(cfg.Control); ok {
+				log.Warn("控制端口已被其他程序占用，改用空闲端口", "配置", cfg.Control, "实际", addr)
+				cfg.Control = addr
+				if err := config.Save(configPath(), cfg); err != nil {
+					log.Warn("写回控制端口配置失败（tongtu status / stop 可能连不上本实例）", "err", err)
+				}
+			}
 		}
 
 		// 崩溃防护第一步：先占住本轮监护令牌。这样上一轮可能还没退出的监护进程会发现
@@ -382,6 +394,15 @@ func windowStatusOf(a *app.App, cfg *config.Config) windowStatus {
 	case stateOff:
 		state = "已停止"
 	}
+	detail := []string{
+		"服务组 " + strings.Join(st.Services, "、"),
+		fmt.Sprintf("活跃隧道 %d", st.Proxy.Active),
+		fmt.Sprintf("↓%s ↑%s", humanBytes(st.Proxy.BytesIn), humanBytes(st.Proxy.BytesOut)),
+	}
+	if st.ProxyNote != "" {
+		// 运行期被别的程序顶掉了系统代理：明说出来，别让人以为还好好的
+		detail = append(detail, "系统代理"+st.ProxyNote)
+	}
 	return windowStatus{
 		Title: "通途 Tongtu " + Version,
 		State: state,
@@ -391,11 +412,7 @@ func windowStatusOf(a *app.App, cfg *config.Config) windowStatus {
 			{Label: "Hosts", On: st.Hosts},
 			{Label: "无SNI反代", On: st.MITM},
 		},
-		Detail: []string{
-			"服务组 " + strings.Join(st.Services, "、"),
-			fmt.Sprintf("活跃隧道 %d", st.Proxy.Active),
-			fmt.Sprintf("↓%s ↑%s", humanBytes(st.Proxy.BytesIn), humanBytes(st.Proxy.BytesOut)),
-		},
+		Detail: detail,
 	}
 }
 

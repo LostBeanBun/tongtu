@@ -39,6 +39,9 @@ type Manager struct {
 	interval time.Duration
 	log      *slog.Logger
 
+	// retryInterval 是刷新失败后的重试间隔（正常时用 interval）。
+	retryInterval time.Duration
+
 	local map[string]bool // 这些主机名强制写 127.0.0.1（本地 MITM 直连）
 
 	mu sync.Mutex
@@ -53,15 +56,16 @@ func New(path string, names []string, res *resolver.Resolver, interval time.Dura
 		log = slog.Default()
 	}
 	if interval <= 0 {
-		interval = 30 * time.Minute
+		interval = 10 * time.Minute
 	}
 	return &Manager{
-		path:     path,
-		names:    append([]string(nil), names...),
-		res:      res,
-		interval: interval,
-		log:      log,
-		local:    make(map[string]bool),
+		path:          path,
+		names:         append([]string(nil), names...),
+		res:           res,
+		interval:      interval,
+		retryInterval: time.Minute,
+		log:           log,
+		local:         make(map[string]bool),
 	}
 }
 
@@ -204,20 +208,33 @@ func (m *Manager) flushSystemDNS() {
 }
 
 // Run 周期性刷新托管块，直到 ctx 结束。
+//
+// 正常节奏用配置的刷新周期；一旦这一轮失败（DoH 超时、hosts 被占用等）就改用短周期重试，
+// 成功后回到正常节奏——不然一次失败会让托管块陈旧整整一个周期。
 func (m *Manager) Run(ctx context.Context) {
-	if _, err := m.Apply(ctx); err != nil {
-		m.log.Error("hosts 初始写入失败", "err", err)
+	retryInterval := m.retryInterval
+	if retryInterval <= 0 {
+		retryInterval = time.Minute
 	}
-	ticker := time.NewTicker(m.interval)
-	defer ticker.Stop()
+	wait := m.interval
+	if _, err := m.Apply(ctx); err != nil && ctx.Err() == nil {
+		m.log.Error("hosts 初始写入失败，稍后重试", "err", err, "重试间隔", retryInterval)
+		wait = retryInterval
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			if _, err := m.Apply(ctx); err != nil && ctx.Err() == nil {
-				m.log.Error("hosts 刷新失败", "err", err)
+				m.log.Error("hosts 刷新失败，稍后重试", "err", err, "重试间隔", retryInterval)
+				wait = retryInterval
+			} else {
+				wait = m.interval
 			}
+			timer.Reset(wait)
 		}
 	}
 }

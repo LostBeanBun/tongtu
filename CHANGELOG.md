@@ -24,6 +24,56 @@
 
 （无）
 
+## [0.0.4] - 2026-10-18
+
+### 新增
+
+- **系统代理被外部接管时如实上报，且退出不覆盖对方的设置**（`internal/sysproxy`、`internal/app`）：
+  - 新增 `sysproxy.Held(addr)`；`Status.SystemProxy` 现在表示「**实际仍由本实例持有**」（注册表地址还是我们写入的、
+    且代理是开启状态），新增 `Status.ProxyNote` 说明原因。`tongtu status` 显示
+    「系统代理: 关（已被其他程序接管）」，窗口状态条 / 托盘 tooltip 同源同步。
+  - `sysproxy.Disable` 在还原前先确认「是否还由通途持有」：已被 Clash / v2rayN 之类顶掉、或用户手动关掉了代理时
+    **不还原**（返回 `takenOver`），避免把对方的设置覆盖成我们接管前的旧值；退出时在日志里明确说明。
+    崩溃恢复（`RecoverStale`）同样走这条判断。
+  - 被顶掉后想拿回来：托盘「系统代理」开关点一下就重新接管（以当前值作为新的"原值"），
+    不会出现「菜单显示已关、点了却没反应」（`SetMode` 现在比较的是实际持有状态）。
+- **端口被占用自动换口**（`internal/control`、`internal/app`、`cmd/tongtu`）：
+  - `listen` 被占用 → 改用同主机的空闲端口，系统代理指向实际端口，启动摘要与 `tongtu status` 显示实际端口。
+  - `control` 被**别的程序**占用 → 换空闲端口并**写回 `config.yaml`**（否则 `status` / `stop` 连不上本实例）。
+  - 新增 `control.ProbeControl`：控制端口上的「占用」不再等同于「tongtu 已在运行」——只有当
+    端口被一个形状不对的 HTTP 服务占住时才判定为「别的程序」；被非 HTTP 程序占住时保守按通途处理
+    （宁可误报也不误起第二个实例）。`Running` 保持原样（它还被用来探测**代理端口**的存活，
+    那里没有 HTTP 控制 API，改成 HTTP 探测会打到自己身上）。
+
+### 变更
+
+- **hosts 默认刷新周期 30 分钟 → 10 分钟**（`internal/config`、`internal/hosts`），且**刷新失败后改为每分钟重试**，
+  成功再回到正常周期——一次 DoH 抖动不再让托管块陈旧一整个周期。已有 `config.yaml` 里的
+  `hosts_refresh_minutes` 保持不变（只影响新配置），想改小请手工编辑。
+
+### 测试
+
+- `internal/sysproxy`：`TestHeldIn`（接管地址 / 别的程序 / 用户关掉 / 字段缺失 / 空值）。
+- `internal/control`：`TestProbeControlNoListener`、`TestProbeControlForeignHTTP`、`TestProbeControlTongtu`、
+  `TestProbeControlNonHTTP`、`TestFreeLoopbackAddr`、`TestFreeLoopbackAddrBadInput`。
+- `internal/hosts`：`TestRunRetriesQuicklyAfterFailure`（失败后短周期重试，且随 ctx 退出）。
+- `internal/proxy`：修掉 `TestWarmHonorsCancel` 的偶发失败——`select` 在两个 case 都就绪时随机挑，
+  已取消的预热可能仍派发一个 goroutine 出去；`Warm`/`warmOne` 现在先看 `ctx.Err()`，取消后不发任何请求。
+
+### 验证记录（本机实测）
+
+- 占用 `127.0.0.1:19180`（裸监听）与 `127.0.0.1:19181`（另一个程序的 HTTP 服务）后启动：
+  - 日志：`控制端口已被其他程序占用，改用空闲端口 配置=127.0.0.1:19181 实际=127.0.0.1:65410`、
+    `代理端口被占用，已改用空闲端口 配置=127.0.0.1:19180 实际=127.0.0.1:65411`；启动**没有**失败，
+    也没有误报「tongtu 已在运行」。
+  - `config.yaml` 里 `control` 被写回 `127.0.0.1:65410`；`tongtu status` 显示 `代理监听: 127.0.0.1:65411`、
+    `系统代理: 开`（即系统代理指向实际端口），`stop` 照常找得到实例。
+- 运行期用 `reg add` 把 `ProxyServer` 改成 `127.0.0.1:7890`（模拟别的工具接管）：
+  - `tongtu status` → `系统代理: 关（已被其他程序接管）`；
+  - `tongtu stop` → 日志 `系统代理已被其他程序接管，退出时未还原（避免覆盖对方的设置）`，
+    注册表仍为 `ProxyEnable=1 ProxyServer=127.0.0.1:7890`（**未被**还原成接管前的值）；
+  - 收尾：无残留进程、无 `sysproxy.json` / `guard.json`，注册表恢复原值。
+
 ## [0.0.3] - 2026-10-18
 
 ### 修复

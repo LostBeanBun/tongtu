@@ -22,7 +22,7 @@ var statusCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if !control.Running(cfg.Control) {
+		if !control.IsTongtuControl(cfg.Control) {
 			return fmt.Errorf("tongtu 未在运行")
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -51,7 +51,11 @@ func printStatus(st *app.Status) {
 	}
 	fmt.Printf("状态:     %s\n", state)
 	fmt.Printf("代理监听: %s\n", st.Listen)
-	fmt.Printf("系统代理: %s    Hosts: %s\n", onOff(st.SystemProxy), onOff(st.Hosts))
+	sysTag := onOff(st.SystemProxy)
+	if st.ProxyNote != "" {
+		sysTag += "（" + st.ProxyNote + "）"
+	}
+	fmt.Printf("系统代理: %s    Hosts: %s\n", sysTag, onOff(st.Hosts))
 	mitmTag := onOff(st.MITM)
 	switch {
 	case st.MITM && !st.MITMLocal:

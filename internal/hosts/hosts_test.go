@@ -3,12 +3,14 @@ package hosts
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -180,5 +182,76 @@ func TestWriteHostsFallsBack(t *testing.T) {
 	}
 	if string(got) != "兜底内容\n" {
 		t.Errorf("兜底写入内容不符: %q", got)
+	}
+}
+
+// countHandler 记录日志条数，用于观察 Run 的重试节奏。
+type countHandler struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (h *countHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *countHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.msgs = append(h.msgs, r.Message)
+	return nil
+}
+
+func (h *countHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *countHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *countHandler) count(sub string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, m := range h.msgs {
+		if strings.Contains(m, sub) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestRunRetriesQuicklyAfterFailure 刷新失败时要用短周期重试，而不是等满一个刷新周期——
+// 否则一次 DoH 抖动就会让托管块陈旧几十分钟（用户表现为「hosts 模式忽然不好使了」）。
+func TestRunRetriesQuicklyAfterFailure(t *testing.T) {
+	// 用一个目录当 hosts 路径：Apply 必然失败，且每次都是新失败
+	path := filepath.Join(t.TempDir(), "as-dir")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 端点指向一个没人监听的端口：解析也一定失败，不让测试触网
+	res := resolver.New(resolver.Config{
+		Endpoints: []string{"http://127.0.0.1:1/dns-query"},
+		Timeout:   100 * time.Millisecond,
+		CacheMin:  time.Second,
+		CacheMax:  time.Minute,
+	}, nil)
+	h := &countHandler{}
+	m := New(path, []string{"a.com"}, res, time.Hour, slog.New(h))
+	m.retryInterval = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		m.Run(ctx)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && h.count("稍后重试") < 3 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run 未随 ctx 取消而退出")
+	}
+	if got := h.count("稍后重试"); got < 3 {
+		t.Fatalf("失败后应快速重试（2 秒内至少 3 次），实际 %d 次", got)
 	}
 }

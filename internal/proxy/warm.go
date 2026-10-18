@@ -32,6 +32,11 @@ func (p *Proxy) Warm(ctx context.Context, hosts []string, workers int) {
 		if h == "" {
 			continue
 		}
+		// 先看一次 ctx：select 在「两个 case 都就绪」时是随机挑的，
+		// 已取消的预热不该因为 sem 恰好有空位而漏放一个 goroutine 出去。
+		if ctx.Err() != nil {
+			return
+		}
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
@@ -49,6 +54,9 @@ func (p *Proxy) Warm(ctx context.Context, hosts []string, workers int) {
 
 // warmOne 预热单个主机名。整体超时 15 秒，避免个别坏候选拖住整个预热。
 func (p *Proxy) warmOne(ctx context.Context, host string) {
+	if ctx.Err() != nil {
+		return // 预热期间服务已经在退出：不发任何请求
+	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 

@@ -147,26 +147,65 @@ func Enable(addr string) (*Values, error) {
 
 // Disable 恢复系统代理。saved 为 nil 时读取状态文件（用于崩溃恢复），
 // 恢复成功后删除状态文件。
-func Disable(saved *Values) error {
+//
+// 还原前先确认「系统代理仍由通途持有」（注册表里的地址与状态文件记录一致、且代理是开着的）：
+// 若中途有别的程序接管了系统代理（Clash / v2rayN 之类），或用户手动关掉了它，这里就**不还原**，
+// 否则会把对方的设置覆盖回我们接管前的旧值。返回 takenOver 报告这种情况，调用方据此提示用户。
+func Disable(saved *Values) (takenOver bool, err error) {
+	st, serr := readState()
 	if saved == nil {
-		data, err := os.ReadFile(StatePath())
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil // 无待恢复状态
+		if serr != nil {
+			if os.IsNotExist(serr) {
+				return false, nil // 无待恢复状态
 			}
-			return err
-		}
-		var st stateFile
-		if err := json.Unmarshal(data, &st); err != nil {
-			return fmt.Errorf("解析代理状态文件: %w", err)
+			return false, serr
 		}
 		saved = &st.Saved
 	}
+	if st != nil {
+		live, lerr := readValues()
+		if lerr != nil {
+			// 读不到注册表就无从判断，退回「按原值还原」的旧行为
+		} else if !heldIn(live, st.Addr) {
+			_ = os.Remove(StatePath())
+			return true, nil
+		}
+	}
 	if err := apply(saved); err != nil {
-		return fmt.Errorf("还原系统代理失败: %w", err)
+		return false, fmt.Errorf("还原系统代理失败: %w", err)
 	}
 	_ = os.Remove(StatePath())
-	return nil
+	return false, nil
+}
+
+// readState 读取崩溃恢复状态文件。文件不存在时返回 os.ErrNotExist。
+func readState() (*stateFile, error) {
+	data, err := os.ReadFile(StatePath())
+	if err != nil {
+		return nil, err
+	}
+	var st stateFile
+	if err := json.Unmarshal(data, &st); err != nil {
+		return nil, fmt.Errorf("解析代理状态文件: %w", err)
+	}
+	return &st, nil
+}
+
+// Held 报告系统代理是否仍由 addr 持有：注册表里代理是开着的，且地址就是 addr。
+// 读注册表失败时返回错误（调用方应把它当作「无法判断」，而不是「已被接管」）。
+func Held(addr string) (bool, error) {
+	v, err := readValues()
+	if err != nil {
+		return false, err
+	}
+	return heldIn(v, addr), nil
+}
+
+// heldIn 是 Held 的纯函数版本（便于单测）：判断给定注册表值是否仍指向 addr。
+func heldIn(v *Values, addr string) bool {
+	return v != nil && addr != "" &&
+		v.ProxyEnable != nil && *v.ProxyEnable == 1 &&
+		v.ProxyServer != nil && *v.ProxyServer == addr
 }
 
 // Active 报告是否存在待恢复的代理状态文件。

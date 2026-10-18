@@ -26,7 +26,8 @@ type Status struct {
 	Running     bool              `json:"running"`
 	Listen      string            `json:"listen"`
 	UptimeSec   int64             `json:"uptime_sec"`
-	SystemProxy bool              `json:"system_proxy"`
+	SystemProxy bool              `json:"system_proxy"`         // 系统代理「实际生效中」（仍由本实例持有）
+	ProxyNote   string            `json:"proxy_note,omitempty"` // 系统代理没生效的原因（如被别的程序接管）
 	Hosts       bool              `json:"hosts"`
 	MITM        bool              `json:"mitm"`                // 无 SNI 反代是否启用
 	MITMNote    string            `json:"mitm_note,omitempty"` // 反代未启用的原因（启用时为空）
@@ -189,7 +190,15 @@ func (a *App) Start() error {
 
 	ln, err := net.Listen("tcp", a.cfg.Listen)
 	if err != nil {
-		return fmt.Errorf("监听 %s 失败: %w", a.cfg.Listen, err)
+		// 端口被占用不该让整个服务起不来：换一个空闲回环端口继续。
+		// 系统代理指向的是实际监听地址（见 proxyAddr），因此对用户是透明的。
+		fallback, ferr := net.Listen("tcp", freeLoopbackAddr(a.cfg.Listen))
+		if ferr != nil {
+			return fmt.Errorf("监听 %s 失败: %w", a.cfg.Listen, err)
+		}
+		a.log.Warn("代理端口被占用，已改用空闲端口",
+			"配置", a.cfg.Listen, "实际", fallback.Addr().String())
+		ln = fallback
 	}
 	a.ln = ln
 	a.srv = &http.Server{Handler: a.px, ReadHeaderTimeout: 15 * time.Second}
@@ -289,8 +298,12 @@ func (a *App) Shutdown(ctx context.Context) error {
 	}
 	a.px.CloseLocal() // 本地 MITM 直连监听（幂等）
 	if sysOn {
-		if err := sysproxy.Disable(saved); err != nil {
+		takenOver, err := sysproxy.Disable(saved)
+		switch {
+		case err != nil:
 			errs = append(errs, err)
+		case takenOver:
+			a.log.Warn("系统代理已被其他程序接管，退出时未还原（避免覆盖对方的设置）")
 		}
 	}
 	if srv != nil {
@@ -303,6 +316,10 @@ func (a *App) Shutdown(ctx context.Context) error {
 }
 
 // SetMode 运行时切换系统代理 / hosts 两个开关（供托盘菜单与控制 API 使用）。
+//
+// 系统代理一栏比较的是「实际是否仍由本实例持有」而不是内部标志：被别的程序接管后，
+// 界面显示为关闭、点一下就能重新夺回（重新快照当前值作为新的原值），不会出现
+// 「显示已开、点了却什么都不发生」。
 func (a *App) SetMode(sys, hostsWant bool) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -311,24 +328,30 @@ func (a *App) SetMode(sys, hostsWant bool) error {
 	}
 	var errs []error
 
-	sysChanged := sys != a.sysOn
+	held := a.sysProxyHeld()
+	sysChanged := sys != held
 	hostsChanged := hostsWant != a.hostsOn
 
-	if sysChanged {
-		if sys {
-			saved, err := sysproxy.Enable(a.proxyAddr())
-			if err != nil {
-				errs = append(errs, err)
-			} else {
-				a.sysSaved = saved
-				a.sysOn = true
-			}
-		} else if err := sysproxy.Disable(a.sysSaved); err != nil {
+	switch {
+	case sys && !held:
+		saved, err := sysproxy.Enable(a.proxyAddr())
+		if err != nil {
 			errs = append(errs, err)
 		} else {
-			a.sysOn = false
-			a.sysSaved = nil
+			a.sysSaved = saved
+			a.sysOn = true
 		}
+	case !sys && held:
+		// 我们确实还持有，用户要关：Disable 负责还原到接管前的值。
+		takenOver, err := sysproxy.Disable(a.sysSaved)
+		switch {
+		case err != nil:
+			errs = append(errs, err)
+		case takenOver:
+			a.log.Warn("系统代理刚刚被其他程序接管，未还原（避免覆盖对方的设置）")
+		}
+		a.sysOn = false
+		a.sysSaved = nil
 	}
 
 	if hostsChanged {
@@ -471,19 +494,54 @@ func (a *App) saveConfigLocked() {
 	}
 }
 
+// sysProxyHeld 报告系统代理是否仍由本实例持有（注册表里还是我们写入的地址）。
+// 读注册表失败时不妄下结论——按「仍持有」处理，避免把正常状态误报成「被其他程序接管」。
+func (a *App) sysProxyHeld() bool {
+	if !a.sysOn {
+		return false
+	}
+	held, err := sysproxy.Held(a.proxyAddr())
+	if err != nil {
+		a.log.Debug("读取系统代理状态失败，按仍持有处理", "err", err)
+		return true
+	}
+	return held
+}
+
+// freeLoopbackAddr 把 "host:port" 变成 "host:0"（保留配置里的回环主机），
+// 供「端口被占用时改用空闲端口」使用。
+func freeLoopbackAddr(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, "0")
+}
+
+// SaveConfig 把当前配置持久化到配置文件（供调用方在改动配置后立即生效）。
+func (a *App) SaveConfig() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return config.Save(a.ConfigPath(), a.cfg)
+}
+
 // Status 返回当前状态快照。
 func (a *App) Status() Status {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	st := Status{
 		Running:     a.ln != nil && !a.stopped,
-		SystemProxy: a.sysOn,
+		SystemProxy: a.sysOn && a.sysProxyHeld(),
 		Hosts:       a.hostsOn,
 		MITM:        a.mitmCa != nil,
 		MITMNote:    a.mitmNote,
 		MITMLocal:   a.mitmLocal443,
 		Services:    append([]string(nil), a.svcIDs...),
 		DNS:         a.res.Health(),
+	}
+	if a.sysOn && !st.SystemProxy {
+		// 我们确实接管过，但注册表里已经不是我们了（Clash 之类顶掉了，或用户手动关掉）
+		st.ProxyNote = "已被其他程序接管"
 	}
 	if a.ln != nil {
 		st.Listen = a.ln.Addr().String()
@@ -523,9 +581,13 @@ func RecoverStale(log *slog.Logger) {
 		return
 	}
 	if sysproxy.Active() {
-		if err := sysproxy.Disable(nil); err != nil {
+		takenOver, err := sysproxy.Disable(nil)
+		switch {
+		case err != nil:
 			log.Error("清理遗留系统代理状态失败", "err", err)
-		} else {
+		case takenOver:
+			log.Warn("遗留的系统代理已被其他程序接管，已清除记录但未改动注册表")
+		default:
 			log.Info("已还原上次遗留的系统代理设置")
 		}
 	}

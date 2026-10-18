@@ -21,7 +21,8 @@ var stopCmd = &cobra.Command{
 			return err
 		}
 
-		if control.Running(cfg.Control) {
+		// 控制端口上确实跑着通途才发停止指令：别的程序占了同一个端口时不能拿它当通途使。
+		if control.IsTongtuControl(cfg.Control) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if _, err := control.Call(ctx, cfg.Control, "/shutdown", http.MethodPost); err != nil {
@@ -32,7 +33,7 @@ var stopCmd = &cobra.Command{
 			for control.Running(cfg.Control) && time.Now().Before(deadline) {
 				time.Sleep(200 * time.Millisecond)
 			}
-			fmt.Println("tongtu 已停止，系统代理与 hosts 已还原")
+			fmt.Println("tongtu 已停止，系统代理与 hosts 已还原（若期间系统代理被其他程序接管，则保留对方的设置）")
 			return nil
 		}
 

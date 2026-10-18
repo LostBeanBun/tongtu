@@ -72,6 +72,15 @@ func loadConfig() (*config.Config, error) {
 	return config.Load(flagConfig)
 }
 
+// configPath 返回本次生效的配置文件路径（--config 优先，否则默认路径）。
+// 用于需要把改动（例如自动换的控制端口）立即写回配置的场景。
+func configPath() string {
+	if flagConfig != "" {
+		return flagConfig
+	}
+	return config.DefaultPath()
+}
+
 // newLogger 按配置创建 slog logger。
 //
 // 分两路输出，各取所需：

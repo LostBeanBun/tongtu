@@ -66,7 +66,7 @@ func Default() *Config {
 		SystemProxy:     true,
 		Hosts:           true,
 		Services:        []string{"steam", "github"},
-		HostsRefreshMin: 30,
+		HostsRefreshMin: 10,
 		DNS: DNSConfig{
 			// 境内可达的端点在前（1.1.1.1/8.8.8.8 在境内常被拒连，仅作后备）；
 			// 223.5.5.5 的 DoH 路径是 /resolve（旧版误用 /dns-query 导致 400）。
@@ -225,7 +225,7 @@ func (c *Config) Validate() error {
 		c.DNS.CacheMaxSec = c.DNS.CacheMinSec * 10
 	}
 	if c.HostsRefreshMin <= 0 {
-		c.HostsRefreshMin = 30
+		c.HostsRefreshMin = 10
 	}
 	if len(c.MITM.Domains) == 0 {
 		c.MITM.Domains = Default().MITM.Domains
