@@ -551,3 +551,39 @@ func emitWarnLog(t *testing.T, msg string) {
 		t.Fatalf("写日志失败: %v", err)
 	}
 }
+
+// TestServicesMenuPointIsScreenCoords：「服务组」菜单必须锚在按钮左下角，而且是**屏幕**坐标。
+//
+// TrackPopupMenu 只认屏幕坐标，而几何层里所有矩形都是客户区坐标：这里不弹菜单（那会阻塞），
+// 只验证换算对不对——漏了换算的话菜单会跑到窗口左上角附近的错误位置。
+func TestServicesMenuPointIsScreenCoords(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, false, false)
+	lw.mu.Lock()
+	hwnd := lw.hwnd
+	lw.mu.Unlock()
+
+	r, ok := lw.regionAtID(uiIDServices)
+	if !ok {
+		t.Fatal("当前几何里没有「服务组」按钮")
+	}
+	pt := lw.servicesMenuPoint()
+
+	// 换算回客户区后，应当是按钮的左下角
+	back := pt
+	procScreenToClient.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&back)))
+	if back.X != r.Rect.Left || back.Y != r.Rect.Bottom {
+		t.Errorf("菜单位置换算回客户区应是按钮左下角 (%d,%d)，实际 (%d,%d)",
+			r.Rect.Left, r.Rect.Bottom, back.X, back.Y)
+	}
+
+	// 而且必须落在窗口的屏幕矩形里（用客户区坐标当屏幕坐标用就会跑到框外）
+	var wr rectT
+	procGetWindowRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&wr)))
+	if pt.X < wr.Left || pt.X > wr.Right || pt.Y < wr.Top || pt.Y > wr.Bottom {
+		t.Errorf("菜单位置 (%d,%d) 不在窗口的屏幕矩形 (%d,%d)-(%d,%d) 内",
+			pt.X, pt.Y, wr.Left, wr.Top, wr.Right, wr.Bottom)
+	}
+}

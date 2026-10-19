@@ -76,6 +76,7 @@ type trackMouseT struct {
 var (
 	procSetCursor       = user32.NewProc("SetCursor")
 	procScreenToClient  = user32.NewProc("ScreenToClient")
+	procClientToScreen  = user32.NewProc("ClientToScreen")
 	procSetCapture      = user32.NewProc("SetCapture")
 	procReleaseCapture  = user32.NewProc("ReleaseCapture")
 	procTrackMouseEvent = user32.NewProc("TrackMouseEvent")
@@ -477,6 +478,23 @@ func (w *logWindow) report(id string, err error) {
 	w.toast(err.Error(), styleWarn)
 }
 
+// servicesMenuPoint 返回服务组菜单左上角的位置（**屏幕**坐标）：锚在按钮左下角
+// （找不到按钮就退回当前鼠标位置）。
+//
+// 必须做客户区 → 屏幕的换算：几何层里的矩形是客户区坐标，而 TrackPopupMenu 认的是
+// 屏幕坐标——漏掉这一步，菜单就会弹到窗口左上角附近的错误位置。
+func (w *logWindow) servicesMenuPoint() pointT {
+	var pt pointT
+	if r, ok := w.regionAtID(uiIDServices); ok {
+		pt = pointT{X: r.Rect.Left, Y: r.Rect.Bottom}
+		procClientToScreen.Call(uintptr(w.handle()), uintptr(unsafe.Pointer(&pt)))
+		return pt
+	}
+	// GetCursorPos 给的本来就是屏幕坐标，不用换算
+	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
+	return pt
+}
+
 // showServicesMenu 在「服务组」按钮下弹出可勾选的服务组菜单（与托盘同一套开关）。
 func (w *logWindow) showServicesMenu(hwnd windows.Handle) {
 	act := currentWindowActions()
@@ -490,15 +508,11 @@ func (w *logWindow) showServicesMenu(hwnd windows.Handle) {
 		return
 	}
 
-	// 菜单锚在按钮的左下角（找不到按钮就锚在鼠标位置）
-	r, ok := w.regionAtID(uiIDServices)
-	var pt pointT
-	if ok {
-		pt = pointT{X: r.Rect.Left, Y: r.Rect.Bottom}
-	} else {
-		procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
-		procScreenToClient.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&pt)))
-	}
+	pt := w.servicesMenuPoint()
+
+	// 弹出菜单的标准做法：先把窗口设成前台窗口，否则菜单可能不跟随点击自动消失
+	// （我们本来就该是前台窗口——用户刚点了这里；这行只是把它变成确定的）。
+	procSetForegroundWindow.Call(uintptr(hwnd))
 
 	menu, _, _ := procCreatePopupMenu.Call()
 	if menu == 0 {
