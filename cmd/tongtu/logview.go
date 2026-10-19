@@ -196,6 +196,51 @@ func renderSummaryText(title string, rows []summaryRow) string {
 	return b.String()
 }
 
+// —— 日志过滤（窗口里输入关键字 / 只看警告时用）——
+
+// uiNoMatchHint 是过滤后没有命中时显示的那一行提示。
+const uiNoMatchHint = "（没有匹配的日志行 · 清空过滤框可恢复）"
+
+// filterLines 按关键字与「只看警告」过滤显示行。
+//
+// 规则：
+//   - query 是关键字（不区分大小写），按整行纯文本匹配；
+//   - onlyWarn 只保留含警告/错误级别的行；
+//   - 续行（缩进的属性行，见 logIndent）跟随上一行的取舍——否则一条记录的属性会被拦腰截断。
+func filterLines(lines []logLine, query string, onlyWarn bool) []logLine {
+	if query == "" && !onlyWarn {
+		return lines
+	}
+	needle := strings.ToLower(query)
+	out := make([]logLine, 0, len(lines))
+	prevKept := false
+	for _, l := range lines {
+		text := l.plain()
+		keep := false
+		if strings.HasPrefix(text, logIndent) {
+			keep = prevKept // 续行：跟着上一行走
+		} else {
+			keep = (!onlyWarn || hasWarnSpan(l)) &&
+				(needle == "" || strings.Contains(strings.ToLower(text), needle))
+		}
+		if keep {
+			out = append(out, l)
+		}
+		prevKept = keep
+	}
+	return out
+}
+
+// hasWarnSpan 判断一行里是否有警告/错误级别的片段（启动摘要里的 ！行也算）。
+func hasWarnSpan(l logLine) bool {
+	for _, s := range l.Spans {
+		if s.Style == styleWarn || s.Style == styleDanger {
+			return true
+		}
+	}
+	return false
+}
+
 // —— 日志处理器 ——
 
 // logHandlers 让同一条记录同时进入多个处理器：控制台/日志文件走结构化文本，

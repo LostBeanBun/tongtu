@@ -49,9 +49,37 @@ type windowStatus struct {
 }
 
 // windowStatusItem 是一个带状态点的开关项。
+//
+// Action 非空表示这一项在窗口里可以点击（值取 uiIDSys 等动作 id）——状态条因此不只是
+// 展示，而是最短路径的开关入口：看到的和点的是同一个东西。
 type windowStatusItem struct {
-	Label string
-	On    bool
+	Label  string
+	On     bool
+	Action string // 可点击的动作 id；空 = 只读展示
+	Tip    string // 悬浮说明（与托盘菜单文案保持一致）
+}
+
+// modeItems 返回状态条上的三个加速模式开关项，状态还没准备好时用默认项：
+// 窗口一创建就有可点的开关，几何计算也不依赖状态刷新时机。
+func modeItems(items []windowStatusItem) []windowStatusItem {
+	if len(items) > 0 {
+		return items
+	}
+	return []windowStatusItem{
+		{Label: "系统代理", Action: uiIDSys},
+		{Label: "Hosts", Action: uiIDHosts},
+		{Label: "无SNI反代", Action: uiIDMITM},
+	}
+}
+
+// onOf 返回某个动作 id 当前是否处于开启状态（找不到该项时返回 false）。
+func (s windowStatus) onOf(action string) bool {
+	for _, it := range s.Items {
+		if it.Action == action {
+			return it.On
+		}
+	}
+	return false
 }
 
 // key 返回状态的可比较指纹：相同则不必重绘。

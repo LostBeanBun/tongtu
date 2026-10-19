@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -81,6 +82,8 @@ const (
 
 	esMultiline   = 0x0004
 	esAutoVScroll = 0x0040
+	esAutoHScroll = 0x0080
+	esLeft        = 0x0000
 	esReadOnly    = 0x0800
 
 	swShow         = 0x5
@@ -133,6 +136,9 @@ var (
 	msfteditDLL   windows.Handle
 	richEditClass = utf16Ptr("RICHEDIT50W")
 )
+
+// plainEditClass 是普通单行编辑框的类名（过滤输入框用；富文本能力对它没有意义）。
+var plainEditClass = utf16Ptr("EDIT")
 
 // richEditActive 报告日志控件是否具备富文本能力。
 func richEditActive() bool { return richEditOK }
@@ -196,17 +202,41 @@ const (
 	// 线条与描边
 	psSolid     = 0 // CreatePen 的实线样式
 	nullBrushId = 5 // GetStockObject(NULL_BRUSH)：只要描边不要填充
+	nullPenId   = 8 // GetStockObject(NULL_PEN)：只要填充不要描边
 
-	uiFaceName   = "Microsoft YaHei UI"
-	uiFontPT     = 10
-	uiTitlePT    = 11
-	uiHeaderDIP  = 62 // 状态条高度（DIP，两行：状态行 + 信息行）
-	uiRow1DIP    = 32 // 第一行高度：标题 / 状态词 / 开关项
-	uiRow2DIP    = 30 // 第二行高度：服务组 / 活跃隧道 / 流量
-	uiPadDIP     = 12
-	uiCardPadDIP = 8  // 日志卡片的内边距（日志控件相对卡片内缩的距离）
-	uiRadiusDIP  = 10 // 日志卡片圆角半径
-	uiDotDIP     = 7  // 状态点半径（DIP）
+	uiFaceName = "Microsoft YaHei UI"
+	uiFontPT   = 10
+	uiTitlePT  = 11
+
+	// 顶部状态条与卡片工具条的度量（DIP，绘制与命中判定共用，见 ui_layout_windows.go）
+	uiRow1DIP      = 36 // 第一行：小图标 / 标题 / 状态词 / 开关胶囊
+	uiRow2DIP      = 26 // 第二行：详情（或轻量提示）/ 动作按钮
+	uiHeaderDIP    = uiRow1DIP + uiRow2DIP
+	uiToolbarDIP   = 30  // 日志卡片内的工具条：过滤框 + 只看警告
+	uiControlDIP   = 22  // 胶囊与按钮的高度
+	uiGapDIP       = 8   // 控件之间的水平间距
+	uiChipPadDIP   = 10  // 胶囊的左右内边距
+	uiBtnPadDIP    = 9   // 幽灵按钮的左右内边距
+	uiIconDIP      = 16  // 标题前小图标的边长
+	uiIconGapDIP   = 8   // 图标与标题的间距
+	uiTitleGapDIP  = 10  // 标题与状态词的间距
+	uiDotDIP       = 4   // 胶囊里状态点的半径
+	uiFilterDIP    = 170 // 过滤输入框的宽度上限
+	uiFilterMinDIP = 80  // 过滤输入框窄于这个宽度就不显示（窗口太窄时）
+	uiMinWDIP      = 620 // 窗口最小宽度
+	uiMinHDIP      = 320 // 窗口最小高度
+
+	uiPadDIP         = 12 // 客户区四周留白
+	uiCardPadDIP     = 8  // 日志卡片的内边距（内容相对卡片内缩的距离）
+	uiRadiusDIP      = 10 // 日志卡片圆角半径
+	uiGhostRadiusDIP = 6  // 幽灵按钮的圆角半径
+
+	// 轻量提示与过滤防抖
+	uiToastMS       = 3200 // 轻量提示显示时长（毫秒）
+	uiFilterWaitMS  = 180  // 过滤输入防抖（毫秒）
+	uiTimerToast    = 1    // SetTimer 的提示定时器 id
+	uiTimerFilter   = 2    // SetTimer 的过滤防抖定时器 id
+	uiToastEllipsis = "…"
 )
 
 // 窗口类名、窗口标题（常驻，避免被 GC 回收）。
@@ -244,6 +274,7 @@ var (
 	procGetDC                         = user32.NewProc("GetDC")
 	procReleaseDC                     = user32.NewProc("ReleaseDC")
 	procInvalidateRect                = user32.NewProc("InvalidateRect")
+	procUpdateWindow                  = user32.NewProc("UpdateWindow")
 	procGetCursorPos                  = user32.NewProc("GetCursorPos")
 	procCreatePopupMenu               = user32.NewProc("CreatePopupMenu")
 	procDestroyMenu                   = user32.NewProc("DestroyMenu")
@@ -383,13 +414,24 @@ type uiTheme struct {
 	danger uint32 // 失败：错误级日志（systemRed）
 	off    uint32 // 关闭：状态点（中性灰）
 
+	// 交互反馈：中性叠加色，由底色与文字色按比例混合而来（见 resolveTheme）。
+	// 保持中性灰、不引入新色相，因此不会和语义色抢「谁在表达状态」。
+	//
+	// 注意：常态**不铺底**（控件平时只有文字与状态点），底色只在悬停/按下/选中时出现。
+	// 这样状态点始终落在窗口底色上，对比度不受交互底色影响。
+	hover uint32 // 悬停 / 按下底色（胶囊与幽灵按钮共用）
+	input uint32 // 输入框（过滤框）的常态底色
+
 	// GDI 对象（每个主题一套：切换主题时整套替换，不新建也不删除）
 	bgBrush       uintptr // bg
 	cardBrush     uintptr // cardBG
 	okBrush       uintptr // ok
 	offBrush      uintptr // off
+	hoverBrush    uintptr // hover
+	inputBrush    uintptr // input
 	hairlineBrush uintptr // hairline（分隔线用 FillRect）
 	hairlinePen   uintptr // hairline（描边用 RoundRect）
+	nullPen       uintptr // 无描边（胶囊填充用）
 }
 
 func rgb(r, g, b uint8) uint32 {
@@ -435,7 +477,7 @@ func (t uiTheme) styleColor(s logStyle) uint32 {
 // 配色取 iOS 系统色：深浅各一套、共用色相、只分亮度；界面是常规窗口——
 // 不透明底色 + 圆角卡片 + 一条发丝分隔线，靠配色层次而不是特效来区分区域。
 var (
-	themeDark = uiTheme{
+	themeDark = resolveTheme(uiTheme{
 		dark:     true,
 		bg:       rgb(28, 28, 30),    // #1C1C1E systemBackground
 		cardBG:   rgb(44, 44, 46),    // #2C2C2E secondarySystemBackground
@@ -448,8 +490,8 @@ var (
 		warn:     rgb(255, 159, 10),  // #FF9F0A systemOrange
 		danger:   rgb(255, 107, 97),  // #FF6B61 同色相 H≈4°（对卡片 4.9:1）
 		off:      rgb(142, 142, 147), // #8E8E93（4.3:1）
-	}
-	themeLight = uiTheme{
+	})
+	themeLight = resolveTheme(uiTheme{
 		dark:     false,
 		bg:       rgb(242, 242, 247), // #F2F2F7
 		cardBG:   rgb(255, 255, 255), // #FFFFFF
@@ -462,8 +504,49 @@ var (
 		warn:     rgb(168, 90, 0),    // #A85A00（同色相 H≈32°）
 		danger:   rgb(196, 43, 31),   // #C42B1F（同色相 H≈4°，对窗口底 5.1:1）
 		off:      rgb(124, 124, 128), // #7C7C80（4.2:1）
-	}
+	})
 )
+
+// 交互反馈色的混合比例（相对底色）：深色主题要略强一点才看得出层次。
+//
+// 悬停色同时用于「按下」与「选中」：按下只多一瞬，选中靠文字色（正文色）区分，
+// 因此不必再压深一档——压得太深会让状态点与文字的可读性变差。
+const (
+	hoverAlphaDark  = 0.16
+	hoverAlphaLight = 0.10
+	inputAlphaDark  = 0.10
+	inputAlphaLight = 0.05
+)
+
+// resolveTheme 补齐由底色与文字色推导出来的中性色（悬停底色 / 输入框底色）。
+//
+// 为什么推导而不是再挑几个颜色：这几个色只承担「这里可以点 / 现在被按住」，
+// 与色相无关；从底色往文字色混一步，天然保证是同一个中性灰阶梯。
+func resolveTheme(t uiTheme) uiTheme {
+	hoverA, inputA := hoverAlphaLight, inputAlphaLight
+	if t.dark {
+		hoverA, inputA = hoverAlphaDark, inputAlphaDark
+	}
+	t.hover = blend(t.bg, t.text, hoverA)
+	t.input = blend(t.cardBG, t.text, inputA)
+	return t
+}
+
+// blend 把 src 按 alpha（0~1）混到 dst 上，返回新的 COLORREF。
+func blend(dst, src uint32, alpha float64) uint32 {
+	mix := func(shift uint) uint32 {
+		d := float64((dst >> shift) & 0xFF)
+		s := float64((src >> shift) & 0xFF)
+		v := d + (s-d)*alpha
+		if v < 0 {
+			v = 0
+		} else if v > 255 {
+			v = 255
+		}
+		return uint32(v+0.5) << shift
+	}
+	return mix(0) | mix(8) | mix(16)
+}
 
 // systemThemeDark 读取系统的「应用模式」：深色返回 true。
 func systemThemeDark() bool {
@@ -554,10 +637,22 @@ type logWindow struct {
 	lineBytes int       // lines 的字节数，用于限制总长度
 	status    windowStatus
 	hwnd      windows.Handle
-	edit      windows.Handle
-	font      uintptr
-	fontTitle uintptr
-	theme     uiTheme
+	edit      windows.Handle // 日志控件
+	filter    windows.Handle // 过滤输入框
+	tooltip   windows.Handle // 悬浮提示
+	icon      windows.Handle // 标题前的小图标
+	uiLayout  uiLayout       // 当前几何（绘制与命中共用同一份）
+	layoutW   int32          // 几何对应的客户区尺寸 / 状态项 / DPI
+	layoutH   int32
+	layoutKey string
+	onlyWarn  bool    // 「只看警告」是否开启
+	toastMsg  uiToast // 当前轻量反馈（零值 = 没有）
+	// pendingMode 是正在后台切换的开关 id（空 = 没有）。
+	// 切换在别的 goroutine 上做（见 toggleMode），窗口线程只负责给反馈。
+	pendingMode string
+	font        uintptr
+	fontTitle   uintptr
+	theme       uiTheme
 	// 深/浅两套配色在创建窗口时就把画刷准备好：切换主题时整套替换，
 	// 不新建也不删除 GDI 对象（因此反复切换也不会泄漏）。
 	themeDarkSet  uiTheme
@@ -565,6 +660,21 @@ type logWindow struct {
 	dpi           uint32
 	wantMax       bool
 	err           error
+
+	// 仅窗口线程访问：悬停/按下状态与整帧双缓冲用的 GDI 对象
+	hoverID string
+	pressID string
+	memDC   uintptr
+	memBmp  uintptr
+	memW    int32
+	memH    int32
+}
+
+// uiToast 是一条轻量反馈：显示在状态条第二行，几秒后自动消失。
+type uiToast struct {
+	Text  string
+	Style logStyle
+	Until time.Time
 }
 
 var lw = &logWindow{ready: make(chan struct{})}
@@ -621,6 +731,11 @@ func (w *logWindow) addLines(lines []logLine) {
 	if edit == 0 {
 		return // 窗口还没起来：内容已在缓冲里，创建后回填
 	}
+	if w.filterActive() {
+		// 过滤生效中：新日志不一定满足条件，不能直接追加——请求一次（防抖的）整体重画
+		w.scheduleFilter()
+		return
+	}
 	if cut > 0 {
 		w.renderAll() // 裁剪过：整体重画，样式才不会错位
 		return
@@ -631,14 +746,21 @@ func (w *logWindow) addLines(lines []logLine) {
 // renderAll 用缓冲区里的行整体重画日志控件（窗口创建回填 / 裁剪后 / 主题切换换色）。
 func (w *logWindow) renderAll() {
 	w.mu.Lock()
-	edit, theme := w.edit, w.theme
 	lines := make([]logLine, len(w.lines))
 	copy(lines, w.lines)
+	w.mu.Unlock()
+	w.renderLines(lines)
+}
+
+// renderLines 用给定的行整体重画日志控件（过滤后的子集也走这里）。
+func (w *logWindow) renderLines(lines []logLine) {
+	w.mu.Lock()
+	edit, theme := w.edit, w.theme
 	w.mu.Unlock()
 	if edit == 0 || theme.cardBrush == 0 {
 		return
 	}
-	setWindowText(edit, "") // 清空（连同旧样式）
+	setEditText(edit, "") // 清空（连同旧样式）
 	initEditColors(edit, theme)
 	appendLines(edit, theme, lines)
 	scrollEditToBottom(edit)
@@ -663,18 +785,25 @@ func appendLines(edit windows.Handle, theme uiTheme, lines []logLine) {
 	for _, l := range lines {
 		insertLine(edit, theme, l)
 	}
-	switch {
-	case hadSel:
-		procSendMessageW.Call(uintptr(edit), emSetSel, uintptr(selStart), uintptr(selEnd))
-	case follow:
-		scrollEditToBottom(edit)
-	default:
-		if d := first - editFirstVisibleLine(edit); d != 0 {
-			procSendMessageW.Call(uintptr(edit), emLineScroll, 0, uintptr(d))
-		}
-	}
 	procSendMessageW.Call(uintptr(edit), wmSetRedraw, 1, 0)
+
+	// 滚动放在「恢复重画」之后。
+	//
+	// 为什么：WM_SETREDRAW(FALSE) 期间控件只会把滚动「记账」、不重画，恢复重画后它再
+	// 用 ScrollWindow 搬动屏幕像素——被露出来的那一条没人重画，于是旧的文字会和新画的
+	// 文字重叠（日志刷得快时肉眼可见）。放在恢复重画之后，控件自己会把露出的部分补上。
+	if hadSel {
+		procSendMessageW.Call(uintptr(edit), emSetSel, uintptr(selStart), uintptr(selEnd))
+	} else if follow {
+		scrollEditToBottom(edit)
+	} else if d := first - editFirstVisibleLine(edit); d != 0 {
+		procSendMessageW.Call(uintptr(edit), emLineScroll, 0, uintptr(d))
+	}
+
 	procInvalidateRect.Call(uintptr(edit), 0, 1) // 1 = bErase：字数变化后整块重画
+	// 再立刻把这一帧画出来（UpdateWindow 直接触发 WM_PAINT，不排队等下一次消息循环），
+	// 保证本次追加在返回前就已经完整落到屏幕上。
+	procUpdateWindow.Call(uintptr(edit))
 }
 
 // insertLine 把一行追加到末尾：逐段上色（RichEdit），再补上换行。
@@ -931,8 +1060,25 @@ func (w *logWindow) create() (windows.Handle, windows.Handle, error) {
 		return 0, 0, fmt.Errorf("创建日志控件失败: %v", callErr)
 	}
 
+	// 过滤输入框：单行 EDIT，摆在卡片工具条左侧（几何见 computeUILayout）。
+	filter, _, callErr := procCreateWindowExW.Call(
+		0,
+		uintptr(unsafe.Pointer(plainEditClass)),
+		0,
+		wsChild|wsVisible|esLeft|esAutoHScroll,
+		0, 0, 10, 10,
+		hwnd, 0, hInst, 0,
+	)
+	if filter == 0 {
+		return 0, 0, fmt.Errorf("创建过滤输入框失败: %v", callErr)
+	}
+	if cue := utf16Ptr("过滤日志…"); cue != nil {
+		procSendMessageW.Call(uintptr(filter), emSetCueBanner, ecbTrue, uintptr(unsafe.Pointer(cue)))
+	}
+
 	w.mu.Lock()
 	w.theme, w.themeDarkSet, w.themeLightSet, w.dpi = theme, darkSet, lightSet, dpi
+	w.filter, w.icon = windows.Handle(filter), smallIcon
 	w.mu.Unlock()
 
 	// 常规窗口样式：只把标题栏的明暗交给系统（跟随系统深浅色设置）。
@@ -940,6 +1086,9 @@ func (w *logWindow) create() (windows.Handle, windows.Handle, error) {
 
 	applyEditTheme(windows.Handle(edit), theme.dark)
 	initEditColors(windows.Handle(edit), theme)
+
+	// 悬浮提示：贴在窗口上，鼠标移到胶囊/按钮上时显示说明（建不出来也不影响其他功能）
+	w.createTooltip(windows.Handle(hwnd))
 
 	return windows.Handle(hwnd), windows.Handle(edit), nil
 }
@@ -970,8 +1119,12 @@ func buildBrushes(t uiTheme) uiTheme {
 	t.cardBrush = newSolidBrush(t.cardBG)
 	t.okBrush = newSolidBrush(t.ok)
 	t.offBrush = newSolidBrush(t.off)
+	t.hoverBrush = newSolidBrush(t.hover)
+	t.inputBrush = newSolidBrush(t.input)
 	t.hairlineBrush = newSolidBrush(t.hairline)
 	t.hairlinePen = newPen(t.hairline)
+	// NULL_PEN：胶囊/按钮只要填充不要描边（RoundRect 必须选入一支笔）
+	t.nullPen, _, _ = procGetStockObject.Call(nullPenId)
 	return t
 }
 
@@ -1009,6 +1162,9 @@ func (w *logWindow) applySystemTheme(hwnd windows.Handle) {
 		initEditColors(windows.Handle(edit), theme)
 		w.renderAll()
 	}
+	if filter := w.filterHandle(); filter != 0 {
+		procInvalidateRect.Call(uintptr(filter), 0, 1) // 过滤框底色跟着主题走
+	}
 }
 
 // applyWindowChrome 套用常规窗口样式：只把标题栏的明暗交给 DWM，让窗口跟随系统的深浅色。
@@ -1042,11 +1198,14 @@ func (w *logWindow) applyFont(dpi uint32) {
 	}
 	w.mu.Lock()
 	w.font, w.fontTitle, w.dpi = body, title, dpi
-	edit, theme := w.edit, w.theme
+	edit, filter, theme := w.edit, w.filter, w.theme
 	w.mu.Unlock()
 	if edit != 0 {
 		procSendMessageW.Call(uintptr(edit), wmSetFont, body, 1)
 		initEditColors(edit, theme) // 换字体重设一次默认字色，避免落在系统默认的黑字上
+	}
+	if filter != 0 {
+		procSendMessageW.Call(uintptr(filter), wmSetFont, body, 1)
 	}
 }
 
@@ -1062,38 +1221,129 @@ func createUIFont(pt, weight int32, dpi uint32) uintptr {
 	return font
 }
 
-// layout 摆放日志卡片：四周留白，顶部给状态条留出高度。
+// layout 摆放子控件并刷新几何缓存。
 //
-// 卡片本体（圆角底色与描边）由父窗口绘制（见 paintCard），日志控件再嵌在卡片里、
-// 四周留出 uiCardPadDIP 的内边距——文字与滚动条都不会贴到卡片边框上。
+// 几何全部由 computeUILayout 算出（绘制、命中判定、子控件摆放共用同一份，见
+// ui_layout_windows.go），这里只负责把过滤框与日志控件挪到算好的位置。
 func (w *logWindow) layout() {
-	w.mu.Lock()
-	hwnd, edit, dpi := w.hwnd, w.edit, w.dpi
-	w.mu.Unlock()
-	if hwnd == 0 {
+	hwnd := w.handle()
+	edit, filter := w.editHandle(), w.filterHandle()
+	if hwnd == 0 || edit == 0 {
 		return
 	}
-	var r rectT
-	procGetClientRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&r)))
-	pad := scaleDPI(uiPadDIP, dpi)
-	headH := scaleDPI(uiHeaderDIP, dpi)
-	cardY := pad + headH
-	cardW := r.Right - 2*pad
-	cardH := r.Bottom - cardY - pad
-	inset := scaleDPI(uiCardPadDIP, dpi)
-	if cardW < 10 || cardH < 10 || edit == 0 {
-		return
-	}
-	innerW, innerH := cardW-2*inset, cardH-2*inset
-	if innerW < 10 || innerH < 10 {
+	l := w.ensureLayout()
+	if l.Edit.Right <= l.Edit.Left || l.Edit.Bottom <= l.Edit.Top {
 		return
 	}
 	// 日志控件在 WM_SIZE 之后会把视图拉回开头（RichEdit 的行为），
 	// 因此先记下用户的阅读位置，缩放后再补回来。
 	atBottom, first := editAtBottom(edit), editFirstVisibleLine(edit)
-	procMoveWindow.Call(uintptr(edit), uintptr(pad+inset), uintptr(cardY+inset),
-		uintptr(innerW), uintptr(innerH), 1)
+	moveWindow(edit, l.Edit)
+	if filter != 0 {
+		if l.Filter.Right > l.Filter.Left {
+			moveWindow(filter, l.Filter)
+			procShowWindow.Call(uintptr(filter), swShow)
+		} else {
+			procShowWindow.Call(uintptr(filter), swHide) // 窗口太窄：先藏起过滤框
+		}
+	}
 	preserveEditView(edit, atBottom, first)
+}
+
+// ensureLayout 返回当前几何；客户区尺寸、DPI 或状态项一变就重算。
+// 只在窗口线程调用（绘制与鼠标消息都走这里，因此不会出现两个线程同时算几何）。
+func (w *logWindow) ensureLayout() uiLayout {
+	hwnd := w.handle()
+	if hwnd == 0 {
+		return uiLayout{}
+	}
+	var r rectT
+	procGetClientRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&r)))
+	w.mu.Lock()
+	cur, dpi, okW, okH, okKey := w.uiLayout, w.dpi, w.layoutW, w.layoutH, w.layoutKey
+	w.mu.Unlock()
+
+	// 几何依赖：客户区尺寸 + DPI + 状态项的标签 + 标题与状态词（它们的宽度决定第一行怎么分）。
+	// 任何一项变了就重算——否则会拿旧几何画新内容（例如标题被当成空串而不画）。
+	st := w.statusSnapshot()
+	key := strconv.FormatUint(uint64(dpi), 10) + "|" + st.Title + "|" + st.State + "|" +
+		itemFingerprint(modeItems(st.Items))
+	if okW == r.Right && okH == r.Bottom && okKey == key && cur.Regions != nil {
+		return cur
+	}
+	l := computeUILayout(r.Right, r.Bottom, dpi, st, w.measureText, w.measureTitle)
+	w.mu.Lock()
+	w.uiLayout, w.layoutW, w.layoutH, w.layoutKey = l, r.Right, r.Bottom, key
+	w.mu.Unlock()
+	return l
+}
+
+// itemFingerprint 把状态项（动作 + 标签）拼成短串：几何只依赖它，内容变了就重算。
+func itemFingerprint(items []windowStatusItem) string {
+	var b strings.Builder
+	for _, it := range items {
+		b.WriteString(it.Action)
+		b.WriteByte(':')
+		b.WriteString(it.Label)
+		b.WriteByte('|')
+	}
+	return b.String()
+}
+
+// measureText 用正文字体量一段文本的像素宽度（注入给几何计算用）。
+func (w *logWindow) measureText(s string) int32 {
+	w.mu.Lock()
+	font, title, dpi := w.font, w.fontTitle, w.dpi
+	w.mu.Unlock()
+	if font == 0 {
+		font = title
+	}
+	return measureWith(w.handle(), s, font, dpi)
+}
+
+// measureTitle 用标题字体量一段文本的宽度（标题字号更大，必须单独量）。
+func (w *logWindow) measureTitle(s string) int32 {
+	w.mu.Lock()
+	font, dpi := w.fontTitle, w.dpi
+	w.mu.Unlock()
+	return measureWith(w.handle(), s, font, dpi)
+}
+
+// measureWith 用给定字体量一段文本的宽度（内部借还一次窗口 DC）。
+//
+// 字体不可用时按字号粗估：宁可位置略偏，也不要算出 0 宽导致内容叠在一起。
+func measureWith(hwnd windows.Handle, s string, font uintptr, dpi uint32) int32 {
+	fallback := func() int32 { return int32(len([]rune(s))) * scaleDPI(uiFontPT+3, dpi) }
+	if s == "" {
+		return 0
+	}
+	if font == 0 {
+		return fallback()
+	}
+	hdc, _, _ := procGetDC.Call(uintptr(hwnd))
+	if hdc == 0 {
+		return fallback()
+	}
+	old, _, _ := procSelectObject.Call(hdc, font)
+	width := textWidth(hdc, s)
+	procSelectObject.Call(hdc, old)
+	procReleaseDC.Call(uintptr(hwnd), hdc)
+	return width
+}
+
+// moveWindow 把子控件摆到算好的矩形上（bRepaint=1：位置变了就重画）。
+func moveWindow(hwnd windows.Handle, r rectT) {
+	if hwnd == 0 || r.Right <= r.Left || r.Bottom <= r.Top {
+		return
+	}
+	procMoveWindow.Call(uintptr(hwnd), uintptr(r.Left), uintptr(r.Top),
+		uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top), 1)
+}
+
+func (w *logWindow) filterHandle() windows.Handle {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.filter
 }
 
 // preserveEditView 在控件尺寸变化后把阅读位置放回原处：
@@ -1111,7 +1361,10 @@ func preserveEditView(edit windows.Handle, atBottom bool, first int32) {
 	}
 }
 
-// paint 处理 WM_PAINT：在系统给的 DC 上画客户区。
+// paint 处理 WM_PAINT：整帧先画到内存 DC，再一次性 BitBlt 上屏。
+//
+// 双缓冲把「铺底色 → 画卡片 → 画状态条」合成一次可见更新，缩放窗口或状态刷新时
+// 不会再看到中间态（闪烁）。内存 DC 按客户区尺寸缓存，尺寸不变就复用。
 func (w *logWindow) paint(hwnd windows.Handle) {
 	var ps paintStructT
 	hdc, _, _ := procBeginPaint.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&ps)))
@@ -1122,11 +1375,52 @@ func (w *logWindow) paint(hwnd windows.Handle) {
 
 	var r rectT
 	procGetClientRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&r)))
-	w.paintClient(hdc, r)
+	if back := w.beginFrame(hdc, r); back != 0 {
+		w.paintClient(back, r)
+		procBitBlt.Call(hdc, 0, 0, uintptr(r.Right), uintptr(r.Bottom), back, 0, 0, srcCopy)
+		return
+	}
+	w.paintClient(hdc, r) // 内存 DC 建不出来时直接画（能用比完美重要）
+}
+
+// beginFrame 准备整帧离屏 DC（按客户区尺寸缓存；尺寸变了才重建）。
+func (w *logWindow) beginFrame(hdc uintptr, r rectT) uintptr {
+	if r.Right <= 0 || r.Bottom <= 0 {
+		return 0
+	}
+	if w.memDC != 0 && w.memW == r.Right && w.memH == r.Bottom {
+		return w.memDC
+	}
+	w.releaseFrame()
+	mem, _, _ := procNewMemDC.Call(hdc)
+	if mem == 0 {
+		return 0
+	}
+	bmp, _, _ := procNewMemBmp.Call(hdc, uintptr(r.Right), uintptr(r.Bottom))
+	if bmp == 0 {
+		procFreeDC.Call(mem)
+		return 0
+	}
+	procSelectObject.Call(mem, bmp)
+	w.memDC, w.memBmp, w.memW, w.memH = mem, bmp, r.Right, r.Bottom
+	return mem
+}
+
+// releaseFrame 释放离屏 DC 与位图（窗口销毁 / 尺寸变化时）。
+func (w *logWindow) releaseFrame() {
+	if w.memDC != 0 {
+		procFreeDC.Call(w.memDC)
+		w.memDC = 0
+	}
+	if w.memBmp != 0 {
+		procFreeObject.Call(w.memBmp)
+		w.memBmp = 0
+	}
+	w.memW, w.memH = 0, 0
 }
 
 // paintClient 把客户区里「不属于子控件」的部分画到任意 DC：顶部状态条 + 日志卡片。
-// （日志控件嵌在卡片里，卡片本身在控件外侧，这里负责它。）
+// （日志控件与过滤框嵌在卡片里，卡片本身在控件外侧，这里负责它。）
 //
 // WM_PAINT 与 WM_PRINTCLIENT 共用这里，因此截图/打印工具（PrintWindow / PowerToys /
 // 共享软件）也能拿到完整画面，而不是一片空白。
@@ -1138,34 +1432,28 @@ func (w *logWindow) paintClient(hdc uintptr, client rectT) {
 		// 客户区始终铺一层主题底色：自绘内容必须落在不透明像素上，颜色才可控、文字才清晰
 		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&client)), brush)
 	}
-	w.paintCard(hdc, client)
-	w.paintHeader(hdc, client.Right, client.Bottom)
+	l := w.ensureLayout()
+	w.paintCard(hdc, l)
+	w.paintHeader(hdc, l)
 }
 
-// paintCard 画日志卡片本体：圆角底色 + 一圈 1 像素发丝线描边。
+// paintCard 画日志卡片本体：圆角底色 + 一圈 1 像素发丝线描边 + 工具条下的分隔线。
 //
-// 之所以由父窗口来铺这张卡片的底：日志控件是方形子控件，它的四角会盖住圆角；把它缩进
-// 卡片内部（见 layout），卡片的圆角与内边距就完全由这里决定，文字不会贴着边框。
-// 外扩 1 像素是因为描边要落在子控件外侧（子控件区域被 WS_CLIPCHILDREN 挖掉）。
-func (w *logWindow) paintCard(hdc uintptr, client rectT) {
+// 之所以由父窗口来铺这张卡片的底：日志控件与过滤框都是方形子控件，它们的四角会盖住
+// 圆角；把它们缩进卡片内部（见 layout），卡片的圆角与内边距就完全由这里决定，
+// 文字不会贴着边框。外扩 1 像素是因为描边要落在子控件外侧（子控件区域被 WS_CLIPCHILDREN 挖掉）。
+func (w *logWindow) paintCard(hdc uintptr, l uiLayout) {
 	w.mu.Lock()
 	theme, dpi := w.theme, w.dpi
 	w.mu.Unlock()
-	if theme.hairlinePen == 0 || theme.cardBrush == 0 || client.Right <= 0 || client.Bottom <= 0 {
+	if theme.hairlinePen == 0 || theme.cardBrush == 0 {
 		return
 	}
-	pad := scaleDPI(uiPadDIP, dpi)
-	headH := scaleDPI(uiHeaderDIP, dpi)
-	radius := scaleDPI(uiRadiusDIP, dpi)
-	card := rectT{
-		Left:   pad - 1,
-		Top:    pad + headH - 1,
-		Right:  client.Right - pad + 1,
-		Bottom: client.Bottom - pad + 1,
-	}
+	card := l.Card
 	if card.Right <= card.Left || card.Bottom <= card.Top {
 		return
 	}
+	radius := scaleDPI(uiRadiusDIP, dpi)
 	// RoundRect 一次性完成「填底色 + 描边」，因此这里同时选入卡片画刷与发丝画笔
 	oldBrush, _, _ := procSelectObject.Call(hdc, theme.cardBrush)
 	oldPen, _, _ := procSelectObject.Call(hdc, theme.hairlinePen)
@@ -1174,77 +1462,123 @@ func (w *logWindow) paintCard(hdc uintptr, client rectT) {
 		uintptr(2*radius+2), uintptr(2*radius+2))
 	procSelectObject.Call(hdc, oldPen)
 	procSelectObject.Call(hdc, oldBrush)
+
+	// 工具条与日志区之间的发丝线：让「过滤」和「内容」在视觉上分开
+	if sep := l.FilterSep; sep.Right > sep.Left && theme.hairlineBrush != 0 {
+		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&sep)), theme.hairlineBrush)
+	}
+
+	// 过滤框的 1 像素描边：只靠底色差不够「像输入框」，加一圈发丝线把边界定出来
+	// （画在子控件矩形之外，因此不会被它自己遮住）
+	if f := l.Filter; f.Right > f.Left {
+		drawRectOutline(hdc, rectT{Left: f.Left - 1, Top: f.Top - 1, Right: f.Right + 1, Bottom: f.Bottom + 1}, theme.hairlineBrush)
+	}
 }
 
-// paintHeader 在任意 DC 上绘制状态条：透明背景的文字与状态点，直接压在模糊材质上。
-// 与窗口无关（只用 hdc 与尺寸），因此单测可以画到内存 DC 上逐像素检查。
+// drawRectOutline 用给定画刷画一个 1 像素矩形描边（四条细边）。
+func drawRectOutline(hdc uintptr, r rectT, brush uintptr) {
+	if hdc == 0 || brush == 0 || r.Right <= r.Left || r.Bottom <= r.Top {
+		return
+	}
+	edges := [4]rectT{
+		{Left: r.Left, Top: r.Top, Right: r.Right, Bottom: r.Top + 1},
+		{Left: r.Left, Top: r.Bottom - 1, Right: r.Right, Bottom: r.Bottom},
+		{Left: r.Left, Top: r.Top, Right: r.Left + 1, Bottom: r.Bottom},
+		{Left: r.Right - 1, Top: r.Top, Right: r.Right, Bottom: r.Bottom},
+	}
+	for i := range edges {
+		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&edges[i])), brush)
+	}
+}
+
+// paintHeader 在任意 DC 上绘制顶部状态条与自绘控件（几何来自 uiLayout，与命中判定同源）。
+// 与窗口无关（只用 hdc 与几何），因此单测可以画到内存 DC 上逐像素检查。
 //
-// 配色分工：标题=强调色，状态词=按健康度取语义色，状态点=开关语义色，文字=文字色阶。
-func (w *logWindow) paintHeader(hdc uintptr, width, height int32) {
+// 配色分工：标题=强调色，状态词=按健康度取语义色，胶囊状态点=开关语义色（开绿/关灰），
+// 文字=文字色阶，交互底色只表达「悬停/按下」。
+func (w *logWindow) paintHeader(hdc uintptr, l uiLayout) {
 	w.mu.Lock()
 	theme, dpi := w.theme, w.dpi
 	font, titleFont := w.font, w.fontTitle
-	status := w.status
+	status, icon := w.status, w.icon
+	onlyWarn := w.onlyWarn
 	w.mu.Unlock()
+	toast := w.activeToast() // 已过期/被清掉的提示按「没有」处理
 
-	if hdc == 0 || font == 0 || titleFont == 0 || width <= 0 || height <= 0 {
+	if hdc == 0 || font == 0 || titleFont == 0 {
 		return
 	}
 	procSetBkMode.Call(hdc, bkTransparent)
 
-	pad := scaleDPI(uiPadDIP, dpi)
-	headH := scaleDPI(uiHeaderDIP, dpi)
-	cy := scaleDPI(uiRow1DIP, dpi) / 2 // 第一行垂直居中
-	x := int32(pad)
+	// 品牌区：小图标 + 标题
+	if icon != 0 {
+		side := l.Icon.Right - l.Icon.Left
+		procDrawIconEx.Call(hdc, uintptr(l.Icon.Left), uintptr(l.Icon.Top), uintptr(icon),
+			uintptr(side), uintptr(side), 0, 0, diNormal)
+	}
+	if status.Title != "" && l.Title.Right > l.Title.Left {
+		procSelectObject.Call(hdc, titleFont)
+		procSetTextColor.Call(hdc, uintptr(theme.accent))
+		drawTextInRect(hdc, status.Title, l.Title, dtLeft)
+	}
 
-	// 标题（强调色、稍大、半粗）
-	procSelectObject.Call(hdc, titleFont)
-	procSetTextColor.Call(hdc, uintptr(theme.accent))
-	x += drawTextLine(hdc, status.Title, x, cy, textWidth(hdc, status.Title)+8, dtLeft)
-
-	// 运行状态词：颜色与右侧状态点同源（绿=正常、橙=降级、灰=未运行）
-	if status.State != "" {
-		x += scaleDPI(10, dpi)
+	// 运行状态词：颜色与健康度同源（绿=正常、橙=降级、灰=未运行）
+	if status.State != "" && l.State.Right > l.State.Left {
 		procSelectObject.Call(hdc, font)
 		procSetTextColor.Call(hdc, uintptr(theme.stateColor(status.Level)))
-		x += drawTextLine(hdc, status.State, x, cy, textWidth(hdc, status.State)+8, dtLeft)
+		drawTextInRect(hdc, status.State, l.State, dtLeft)
 	}
 
-	// 开关项：**颜色只由状态点承担**（绿=开、灰=关），文字保持正文色阶，
-	// 这样既保证文字始终可读，也不会出现「整行彩色文字」的配色噪音。
+	// 自绘控件：开关胶囊 + 动作按钮 + 只看警告（绘制顺序即 Regions 顺序）
 	procSelectObject.Call(hdc, font)
-	dot := scaleDPI(uiDotDIP, dpi)
-	for _, it := range status.Items {
-		x += scaleDPI(16, dpi)
-		brush, label := theme.offBrush, theme.faint
-		if it.On {
-			brush, label = theme.okBrush, theme.text
+	for _, r := range l.Regions {
+		on := false
+		switch {
+		case r.Kind == uiChip:
+			on = status.onOf(r.ID)
+		case r.ID == uiIDOnlyWarn:
+			on = onlyWarn
 		}
-		procSelectObject.Call(hdc, brush)
-		procEllipse.Call(hdc, uintptr(x), uintptr(cy-dot), uintptr(x+2*dot), uintptr(cy+dot))
-		x += 2*dot + scaleDPI(6, dpi)
-		procSelectObject.Call(hdc, font)
-		procSetTextColor.Call(hdc, uintptr(label))
-		x += drawTextLine(hdc, it.Label, x, cy, textWidth(hdc, it.Label)+8, dtLeft)
+		drawRegion(hdc, theme, font, r, dpi, on, w.hoverID == r.ID, w.pressID == r.ID)
 	}
 
-	// 第二行：服务组 / 活跃隧道 / 流量。单独一行，不再和第一行抢宽度，
-	// 于是状态点与它各自有完整空间（窄窗口下才按段降级，见 fitDetail）。
-	if text := fitDetail(func(s string) int32 { return textWidth(hdc, s) },
-		status.Detail, width-2*pad); text != "" {
-		cy2 := scaleDPI(uiRow1DIP+uiRow2DIP/2, dpi)
-		procSelectObject.Call(hdc, font)
-		procSetTextColor.Call(hdc, uintptr(theme.muted))
-		drawTextLine(hdc, text, pad, cy2, width-2*pad, dtLeft)
+	// 第二行：轻量提示优先（那是刚发生的事），否则显示详情
+	procSelectObject.Call(hdc, font)
+	if toast.Text != "" {
+		procSetTextColor.Call(hdc, uintptr(theme.styleColor(toast.Style)))
+		drawTextInRect(hdc, toast.Text, l.Detail, dtLeft)
+	} else if avail := l.Detail.Right - l.Detail.Left; avail > 0 {
+		if text := fitDetail(func(s string) int32 { return textWidth(hdc, s) }, status.Detail, avail); text != "" {
+			procSetTextColor.Call(hdc, uintptr(theme.muted))
+			drawTextInRect(hdc, text, l.Detail, dtLeft)
+		}
 	}
 
-	// 状态条与内容之间的发丝分隔线：左右与日志卡片对齐，形成统一的栅格
+	// 状态条与卡片之间的发丝分隔线：左右与日志卡片对齐，形成统一的栅格
+	pad := scaleDPI(uiPadDIP, dpi)
+	headH := scaleDPI(uiHeaderDIP, dpi)
 	if theme.hairlineBrush != 0 {
-		line := rectT{Left: pad, Top: headH - 1, Right: width - pad, Bottom: headH}
+		line := rectT{Left: pad, Top: headH - 1, Right: l.Card.Right - 1, Bottom: headH}
 		if line.Right > line.Left {
 			procFillRect.Call(hdc, uintptr(unsafe.Pointer(&line)), theme.hairlineBrush)
 		}
 	}
+}
+
+// drawTextInRect 在一个矩形里画一行文字（垂直居中、超长省略），返回实际绘制宽度。
+func drawTextInRect(hdc uintptr, text string, r rectT, flags uintptr) int32 {
+	if hdc == 0 || text == "" || r.Right <= r.Left || r.Bottom <= r.Top {
+		return 0
+	}
+	p := utf16Ptr(text)
+	if p == nil {
+		return 0
+	}
+	rc := r
+	procDrawTextW.Call(hdc, uintptr(unsafe.Pointer(p)), ^uintptr(0),
+		uintptr(unsafe.Pointer(&rc)),
+		flags|dtVCenter|dtSingleLine|dtNoPrefix|dtEndEllipsis)
+	return rc.Right - rc.Left
 }
 
 // detailSep 是状态条第二行各段之间的分隔符（比全角竖线轻，一眼能分段又不抢眼）。
@@ -1356,9 +1690,46 @@ func wndProc(hwnd windows.Handle, msg uint32, wparam uintptr, lparam unsafe.Poin
 		if lparam != nil {
 			mmi := (*minMaxInfoT)(lparam)
 			dpi := windowDPI(hwnd)
-			mmi.MinTrackSize = pointT{X: scaleDPI(460, dpi), Y: scaleDPI(260, dpi)}
+			// 最小尺寸由界面决定：状态条两行 + 卡片工具条（过滤框 + 按钮）都要放得下
+			mmi.MinTrackSize = pointT{X: scaleDPI(uiMinWDIP, dpi), Y: scaleDPI(uiMinHDIP, dpi)}
 		}
 		return 0
+
+	case wmMouseMove:
+		lw.onMouseMove(hwnd, uintptr(lparam))
+		return 0
+
+	case wmMouseLeave:
+		lw.onMouseLeave(hwnd)
+		return 0
+
+	case wmSetCursor:
+		if lw.onSetCursor(hwnd, uintptr(lparam)) {
+			return 1 // TRUE：光标已由我们设定（手型）
+		}
+		// 其余情况交回系统处理（默认箭头）
+
+	case wmLButtonDown:
+		lw.onLButtonDown(hwnd, uintptr(lparam))
+		return 0
+
+	case wmLButtonUp:
+		lw.onLButtonUp(hwnd, uintptr(lparam))
+		return 0
+
+	case wmCommand:
+		// 过滤框内容变化（EN_CHANGE）：重置防抖定时器，停手后再整体重画
+		if child := uint32(wparam >> 16); child == enChange && uintptr(lparam) == uintptr(lw.filterHandle()) {
+			lw.onFilterChanged(hwnd)
+			return 0
+		}
+
+	case wmTimer:
+		lw.onTimer(hwnd, wparam)
+		return 0
+
+	case wmDestroy:
+		lw.releaseFrame() // 释放双缓冲用的 GDI 对象
 
 	case wmDpiChanged:
 		// wParam 低 16 位是新 DPI；lParam 指向系统建议的新窗口矩形
@@ -1391,25 +1762,31 @@ func wndProc(hwnd windows.Handle, msg uint32, wparam uintptr, lparam unsafe.Poin
 	return ret
 }
 
-// ctlColor 给日志卡片上色（普通 EDIT 走 WM_CTLCOLORSTATIC/EDIT；RichEdit 自带底色，
-// 这里只是让回退路径也有正确配色）。
+// ctlColor 给卡片里的子控件上色（过滤框是普通 EDIT，走 WM_CTLCOLOREDIT；
+// 日志控件是 RichEdit，自带底色，这里只是让回退路径也有正确配色）。
 // 返回 0 会让子控件用空画刷绘制，因此不认识的控件交回默认处理。
 func (w *logWindow) ctlColor(hwnd windows.Handle, msg uint32, hdc, child uintptr) uintptr {
 	w.mu.Lock()
-	theme, edit := w.theme, w.edit
+	theme, edit, filter := w.theme, w.edit, w.filter
 	w.mu.Unlock()
 
-	if child != uintptr(edit) || hdc == 0 {
+	if hdc == 0 || (child != uintptr(edit) && child != uintptr(filter)) {
 		ret, _, _ := procDefWindowProcW.Call(uintptr(hwnd), uintptr(msg), hdc, child)
 		return ret
 	}
-	// 卡片底色比窗口底略亮/略暗一层，用来把日志区从窗口底上「抬」起来
+	if child == uintptr(filter) {
+		// 过滤框压在卡片底上：比卡片底再深/浅一档，看得出是输入框
+		procSetTextColor.Call(hdc, uintptr(theme.text))
+		procSetBkColor.Call(hdc, uintptr(theme.input))
+		return theme.inputBrush
+	}
+	// 日志区底色比窗口底略亮/略暗一层，用来把日志区从窗口底上「抬」起来
 	procSetTextColor.Call(hdc, uintptr(theme.text))
 	procSetBkColor.Call(hdc, uintptr(theme.cardBG))
 	return theme.cardBrush
 }
 
-// showContextMenu 在日志区右键时给出「复制 / 全选 / 清空日志」。
+// showContextMenu 在日志区右键时给出「复制 / 全选 / 打开配置 / 清空日志」。
 func (w *logWindow) showContextMenu(hwnd windows.Handle, child uintptr) {
 	w.mu.Lock()
 	edit := w.edit
@@ -1427,10 +1804,12 @@ func (w *logWindow) showContextMenu(hwnd windows.Handle, child uintptr) {
 		idCopy   = 1
 		idSelAll = 2
 		idClear  = 3
+		idConfig = 4
 	)
 	appendMenuItem(menu, mfString, idCopy, "复制")
 	appendMenuItem(menu, mfString, idSelAll, "全选")
 	appendMenuItem(menu, mfSeparator, 0, "")
+	appendMenuItem(menu, mfString, idConfig, "打开配置文件")
 	appendMenuItem(menu, mfString, idClear, "清空日志")
 
 	var pt pointT
@@ -1442,12 +1821,10 @@ func (w *logWindow) showContextMenu(hwnd windows.Handle, child uintptr) {
 		procSendMessageW.Call(uintptr(edit), wmCopy, 0, 0)
 	case idSelAll:
 		procSendMessageW.Call(uintptr(edit), emSetSel, 0, ^uintptr(0))
+	case idConfig:
+		w.invokeAction(hwnd, uiIDConfig)
 	case idClear:
-		w.mu.Lock()
-		w.lines = nil
-		w.lineBytes = 0
-		w.mu.Unlock()
-		setEditText(edit, "")
+		w.invokeAction(hwnd, uiIDClear)
 	}
 }
 

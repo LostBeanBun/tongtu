@@ -68,6 +68,20 @@ func (s *Set) Services() []Service {
 	return append([]Service(nil), s.services...)
 }
 
+// Name 返回内置服务组的显示名（未知 id 或解析失败时返回 id 本身）。
+// 界面要给用户看「加速 Steam」这样的名字，而不是内部的 id。
+func Name(id string) string {
+	raw, ok := builtin[id]
+	if !ok {
+		return id
+	}
+	var svc Service
+	if err := json.Unmarshal(raw, &svc); err != nil || svc.Name == "" {
+		return id
+	}
+	return svc.Name
+}
+
 // Match 判断 host（不含端口）是否命中白名单。
 func (s *Set) Match(host string) bool {
 	host = normalize(host)
