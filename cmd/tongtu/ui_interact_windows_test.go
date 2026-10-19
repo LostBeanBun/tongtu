@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -21,40 +22,111 @@ import (
 // 失败路径忘了给反馈）。这里用假的 windowActions 记录调用，不碰真实系统。
 
 // fakeActions 记录界面触发过的动作。
+//
+// 开关切换现在跑在后台 goroutine 上（见 toggleMode），所以这里的计数都要加锁，
+// 并且可以挂一个 gate 把切换卡住，用来观察「正在切换」时的界面表现。
 type fakeActions struct {
-	toggleCalls []struct {
-		ID string
-		On bool
-	}
+	mu          sync.Mutex
+	gate        chan struct{} // 非 nil 时 ToggleMode 会等它被关闭
+	toggleCalls []fakeToggle
 	toggleErr   error
 	refreshHits int
 	quitHits    int
 	configHits  int
 }
 
+type fakeToggle struct {
+	ID string
+	On bool
+}
+
 func (f *fakeActions) actions() windowActions {
 	return windowActions{
 		ToggleMode: func(id string, on bool) error {
-			f.toggleCalls = append(f.toggleCalls, struct {
-				ID string
-				On bool
-			}{id, on})
-			return f.toggleErr
+			f.mu.Lock()
+			f.toggleCalls = append(f.toggleCalls, fakeToggle{id, on})
+			gate, err := f.gate, f.toggleErr
+			f.mu.Unlock()
+			if gate != nil {
+				<-gate
+			}
+			return err
 		},
 		SetServices: func([]string) error { return nil },
 		Services:    func() []uiService { return nil },
-		OpenConfig:  func() error { f.configHits++; return nil },
-		Quit:        func() { f.quitHits++ },
-		Refresh:     func() { f.refreshHits++ },
+		OpenConfig: func() error {
+			f.mu.Lock()
+			f.configHits++
+			f.mu.Unlock()
+			return nil
+		},
+		Quit: func() {
+			f.mu.Lock()
+			f.quitHits++
+			f.mu.Unlock()
+		},
+		Refresh: func() {
+			f.mu.Lock()
+			f.refreshHits++
+			f.mu.Unlock()
+		},
 	}
+}
+
+func (f *fakeActions) calls() []fakeToggle {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeToggle(nil), f.toggleCalls...)
+}
+
+func (f *fakeActions) refreshes() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.refreshHits
+}
+
+func (f *fakeActions) quits() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.quitHits
+}
+
+func (f *fakeActions) configs() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.configHits
 }
 
 // useFakeActions 注入假动作，并在测试结束时清掉（避免影响其它测试）。
 func useFakeActions(t *testing.T, f *fakeActions) {
 	t.Helper()
 	setWindowActionsHook(f.actions)
-	t.Cleanup(func() { setWindowActionsHook(nil) })
+	t.Cleanup(func() {
+		setWindowActionsHook(nil)
+		// 等后台切换收尾，别把「切换中」的状态留给后面的测试
+		waitFor(t, "后台切换结束", func() bool {
+			lw.mu.Lock()
+			defer lw.mu.Unlock()
+			return lw.pendingMode == ""
+		})
+	})
 }
+
+// waitFor 轮询等待条件成立（后台动作是异步的），最多等 5 秒。
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("等待超时：%s", what)
+}
+
+// toastText 取当前轻量反馈的文案。
+func toastText() string { return lw.activeToast().Text }
 
 // sendRegionMouse 把一条鼠标消息发给某个自绘区域的中心点。
 func sendRegionMouse(t *testing.T, id string, msg uint32, wparam uintptr) {
@@ -121,24 +193,62 @@ func TestClickToggleModeInvokesAction(t *testing.T) {
 
 	// Hosts 当前是关的：点一下应该请求「打开」，并给出「已开启」的反馈
 	clickRegion(t, uiIDHosts)
-	if len(f.toggleCalls) != 1 || f.toggleCalls[0].ID != uiIDHosts || !f.toggleCalls[0].On {
-		t.Fatalf("点 Hosts 胶囊应请求开启 hosts，实际 %+v", f.toggleCalls)
+	waitFor(t, "发出开启 hosts 的请求", func() bool { return len(f.calls()) == 1 })
+	if c := f.calls(); c[0].ID != uiIDHosts || !c[0].On {
+		t.Fatalf("点 Hosts 胶囊应请求开启 hosts，实际 %+v", c)
 	}
-	if got := lw.activeToast(); got.Text != "Hosts已开启" || got.Style != styleOK {
-		t.Errorf("成功后应给出轻量反馈，实际 %+v", got)
+	// 切换跑在后台：窗口线程先给「正在切换」，做完再换成结果文案
+	waitFor(t, "切换完成的反馈", func() bool { return toastText() == "Hosts已开启" })
+	if got := lw.activeToast(); got.Style != styleOK {
+		t.Errorf("成功反馈应带成功样式，实际 %+v", got)
 	}
-	if f.refreshHits != 1 {
-		t.Errorf("操作成功后应立即回读一次状态，实际 %d 次", f.refreshHits)
-	}
+	waitFor(t, "操作成功后回读一次状态", func() bool { return f.refreshes() == 1 })
 
 	// 系统代理当前是开的：点一下应该请求「关闭」
 	clickRegion(t, uiIDSys)
-	if len(f.toggleCalls) != 2 || f.toggleCalls[1].ID != uiIDSys || f.toggleCalls[1].On {
-		t.Fatalf("点系统代理胶囊应请求关闭，实际 %+v", f.toggleCalls)
+	waitFor(t, "发出关闭系统代理的请求", func() bool { return len(f.calls()) == 2 })
+	if c := f.calls(); c[1].ID != uiIDSys || c[1].On {
+		t.Fatalf("点系统代理胶囊应请求关闭，实际 %+v", c)
 	}
-	if got := lw.activeToast().Text; got != "系统代理已关闭" {
-		t.Errorf("关闭后的反馈文案不对：%q", got)
+	waitFor(t, "关闭后的反馈文案", func() bool { return toastText() == "系统代理已关闭" })
+}
+
+// TestToggleWhilePendingIsIgnored：切换还没做完时再点开关，不发第二次请求
+// （状态尚未回读，连着点只会得到与期望相反的结果），只更新一句提示。
+func TestToggleWhilePendingIsIgnored(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
+	setStatusForInteraction(false, true, true)
+	f := &fakeActions{gate: make(chan struct{})}
+	useFakeActions(t, f)
+	noToast(t)
+
+	clickRegion(t, uiIDHosts)
+	waitFor(t, "发起第一次切换", func() bool { return len(f.calls()) == 1 })
+	// 后台被 gate 卡住：此刻界面必须仍然有反馈，而且不能卡住窗口线程
+	if got := toastText(); got != "Hosts正在切换…" {
+		t.Errorf("切换期间应显示进行中的提示，实际 %q", got)
+	}
+
+	clickRegion(t, uiIDHosts)
+	if n := len(f.calls()); n != 1 {
+		t.Errorf("切换期间再点不该发起新请求，实际 %d 次", n)
+	}
+	if got := toastText(); !strings.Contains(got, "请稍候") {
+		t.Errorf("切换期间再点应提示稍候，实际 %q", got)
+	}
+
+	close(f.gate)
+	waitFor(t, "切换完成", func() bool { return toastText() == "Hosts已开启" })
+	waitFor(t, "pendingMode 清空", func() bool {
+		lw.mu.Lock()
+		defer lw.mu.Unlock()
+		return lw.pendingMode == ""
+	})
+	// 完成之后再点：又能正常发请求了
+	clickRegion(t, uiIDHosts)
+	waitFor(t, "完成后可以再次切换", func() bool { return len(f.calls()) == 2 })
 }
 
 func TestClickToggleModeKeepsOtherModeIntact(t *testing.T) {
@@ -151,8 +261,9 @@ func TestClickToggleModeKeepsOtherModeIntact(t *testing.T) {
 	useFakeActions(t, f)
 
 	clickRegion(t, uiIDMITM)
-	if len(f.toggleCalls) != 1 || f.toggleCalls[0].ID != uiIDMITM || !f.toggleCalls[0].On {
-		t.Fatalf("只应请求开启反代这一项，实际 %+v", f.toggleCalls)
+	waitFor(t, "发起切换", func() bool { return len(f.calls()) == 1 })
+	if c := f.calls(); c[0].ID != uiIDMITM || !c[0].On {
+		t.Fatalf("只应请求开启反代这一项，实际 %+v", c)
 	}
 }
 
@@ -174,8 +285,8 @@ func TestClickCancelWhenReleasedOutside(t *testing.T) {
 	// 在退出按钮上按下，但移到别处松开：这是「反悔」，不该触发任何动作
 	sendMouse(t, hwnd, wmLButtonDown, 1, (r.Rect.Left+r.Rect.Right)/2, (r.Rect.Top+r.Rect.Bottom)/2)
 	sendMouse(t, hwnd, wmLButtonUp, 0, 4, r.Rect.Bottom+40)
-	if f.quitHits != 0 {
-		t.Errorf("在别处松开不该退出，实际退出 %d 次", f.quitHits)
+	if n := f.quits(); n != 0 {
+		t.Errorf("在别处松开不该退出，实际退出 %d 次", n)
 	}
 	if lw.pressID != "" {
 		t.Errorf("松开后按下状态应清空，实际 %q", lw.pressID)
@@ -198,8 +309,9 @@ func TestClickBlankAreaDoesNothing(t *testing.T) {
 	// 日志卡片中间是空白（没有自绘区域），点它什么都不该发生
 	sendMouse(t, hwnd, wmLButtonDown, 1, cr.Right/2, cr.Bottom-30)
 	sendMouse(t, hwnd, wmLButtonUp, 0, cr.Right/2, cr.Bottom-30)
-	if len(f.toggleCalls) != 0 || f.quitHits != 0 || f.configHits != 0 {
-		t.Errorf("点空白处不该触发动作：%+v", f)
+	if len(f.calls()) != 0 || f.quits() != 0 || f.configs() != 0 {
+		t.Errorf("点空白处不该触发动作：请求 %v，退出 %d 次，打开配置 %d 次",
+			f.calls(), f.quits(), f.configs())
 	}
 }
 
@@ -213,11 +325,12 @@ func TestToggleFailureReportsInToast(t *testing.T) {
 	noToast(t)
 
 	clickRegion(t, uiIDHosts)
-	if got := lw.activeToast(); got.Text != "需要管理员权限" || got.Style != styleWarn {
-		t.Errorf("失败时应把原因显示在状态条上，实际 %+v", got)
+	waitFor(t, "失败反馈", func() bool { return toastText() == "需要管理员权限" })
+	if got := lw.activeToast(); got.Style != styleWarn {
+		t.Errorf("失败反馈应带警告样式，实际 %+v", got)
 	}
-	if f.refreshHits != 0 {
-		t.Errorf("失败时不该回读状态（本来就没变），实际 %d 次", f.refreshHits)
+	if n := f.refreshes(); n != 0 {
+		t.Errorf("失败时不该回读状态（本来就没变），实际 %d 次", n)
 	}
 }
 
@@ -230,12 +343,12 @@ func TestClickQuitAndConfig(t *testing.T) {
 	useFakeActions(t, f)
 
 	clickRegion(t, uiIDConfig)
-	if f.configHits != 1 {
-		t.Errorf("点「打开配置」应调用一次 OpenConfig，实际 %d", f.configHits)
+	if n := f.configs(); n != 1 {
+		t.Errorf("点「打开配置」应调用一次 OpenConfig，实际 %d", n)
 	}
 	clickRegion(t, uiIDQuit)
-	if f.quitHits != 1 {
-		t.Errorf("点「退出」应调用一次 Quit，实际 %d", f.quitHits)
+	if n := f.quits(); n != 1 {
+		t.Errorf("点「退出」应调用一次 Quit，实际 %d", n)
 	}
 }
 

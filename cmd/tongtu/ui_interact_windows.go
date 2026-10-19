@@ -430,20 +430,45 @@ func (w *logWindow) invokeAction(hwnd windows.Handle, id string) {
 }
 
 // toggleMode 切换单个加速模式。开关的当前状态取自状态条（与显示完全一致）。
+//
+// 切换放到后台 goroutine 上做：app 层要改系统代理 / hosts，启用无 SNI 反代还会重新预热，
+// 可能耗时几秒。如果在窗口线程里直接做，这几秒窗口既不重画也不响应鼠标（看着像卡死），
+// 所以窗口线程只负责立刻给一句「正在切换」的反馈，做完再回报结果。
+//
+// 切换期间忽略再次点击：状态还没回读，连着点只会得到与期望相反的结果（托盘菜单是同样
+// 的行为——它也把动作放在自己的 goroutine 上串行执行）。
 func (w *logWindow) toggleMode(act windowActions, id string) {
-	on := !w.statusSnapshot().onOf(id)
-	if err := act.ToggleMode(id, on); err != nil {
-		w.report(id, err)
+	w.mu.Lock()
+	if busy := w.pendingMode; busy != "" {
+		w.mu.Unlock()
+		w.toast(uiModeNames[busy]+"正在切换，请稍候…", styleMuted)
 		return
 	}
-	word := "已关闭"
-	if on {
-		word = "已开启"
-	}
-	w.toast(uiModeNames[id]+word, styleOK)
-	if act.Refresh != nil {
-		act.Refresh() // 立刻回读真实状态，不等下一轮 3 秒轮询
-	}
+	on := !w.status.onOf(id)
+	w.pendingMode = id
+	w.mu.Unlock()
+
+	name := uiModeNames[id]
+	w.toast(name+"正在切换…", styleMuted)
+
+	go func() {
+		err := act.ToggleMode(id, on)
+		w.mu.Lock()
+		w.pendingMode = ""
+		w.mu.Unlock()
+		if err != nil {
+			w.report(id, err)
+			return
+		}
+		word := "已关闭"
+		if on {
+			word = "已开启"
+		}
+		w.toast(name+word, styleOK)
+		if act.Refresh != nil {
+			act.Refresh() // 立刻回读真实状态，不等下一轮 3 秒轮询
+		}
+	}()
 }
 
 // report 把失败写进日志（窗口里能看到完整原因），并在状态条上给一行简短提示。

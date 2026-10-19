@@ -647,9 +647,12 @@ type logWindow struct {
 	layoutKey string
 	onlyWarn  bool    // 「只看警告」是否开启
 	toastMsg  uiToast // 当前轻量反馈（零值 = 没有）
-	font      uintptr
-	fontTitle uintptr
-	theme     uiTheme
+	// pendingMode 是正在后台切换的开关 id（空 = 没有）。
+	// 切换在别的 goroutine 上做（见 toggleMode），窗口线程只负责给反馈。
+	pendingMode string
+	font        uintptr
+	fontTitle   uintptr
+	theme       uiTheme
 	// 深/浅两套配色在创建窗口时就把画刷准备好：切换主题时整套替换，
 	// 不新建也不删除 GDI 对象（因此反复切换也不会泄漏）。
 	themeDarkSet  uiTheme
