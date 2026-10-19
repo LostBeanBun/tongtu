@@ -185,6 +185,7 @@ var startCmd = &cobra.Command{
 		// 窗口顶部状态条：跟随运行状态刷新（还没显示窗口时也照常更新缓存）
 		if hasLogWindow {
 			setWindowStatus(windowStatusOf(a, cfg))
+			wireWindowActions(a, cfg, signalQuit)
 			go refreshWindowStatus(a, cfg, quit)
 		}
 
@@ -408,9 +409,9 @@ func windowStatusOf(a *app.App, cfg *config.Config) windowStatus {
 		State: state,
 		Level: level,
 		Items: []windowStatusItem{
-			{Label: "系统代理", On: st.SystemProxy},
-			{Label: "Hosts", On: st.Hosts},
-			{Label: "无SNI反代", On: st.MITM},
+			{Label: "系统代理", On: st.SystemProxy, Action: uiIDSys, Tip: "系统代理模式：接管浏览器与系统流量（无需管理员）。点击开关"},
+			{Label: "Hosts", On: st.Hosts, Action: uiIDHosts, Tip: "Hosts 模式：覆盖 hosts 解析，供 Steam 客户端等不走代理的程序使用（需管理员）。点击开关"},
+			{Label: "无SNI反代", On: st.MITM, Action: uiIDMITM, Tip: "无 SNI 反代：本地解密被 SNI 封锁的域名，出站剥离 SNI（需先安装根证书）。点击开关"},
 		},
 		Detail: detail,
 	}
@@ -454,6 +455,47 @@ func refreshWindowStatus(a *app.App, cfg *config.Config, quit <-chan struct{}) {
 			setWindowStatus(windowStatusOf(a, cfg))
 		}
 	}
+}
+
+// wireWindowActions 把窗口界面上的动作接到 app 上。
+//
+// 与托盘菜单走同一套 API（app.SetMode / SetMITM / SetServices），因此两处的行为完全一致：
+// 同样的开关、同样的失败文案。窗口只负责「用户点了什么」，具体怎么做留在这一层。
+func wireWindowActions(a *app.App, cfg *config.Config, quit func()) {
+	setWindowActionsHook(func() windowActions {
+		st := a.Status()
+		return windowActions{
+			ToggleMode: func(id string, on bool) error {
+				// 单项开关要带上另一项的实际状态（SetMode 同时管系统代理与 hosts）
+				switch id {
+				case uiIDSys:
+					return a.SetMode(on, st.Hosts)
+				case uiIDHosts:
+					return a.SetMode(st.SystemProxy, on)
+				case uiIDMITM:
+					return a.SetMITM(on)
+				}
+				return fmt.Errorf("未知开关 %q", id)
+			},
+			SetServices: func(ids []string) error { return a.SetServices(ids) },
+			Services: func() []uiService {
+				on := a.Status().Services
+				enabled := make(map[string]bool, len(on))
+				for _, id := range on {
+					enabled[id] = true
+				}
+				ids := rules.BuiltinIDs()
+				out := make([]uiService, 0, len(ids))
+				for _, id := range ids {
+					out = append(out, uiService{ID: id, Name: rules.Name(id), On: enabled[id]})
+				}
+				return out
+			},
+			OpenConfig: func() error { return tray.OpenInNotepad(a.ConfigPath()) },
+			Quit:       quit,
+			Refresh:    func() { setWindowStatus(windowStatusOf(a, cfg)) },
+		}
+	})
 }
 
 func init() {

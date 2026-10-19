@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  通途 Tongtu 的应用程序清单（由 rsrc 编译进 exe 资源段，见 README「重新生成图标资源」）。
+
+  为什么需要它：请求 comctl32 v6 的通用控件。
+    - v5 下 EM_SETCUEBANNER（编辑框的空内容提示文字）不被支持，过滤框会是一个「没有任何说明的灰框」；
+    - v6 同时让系统自绘的部分（提示条、右键菜单、滚动条、插入符）用现代外观，
+      与窗口自绘部分放在一起才不显得是两代界面。
+
+  这里刻意**不写** dpiAware/dpiAwareness：DPI 感知由进程自己在启动时调用
+  SetProcessDpiAwarenessContext(PerMonitorV2) 申请（见 window_windows.go），
+  两边都写反而会让行为取决于 Windows 版本。
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity type="win32" name="Tongtu.Tongtu" version="1.0.0.0" processorArchitecture="amd64"/>
+  <description>通途 Tongtu —— Windows 网络加速</description>
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls"
+                        version="6.0.0.0" processorArchitecture="*"
+                        publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+</assembly>

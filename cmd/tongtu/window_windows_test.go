@@ -18,8 +18,9 @@ import (
 )
 
 var (
-	procPostMessageW = user32.NewProc("PostMessageW")
-	procIsWindow     = user32.NewProc("IsWindow")
+	procPostMessageW  = user32.NewProc("PostMessageW")
+	procIsWindow      = user32.NewProc("IsWindow")
+	procGetWindowRect = user32.NewProc("GetWindowRect")
 
 	procCreateCompatibleDC = gdi32.NewProc("CreateCompatibleDC")
 	procCreateDIBSection   = gdi32.NewProc("CreateDIBSection")
@@ -105,7 +106,19 @@ func (m *memDC) close() {
 	}
 }
 
-// TestStatusBarPaints 状态条是自绘的（透明背景压在系统模糊上）：配色分工必须真的落到像素上。
+// headerLayoutFor 测试用：按给定客户区尺寸算一份几何。
+//
+// 绘制与命中判定共用 computeUILayout（见 ui_layout_windows.go），因此这里算出的
+// 就是把状态条画到内存 DC 上时要用的同一份几何。
+func headerLayoutFor(t *testing.T, w, h int32) uiLayout {
+	t.Helper()
+	lw.mu.Lock()
+	dpi, st := lw.dpi, lw.status
+	lw.mu.Unlock()
+	return computeUILayout(w, h, dpi, st, lw.measureText, lw.measureTitle)
+}
+
+// TestStatusBarPaints 状态条是自绘的：配色分工必须真的落到像素上。
 // 位图初始为黑，因此「某个颜色出现了多少像素」可以精确断言。深浅两套主题各画一遍
 // （不依赖当前系统是深色还是浅色），颜色从主题里取，避免硬编码。
 func TestStatusBarPaints(t *testing.T) {
@@ -117,9 +130,9 @@ func TestStatusBarPaints(t *testing.T) {
 		State: "运行中",
 		Level: stateOK,
 		Items: []windowStatusItem{
-			{Label: "系统代理", On: true},
-			{Label: "Hosts", On: false},
-			{Label: "无SNI反代", On: true},
+			{Label: "系统代理", On: true, Action: uiIDSys},
+			{Label: "Hosts", On: false, Action: uiIDHosts},
+			{Label: "无SNI反代", On: true, Action: uiIDMITM},
 		},
 		Detail: []string{"服务组 steam", "活跃隧道 3", "↓1.2 MB ↑340 KB"},
 	})
@@ -149,7 +162,7 @@ func TestStatusBarPaints(t *testing.T) {
 				t.Fatal("无法创建内存 DC")
 			}
 			defer m.close()
-			lw.paintHeader(m.dc, w, h)
+			lw.paintHeader(m.dc, headerLayoutFor(t, w, h))
 			assertHeaderPixels(t, m, tc.th, w, h)
 		})
 	}
@@ -176,14 +189,14 @@ func assertHeaderPixels(t *testing.T, m *memDC, theme uiTheme, w, h int32) {
 	hairRGB := colorRefToRGB(theme.hairline)
 
 	// 状态点是实心圆（GDI 不做抗锯齿），因此颜色应当精确出现且数量够多
-	// （半径 7 DIP → 直径 14 DIP，实心面积约 150 像素；文字抗锯齿最多蹭到几个）
+	// （胶囊里半径 4 DIP → 直径 8 DIP，面积约 50 像素；文字抗锯齿最多蹭到几个）
 	for _, want := range []struct {
 		name string
 		c    uint32
 		min  int
 	}{
-		{"开启项的状态点（绿）", okRGB, 100},
-		{"关闭项的状态点（灰）", offRGB, 100},
+		{"开启项的状态点（绿）", okRGB, 20},
+		{"关闭项的状态点（灰）", offRGB, 20},
 	} {
 		if got := count[want.c]; got < want.min {
 			t.Errorf("%s 只用 %d 个像素画出（颜色 %#06x），至少要 %d 个",
@@ -278,19 +291,33 @@ func TestLogCardFilledAndInset(t *testing.T) {
 	inset := scaleDPI(uiCardPadDIP, dpi)
 	cardW := cr.Right - 2*pad
 	cardH := cr.Bottom - (pad + headH) - pad
+	l := headerLayoutFor(t, cr.Right, cr.Bottom)
 
-	// 1) 日志控件尺寸 = 卡片尺寸减去四周内边距
-	var er rectT
-	procGetClientRect.Call(uintptr(edit), uintptr(unsafe.Pointer(&er)))
-	if absInt(int(er.Right-(cardW-2*inset))) > 2 || absInt(int(er.Bottom-(cardH-2*inset))) > 2 {
-		t.Errorf("日志控件应嵌在卡片内边距里：控件 %dx%d，期望约 %dx%d（内边距 %d）",
-			er.Right, er.Bottom, cardW-2*inset, cardH-2*inset, inset)
+	// 1) 日志控件尺寸 = 几何算出的矩形（卡片内边距里、工具条下方）。
+	//
+	// 这里比较「窗口矩形」而不是「客户区矩形」：竖向滚动条出现时会占掉客户区宽度，
+	// 但控件窗口本身仍是几何给出的那块地方（用客户区比较会让测试依赖当时日志有多长）。
+	var ew rectT
+	procGetWindowRect.Call(uintptr(edit), uintptr(unsafe.Pointer(&ew)))
+	erW, erH := ew.Right-ew.Left, ew.Bottom-ew.Top
+	wantW, wantH := l.Edit.Right-l.Edit.Left, l.Edit.Bottom-l.Edit.Top
+	if absInt(int(erW-wantW)) > 2 || absInt(int(erH-wantH)) > 2 {
+		t.Errorf("日志控件尺寸与几何不符：控件 %dx%d，期望约 %dx%d", erW, erH, wantW, wantH)
 	}
 	if inset <= 0 {
 		t.Fatal("内边距必须为正，否则文字会贴着卡片边框")
 	}
+	// 工具条占掉卡片顶部一条：日志控件因此比「卡片内边距」矮一截，但仍占卡片大部分高度
+	toolbar := scaleDPI(uiToolbarDIP, dpi)
+	if erH >= cardH-2*inset {
+		t.Errorf("日志控件没有给卡片内的工具条让出位置：控件高 %d，卡片内高 %d", erH, cardH-2*inset)
+	}
+	if erH <= (cardH-2*inset-toolbar)*9/10 {
+		t.Errorf("日志控件被工具条挤得太小：控件高 %d，扣掉工具条后应约 %d",
+			erH, cardH-2*inset-toolbar)
+	}
 
-	// 2) 画一遍卡片：内部实心铺底色、四角被圆角切掉、上沿有发丝线
+	// 2) 画一遍卡片：内部实心铺底色、四角被圆角切掉、上沿与工具条下方有发丝线
 	m := newMemDC(cr.Right, cr.Bottom)
 	if m == nil {
 		t.Fatal("无法创建内存 DC")
@@ -298,7 +325,7 @@ func TestLogCardFilledAndInset(t *testing.T) {
 	defer m.close()
 	// 按真实绘制顺序：先铺窗口底色，再画卡片
 	procFillRect.Call(m.dc, uintptr(unsafe.Pointer(&cr)), theme.bgBrush)
-	lw.paintCard(m.dc, cr)
+	lw.paintCard(m.dc, l)
 
 	cardRGB, bgRGB, hairRGB := colorRefToRGB(theme.cardBG), colorRefToRGB(theme.bg), colorRefToRGB(theme.hairline)
 	top := pad + headH
@@ -314,6 +341,11 @@ func TestLogCardFilledAndInset(t *testing.T) {
 	}
 	if got := m.pixel(cardW/2, top-1); got != hairRGB {
 		t.Errorf("卡片上沿应有 1 像素发丝线：像素为 %#06x", got)
+	}
+	// 工具条与日志区之间也有一条发丝线（过滤框与内容在视觉上分开）
+	sep := l.FilterSep
+	if got := m.pixel(sep.Left+10, sep.Top); got != hairRGB {
+		t.Errorf("工具条下方应有 1 像素发丝线：像素为 %#06x", got)
 	}
 }
 
@@ -332,20 +364,29 @@ func TestLogWindowCloseHidesOnly(t *testing.T) {
 		t.Fatal("showLogWindow 之后窗口应可见")
 	}
 
-	// 日志区应占满「状态条下方」的客户区（只允许四周留白与滚动条）。
+	// 日志区应占满「状态条下方」的客户区（只允许四周留白、卡片工具条与滚动条）。
 	// 初始布局不能只留给 WM_SIZE：子控件创建晚于窗口的 WM_SIZE。
 	var wr, er rectT
 	procGetClientRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&wr)))
 	procGetClientRect.Call(uintptr(lw.editHandle()), uintptr(unsafe.Pointer(&er)))
 	lw.mu.Lock()
-	pad, headH, dpi := scaleDPI(uiPadDIP, lw.dpi), scaleDPI(uiHeaderDIP, lw.dpi), lw.dpi
+	pad, dpi := scaleDPI(uiPadDIP, lw.dpi), lw.dpi
 	lw.mu.Unlock()
-	wantH := wr.Bottom - 2*pad - headH - pad
+	l := headerLayoutFor(t, wr.Right, wr.Bottom)
+	wantH := l.Edit.Bottom - l.Edit.Top
 	if er.Bottom < wantH*9/10 {
 		t.Errorf("日志控件高度不足：期望约 %d，实际 %d（DPI %d）", wantH, er.Bottom, dpi)
 	}
 	if er.Right < (wr.Right-2*pad)*9/10 {
 		t.Errorf("日志控件宽度不足：窗口 %d，控件 %d（留白 %d）", wr.Right, er.Right, pad)
+	}
+	// 卡片工具条（过滤框）也要占到位：它得在卡片内、日志区上方
+	if l.Filter.Right > l.Filter.Left {
+		if l.Filter.Top <= l.Card.Top || l.Filter.Bottom >= l.Edit.Top {
+			t.Errorf("过滤框位置不对：filter=%+v card=%+v edit=%+v", l.Filter, l.Card, l.Edit)
+		}
+	} else {
+		t.Errorf("默认窗口宽度下应能放下过滤框（卡片宽 %d，DPI %d）", l.Card.Right-l.Card.Left, dpi)
 	}
 
 	// 日志应能写进窗口
@@ -467,9 +508,9 @@ func TestNarrowHeaderKeepsDetail(t *testing.T) {
 		t.Fatal("无法创建内存 DC")
 	}
 	defer m.close()
-	lw.paintHeader(m.dc, w, h)
+	lw.paintHeader(m.dc, headerLayoutFor(t, w, h))
 
-	// 右侧信息用 theme.muted 画（状态条里只有它用这个颜色），数一下位图上的精确像素。
+	// 右侧信息用 theme.muted 画，数一下位图上的精确像素。
 	want := colorRefToRGB(theme.muted)
 	n := 0
 	for y := int32(0); y < h; y++ {
@@ -739,7 +780,7 @@ func TestLogCardEdgeDrawn(t *testing.T) {
 		t.Fatal("无法创建内存 DC")
 	}
 	defer m.close()
-	lw.paintCard(m.dc, cr)
+	lw.paintCard(m.dc, headerLayoutFor(t, cr.Right, cr.Bottom))
 
 	pad, headH := scaleDPI(uiPadDIP, dpi), scaleDPI(uiHeaderDIP, dpi)
 	hair := colorRefToRGB(theme.hairline)
@@ -834,8 +875,8 @@ func TestWindowPrintsToDC(t *testing.T) {
 			}
 		}
 	}
-	// 一个「开」的状态点（半径 7 DIP）+ 卡片四周的描边
-	if dots < 100 {
+	// 一个「开」的状态点 + 卡片四周的描边
+	if dots < 20 {
 		t.Errorf("WM_PRINTCLIENT 没有画出状态点（绿色只有 %d 像素）", dots)
 	}
 	if hair < int(cr.Right-2*pad) {

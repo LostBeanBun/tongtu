@@ -117,6 +117,35 @@ func TestPaletteContrast(t *testing.T) {
 		if cr := contrastRatio(tc.th.hairline, tc.th.bg); cr < 1.15 {
 			t.Errorf("%s 主题：发丝线与窗口底的对比度只有 %.2f:1，要求 ≥1.15:1", tc.name, cr)
 		}
+
+		// 交互底色（悬停/按下）只压在窗口底上、且只在这一瞬出现：
+		// 文字与状态点仍要够清楚——它只表达「可以点 / 正被按住」，不该牺牲可读性。
+		if cr := contrastRatio(tc.th.text, tc.th.hover); cr < 7 {
+			t.Errorf("%s 主题：正文对悬停底色的对比度 %.2f:1，要求 ≥7:1", tc.name, cr)
+		}
+		for _, st := range []struct {
+			name string
+			c    uint32
+		}{{"开启状态点", tc.th.ok}, {"关闭状态点", tc.th.off}} {
+			if cr := contrastRatio(st.c, tc.th.hover); cr < 3 {
+				t.Errorf("%s 主题：%s 对悬停底色的对比度 %.2f:1，要求 ≥3:1",
+					tc.name, st.name, cr)
+			}
+		}
+		// 过滤框（输入框）是常驻底色：正文与次要文字都要能看清
+		for _, want := range []struct {
+			name string
+			c    uint32
+			min  float64
+		}{{"正文", tc.th.text, 7}, {"次要文字", tc.th.muted, 4.5}} {
+			if cr := contrastRatio(want.c, tc.th.input); cr < want.min {
+				t.Errorf("%s 主题：过滤框里的%s对比度 %.2f:1，要求 ≥%.1f:1",
+					tc.name, want.name, cr, want.min)
+			}
+		}
+		if cr := contrastRatio(tc.th.input, tc.th.cardBG); cr < 1.05 {
+			t.Errorf("%s 主题：过滤框与卡片底的层次差只有 %.2f:1，看不出是输入框", tc.name, cr)
+		}
 	}
 }
 
@@ -146,7 +175,7 @@ func TestPaletteHueHarmony(t *testing.T) {
 		}
 	}
 
-	// 中性色（表面/线条/三级文字）统一为同一种冷灰：不能有的偏蓝有的偏暖
+	// 中性色（表面/线条/三级文字/交互底色）统一为同一种冷灰：不能有的偏蓝有的偏暖
 	for _, n := range []struct {
 		name        string
 		light, dark uint32
@@ -155,6 +184,8 @@ func TestPaletteHueHarmony(t *testing.T) {
 		{"卡片", themeLight.cardBG, themeDark.cardBG},
 		{"发丝线", themeLight.hairline, themeDark.hairline},
 		{"弱化文字", themeLight.faint, themeDark.faint},
+		{"悬停底色", themeLight.hover, themeDark.hover},
+		{"过滤框底色", themeLight.input, themeDark.input},
 	} {
 		for mode, c := range map[string]uint32{"浅色": n.light, "深色": n.dark} {
 			h, s := hueOf(c)
