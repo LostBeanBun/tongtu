@@ -3,8 +3,13 @@
 package sysproxy
 
 import (
+	"errors"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestMergeBypassKeepsUserEntries 接管时必须保留用户原有的绕过项，同时补齐必需项。
@@ -51,6 +56,107 @@ func TestSplitBypass(t *testing.T) {
 	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
 		t.Errorf("拆分结果错误: %#v", got)
 	}
+}
+
+// TestDeadLocalProxy 识别「崩溃遗留的典型形态」：代理开着、指向本机回环、端口没人监听。
+//
+// 这是状态文件损坏时唯一能安全做的兜底判断——只在端口确实死了的情况下才关代理，
+// 避免把用户自己正在用的本地代理（Clash 等）关掉。
+func TestDeadLocalProxy(t *testing.T) {
+	on, off := uint(1), uint(0)
+	dead := deadLoopbackAddr(t)
+	live := liveLoopbackAddr(t)
+
+	cases := []struct {
+		name string
+		v    *Values
+		want bool
+	}{
+		{"指向死掉的本地端口", &Values{ProxyEnable: &on, ProxyServer: &dead}, true},
+		{"本地端口有人监听", &Values{ProxyEnable: &on, ProxyServer: &live}, false},
+		{"代理没开", &Values{ProxyEnable: &off, ProxyServer: &dead}, false},
+		{"指向外部地址", &Values{ProxyEnable: &on, ProxyServer: ptr("example.com:8080")}, false},
+		{"多协议写法", &Values{ProxyEnable: &on, ProxyServer: ptr("http=127.0.0.1:1;https=127.0.0.1:2")}, false},
+		{"空地址", &Values{ProxyEnable: &on, ProxyServer: ptr("")}, false},
+		{"没有地址", &Values{ProxyEnable: &on}, false},
+		{"空值", nil, false},
+	}
+	for _, c := range cases {
+		if got := deadLocalProxy(c.v); got != c.want {
+			t.Errorf("%s: deadLocalProxy = %v, want %v（地址 %v）", c.name, got, c.want, c.v)
+		}
+	}
+}
+
+// TestStateRoundTripAndAtomic 状态文件必须能原样读回，且不留临时文件。
+func TestStateRoundTripAndAtomic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sysproxy.json")
+	on, server := uint(1), "127.0.0.1:7890"
+	want := stateFile{Saved: Values{ProxyEnable: &on, ProxyServer: &server}, Addr: "127.0.0.1:19180", SavedAt: time.Now()}
+
+	if err := writeState(path, want); err != nil {
+		t.Fatalf("写状态文件失败: %v", err)
+	}
+	got, err := readState(path)
+	if err != nil {
+		t.Fatalf("读状态文件失败: %v", err)
+	}
+	if got.Addr != want.Addr || got.Saved.ProxyEnable == nil || *got.Saved.ProxyEnable != 1 ||
+		got.Saved.ProxyServer == nil || *got.Saved.ProxyServer != server {
+		t.Errorf("读回的内容不一致: %+v", got)
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Error("不应残留临时文件")
+	}
+}
+
+// TestReadStateCorrupt 半截 JSON 必须被识别成「损坏」，而不是普通的读取错误——
+// 调用方要靠它决定走 disableCorruptState 的兜底。
+func TestReadStateCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sysproxy.json")
+	if err := os.WriteFile(path, []byte(`{"saved":{"proxy_enable":1`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readState(path); !errors.Is(err, ErrStateCorrupt) {
+		t.Errorf("半截 JSON 应返回 ErrStateCorrupt，实际: %v", err)
+	}
+	if _, err := readState(filepath.Join(dir, "none.json")); !os.IsNotExist(err) {
+		t.Errorf("文件不存在应是 os.ErrNotExist，实际: %v", err)
+	}
+}
+
+// deadLoopbackAddr 返回一个「刚才还监听过、现在已经关掉」的回环地址。
+func deadLoopbackAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听回环端口失败: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	return addr
+}
+
+// liveLoopbackAddr 返回一个仍在监听的地址（测试结束自动关闭）。
+func liveLoopbackAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听回环端口失败: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	return ln.Addr().String()
 }
 
 // TestHeldIn 只有「代理开着且地址就是接管地址」才算仍由通途持有。

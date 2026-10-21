@@ -126,6 +126,21 @@ func normalizeName(n string) string {
 // Path 返回 hosts 文件路径。
 func (m *Manager) Path() string { return m.path }
 
+// Managed 报告 path 指向的 hosts 文件里是否还有 tongtu 托管块（只读，不需要管理员权限）。
+//
+// 用于启动时发现「上一轮提权运行留下的托管块没清掉」——读 hosts 一般不受权限限制，
+// 所以非管理员实例也能判断出「有残留」，并提示用户提权清理一次。
+func Managed(path string) bool {
+	if path == "" {
+		path = DefaultPath()
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return bytes.Contains(data, []byte(beginMark))
+}
+
 // Apply 重新解析名单并写入托管块。返回内容是否发生变化。
 func (m *Manager) Apply(ctx context.Context) (bool, error) {
 	m.mu.Lock()

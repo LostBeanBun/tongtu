@@ -303,11 +303,11 @@ func (a *App) Shutdown(ctx context.Context) error {
 	}
 	a.px.CloseLocal() // 本地 MITM 直连监听（幂等）
 	if sysOn {
-		takenOver, err := sysproxy.Disable(saved)
+		out, err := sysproxy.Disable(saved)
 		switch {
 		case err != nil:
 			errs = append(errs, err)
-		case takenOver:
+		case out == sysproxy.NotHeld:
 			a.log.Warn("系统代理已被其他程序接管，退出时未还原（避免覆盖对方的设置）")
 		}
 	}
@@ -348,11 +348,11 @@ func (a *App) SetMode(sys, hostsWant bool) error {
 		}
 	case !sys && held:
 		// 我们确实还持有，用户要关：Disable 负责还原到接管前的值。
-		takenOver, err := sysproxy.Disable(a.sysSaved)
+		out, err := sysproxy.Disable(a.sysSaved)
 		switch {
 		case err != nil:
 			errs = append(errs, err)
-		case takenOver:
+		case out == sysproxy.NotHeld:
 			a.log.Warn("系统代理刚刚被其他程序接管，未还原（避免覆盖对方的设置）")
 		}
 		a.sysOn = false
@@ -424,14 +424,23 @@ func (a *App) SetMITM(on bool) error {
 		}
 		a.log.Info("无 SNI 反代已启用")
 	} else {
+		// 顺序很重要：先把 hosts 里的本地回环指向改回真实 IP，再关本地 :443/:80 监听。
+		// 反过来会留下一个「hosts 指着 127.0.0.1、但没人监听」的窗口——改写 hosts 还要
+		// 重新解析域名，可能要几百毫秒到几秒，这段时间这些域名全是连接失败。
+		a.hm.SetLocalHosts(nil)
+		a.hm.SetLocalIPv6(false)
+		if a.hostsOn && !a.applyHostsLocked("停用无 SNI 反代") {
+			// hosts 没改成功：这时绝不能关本地监听，否则托管块里的域名会指向死端口。
+			// 整体回滚成「反代仍然开着」，把失败原因交给界面显示，让用户重试。
+			a.hm.SetLocalHosts(a.mitmLocalNames)
+			a.hm.SetLocalIPv6(a.px.LocalIPv6Up())
+			return fmt.Errorf("停用无 SNI 反代失败：hosts 未能更新（可能仍需要管理员权限），已保持开启状态")
+		}
 		a.px.DisableMITM()
 		a.mitmCa = nil
 		a.mitmLocalNames = nil
 		a.cfg.MITM.Enabled = false
 		a.stopLocalMITM()
-		if a.hostsOn {
-			a.applyHostsLocked("停用无 SNI 反代")
-		}
 		a.log.Info("无 SNI 反代已停用")
 	}
 	a.saveConfigLocked()
@@ -480,13 +489,18 @@ func (a *App) ConfigPath() string {
 // DataDir 返回配置与证书等数据的目录。
 func (a *App) DataDir() string { return config.Dir() }
 
-// applyHostsLocked 重新写入 hosts 托管块（需持有 a.mu），失败仅记录日志。
-func (a *App) applyHostsLocked(why string) {
+// applyHostsLocked 重新写入 hosts 托管块（需持有 a.mu），返回是否成功。
+//
+// 调用方在「关闭某个本地监听」之前必须先确认这一步成功：hosts 里还指着 127.0.0.1
+// 而监听已经关掉，那些域名就会一直连接失败（见 SetMITM 的停用路径）。
+func (a *App) applyHostsLocked(why string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	if _, err := a.hm.Apply(ctx); err != nil {
 		a.log.Warn("hosts 更新失败", "why", why, "err", err)
+		return false
 	}
+	return true
 }
 
 // saveConfigLocked 把当前配置持久化到配置文件（需持有 a.mu），失败仅记录日志。
@@ -587,12 +601,14 @@ func RecoverStale(log *slog.Logger) {
 		return
 	}
 	if sysproxy.Active() {
-		takenOver, err := sysproxy.Disable(nil)
+		out, err := sysproxy.Disable(nil)
 		switch {
 		case err != nil:
 			log.Error("清理遗留系统代理状态失败", "err", err)
-		case takenOver:
+		case out == sysproxy.NotHeld:
 			log.Warn("遗留的系统代理已被其他程序接管，已清除记录但未改动注册表")
+		case out == sysproxy.DisabledDeadProxy:
+			log.Warn("系统代理状态文件已损坏（原值无法恢复），已关闭指向失效本地端口的系统代理")
 		default:
 			log.Info("已还原上次遗留的系统代理设置")
 		}

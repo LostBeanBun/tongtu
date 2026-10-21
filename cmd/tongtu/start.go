@@ -17,6 +17,7 @@ import (
 	"tongtu/internal/app"
 	"tongtu/internal/config"
 	"tongtu/internal/control"
+	"tongtu/internal/hosts"
 	"tongtu/internal/mitm"
 	"tongtu/internal/rules"
 	"tongtu/internal/tray"
@@ -79,6 +80,16 @@ var startCmd = &cobra.Command{
 			app.RecoverStale(log)
 		}
 
+		wantSys := cfg.SystemProxy && !flagNoSysProxy
+		wantHosts := cfg.Hosts && !flagNoHosts
+		// 崩溃防护第二步：**在真正接管之前**就把监护进程拉起来。
+		// 接管发生在 a.Start() 里（写状态文件 + 改注册表 / hosts），如果等启动流程走完
+		// 再拉监护，中间这段时间崩溃就没人还原了。此刻可能还什么都没接管：监护进程醒来
+		// 走的 RecoverStale 是幂等的，没有待还原状态时它什么都不会做。
+		if wantSys || wantHosts {
+			startGuard(log)
+		}
+
 		var mitmCA *mitm.CA
 		mitmNote := ""
 		switch {
@@ -89,8 +100,6 @@ var startCmd = &cobra.Command{
 		case cfg.MITM.Enabled:
 			mitmCA, mitmNote = ensureMITMCert(cfg, log, !flagHidden)
 		}
-		wantSys := cfg.SystemProxy && !flagNoSysProxy
-		wantHosts := cfg.Hosts && !flagNoHosts
 		a := app.New(app.Options{
 			Config:     cfg,
 			Rules:      rs,
@@ -140,8 +149,8 @@ var startCmd = &cobra.Command{
 			return err
 		}
 
-		// 崩溃防护第二步：一旦接管了系统代理 / hosts，就拉起监护进程。
-		// 托盘里手动打开开关的情况由 watchGuard 轮询补上。
+		// 崩溃防护第三步（兜底）：启动时没接管成功、但后来在托盘里打开了开关的情况，
+		// 由 watchGuard 轮询补上；已经拉过监护进程时这里就是空操作。
 		watchStop := make(chan struct{})
 		defer close(watchStop)
 		go watchGuard(a, log, watchStop)
@@ -150,6 +159,13 @@ var startCmd = &cobra.Command{
 		}
 
 		st := a.Status()
+		// 上一轮（提权运行时）留下的 hosts 托管块，如果这一轮没能清掉、也没有接管 hosts，
+		// 那些域名会指向一个没人监听的本地端口——必须让用户看见，而不是只躺在日志里。
+		leftoverHosts := !st.Hosts && hosts.Managed(hosts.DefaultPath())
+		if leftoverHosts {
+			log.Warn("检测到上次遗留的 hosts 托管块，需要管理员权限才能清理；相关域名当前不可用",
+				"建议", "以管理员身份运行一次 tongtu（或 tongtu stop）让它清理")
+		}
 		// 启动摘要：控制台印纯文本（renderSummaryText），窗口里印同一份内容但带颜色，
 		// 因此这里只描述「事实」，两种呈现都从 rows 生成，不会出现两处说法不一致。
 		title := "通途已启动"
@@ -168,6 +184,10 @@ var startCmd = &cobra.Command{
 			modeRow("系统代理", wantSys, st.SystemProxy, "已接管", "未启用", "未接管（接管失败，详见日志）"),
 			modeRow("Hosts", wantHosts, st.Hosts, "已生效", "未启用", "未生效（需要以管理员身份运行）"),
 			mitm,
+		}
+		if leftoverHosts {
+			rows = append(rows, summaryRow{Mark: markWarn, Label: "Hosts 残留",
+				Value: "上次写入的托管块没清掉，需以管理员身份运行一次（相关域名当前不可用）"})
 		}
 		if row, ok := guardRow(guardBreakawayFailed()); ok {
 			rows = append(rows, row)

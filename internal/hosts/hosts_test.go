@@ -315,3 +315,28 @@ func TestRunRetriesQuicklyAfterFailure(t *testing.T) {
 		t.Fatalf("失败后应快速重试（2 秒内至少 3 次），实际 %d 次", got)
 	}
 }
+
+// TestManaged 只读判断「托管块是否还在」：启动时发现上一轮提权运行留下的残留靠它。
+// 关键点：读 hosts 一般不需要管理员权限，所以非管理员实例也能判断出有残留并提示用户。
+func TestManaged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hosts")
+	if err := os.WriteFile(path, []byte("127.0.0.1 localhost`r`n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if Managed(path) {
+		t.Error("没有托管块时应返回 false")
+	}
+
+	withBlock := "127.0.0.1 localhost\n" +
+		beginMark + "\n127.0.0.1 steamcommunity.com\n" + endMark + "\n"
+	if err := os.WriteFile(path, []byte(withBlock), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !Managed(path) {
+		t.Error("存在托管块时应返回 true")
+	}
+	if Managed(filepath.Join(dir, "missing")) {
+		t.Error("文件读不到时应返回 false")
+	}
+}
