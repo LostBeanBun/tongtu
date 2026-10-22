@@ -3,9 +3,12 @@ package main
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"tongtu/internal/app"
 )
 
 // errorWriter 总是写失败，用来模拟「GUI 方式启动时无效的 os.Stderr」。
@@ -64,5 +67,27 @@ func TestStartFlags(t *testing.T) {
 		if startCmd.Flags().Lookup(name) == nil && startCmd.InheritedFlags().Lookup(name) == nil {
 			t.Errorf("start 子命令继承不到 --%s", name)
 		}
+	}
+}
+
+// TestStatusWord 三种状态分开写：暂停中的实例还活着，不该显示成「已停止」。
+func TestStatusWord(t *testing.T) {
+	cases := []struct {
+		name string
+		st   app.Status
+		want string
+	}{
+		{"停止", app.Status{}, "已停止"},
+		{"运行", app.Status{Running: true, UptimeSec: 90}, "运行中 (1 分 30 秒)"},
+		{"暂停", app.Status{Running: true, Paused: true, UptimeSec: 3660}, "已暂停 (1 时 1 分，可恢复"},
+	}
+	for _, c := range cases {
+		got := statusWord(&c.st)
+		if !strings.HasPrefix(got, c.want) {
+			t.Errorf("%s：状态词 %q，期望以 %q 开头", c.name, got, c.want)
+		}
+	}
+	if got := statusWord(&app.Status{Running: true, Paused: true}); !strings.Contains(got, "可恢复") {
+		t.Errorf("暂停时应说明怎么恢复：%q", got)
 	}
 }

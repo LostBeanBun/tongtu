@@ -45,11 +45,7 @@ var statusCmd = &cobra.Command{
 }
 
 func printStatus(st *app.Status) {
-	state := "已停止"
-	if st.Running {
-		state = "运行中 (" + formatUptime(st.UptimeSec) + ")"
-	}
-	fmt.Printf("状态:     %s\n", state)
+	fmt.Printf("状态:     %s\n", statusWord(st))
 	fmt.Printf("代理监听: %s\n", st.Listen)
 	sysTag := onOff(st.SystemProxy)
 	if st.ProxyNote != "" {
@@ -87,6 +83,20 @@ func printStatus(st *app.Status) {
 		}
 		fmt.Printf("  %s %s%s\n", tag, h.Endpoint, extra)
 	}
+}
+
+// statusWord 是 `tongtu status` 第一行的状态词。
+//
+// 暂停不是「停止」也不是「运行中」：进程还在、随时能恢复，但对外已经什么都没接管。
+// 三个状态分开写，脚本里 grep 时也不会把「暂停」误判成「已停止」。
+func statusWord(st *app.Status) string {
+	switch {
+	case st.Paused:
+		return "已暂停 (" + formatUptime(st.UptimeSec) + "，可恢复：点窗口「恢复」或托盘「恢复全部加速」)"
+	case st.Running:
+		return "运行中 (" + formatUptime(st.UptimeSec) + ")"
+	}
+	return "已停止"
 }
 
 func formatUptime(sec int64) string {
