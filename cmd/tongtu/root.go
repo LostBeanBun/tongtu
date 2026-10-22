@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -97,8 +96,8 @@ func newLogger(cfg *config.Config) *slog.Logger {
 		level = slog.LevelError
 	}
 	writers := []io.Writer{os.Stderr}
-	if cfg.Log.File != "" {
-		if f, err := openLogFile(cfg.Log.File); err == nil {
+	if path := cfg.LogFilePath(); path != "" {
+		if f, err := openLogFile(path); err == nil {
 			writers = append(writers, f)
 		} else {
 			fmt.Fprintln(os.Stderr, "警告: 日志文件打开失败:", err)
@@ -130,14 +129,13 @@ func (f logFanout) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func openLogFile(p string) (*os.File, error) {
-	if !strings.ContainsRune(p, os.PathSeparator) && !strings.Contains(p, "/") {
-		p = filepath.Join(config.Dir(), p)
-	}
+// openLogFile 打开日志文件并套上轮转（超过上限自动换新文件，见 logfile.go）。
+// path 是完整路径（由 config.LogFilePath 解析，可能是数据目录里的 tongtu.log）。
+func openLogFile(path string) (io.Writer, error) {
 	if err := config.EnsureDir(); err != nil {
 		return nil, err
 	}
-	return os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	return newRotatingLog(path, logMaxBytes, logKeepFiles)
 }
 
 func humanBytes(n int64) string {

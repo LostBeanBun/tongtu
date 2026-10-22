@@ -204,6 +204,18 @@ func (s *recordingSink) addLines(lines []logLine) { s.lines = append(s.lines, li
 func (s *recordingSink) addSummary(title string, rows []summaryRow) {
 	s.lines = append(s.lines, renderSummary(title, rows)...)
 }
+func (s *recordingSink) recentText(n int) string {
+	lines := s.lines
+	if n > 0 && len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString(l.plain())
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
 
 type discardWriter struct{}
 

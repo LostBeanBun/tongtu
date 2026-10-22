@@ -12,6 +12,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"tongtu/internal/mitm"
 )
 
 var (
@@ -34,6 +36,16 @@ func openInNotepad(path string) error {
 	return exec.Command("notepad.exe", path).Start()
 }
 
+// openLocation 在资源管理器里打开文件所在目录并选中它。
+//
+// 比「只打开目录」更有用：用户点「打开日志文件」是想看那一个文件，
+// 而不是在一个塞满 ca.crt / config.yaml 的目录里自己找。
+func openLocation(path string) error {
+	cmd := exec.Command("explorer", "/select,"+path)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	return cmd.Start()
+}
+
 // confirmRestartElevated 询问是否以管理员身份重启。
 //
 // 这一步必须放在退出之前：点了菜单之后程序会先还原系统设置再退出，
@@ -51,6 +63,24 @@ func confirmRestartElevated() bool {
 		"Hosts 模式需要管理员权限，重启后会立即生效（并可创建「最高权限」开机自启）。\n" +
 		"若在 UAC 里选择取消，通途不会自动回来，需手动重新打开。\n\n是否继续？"
 	return messageBoxYesNo("通途 Tongtu — 以管理员身份重启", msg, mbYesNo|mbIconQuestion|mbSetForeground|mbTopMost)
+}
+
+// ensureCertForMITM 确保无 SNI 反代所需的根证书已安装（未装时先问再装）。
+// 返回 false 表示用户放弃安装——此时不该切换开关。
+//
+// 为什么放在托盘这一层：窗口与托盘是两个入口，同一个前置条件必须由同一段代码把住，
+// 否则「窗口里能用、托盘里报错」这种不一致迟早会出现。
+func ensureCertForMITM(dir string) (bool, error) {
+	const (
+		mbYesNo         = 0x4
+		mbIconQuestion  = 0x20
+		mbSetForeground = 0x10000
+		mbTopMost       = 0x40000
+	)
+	return mitm.EnsureInstalled(dir, func(prompt string) bool {
+		return messageBoxYesNo("通途 Tongtu — 安装根证书", prompt+"\n\n是否现在安装？",
+			mbYesNo|mbIconQuestion|mbSetForeground|mbTopMost)
+	})
 }
 
 func messageBoxYesNo(title, msg string, flags uint32) bool {

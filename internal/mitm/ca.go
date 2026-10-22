@@ -254,6 +254,58 @@ func Uninstall(ca *CA) error {
 	return nil
 }
 
+// InstallPrompt 返回安装根证书的说明文字（GUI 弹框与终端提示共用同一份说法）。
+//
+// 三个入口（启动时询问、窗口开关、托盘开关）说的话必须一致，
+// 否则用户会以为它们装的是不同的东西。
+func InstallPrompt(certPath string) string {
+	return "首次启用「无 SNI 反代」需要安装本地根证书：\n\n" +
+		"  · 仅安装到【当前用户】存储（无需管理员），私钥留在本机\n" +
+		"  · 仅对配置列出的域名解密（默认 steamcommunity / raw.githubusercontent），其余流量端到端隧道不解密\n" +
+		"  · Firefox 使用自带证书库，需手动导入 ca.crt；卸载：tongtu cert uninstall\n\n" +
+		fmt.Sprintf("证书文件：%s", certPath)
+}
+
+// CertInstalled 报告本地根证书是否已安装（不存在时生成一份，但不安装）。
+func CertInstalled(dir string) (bool, error) {
+	ca, err := LoadOrCreate(dir)
+	if err != nil {
+		return false, err
+	}
+	return Installed(ca)
+}
+
+// EnsureInstalled 确保根证书已安装到当前用户存储。
+//
+// ask 为 nil 时只检查不安装；非 nil 时把说明文字交给它询问用户，
+// 同意后才安装。返回值 installed 表示「最终是否处于已安装状态」。
+func EnsureInstalled(dir string, ask func(prompt string) bool) (installed bool, err error) {
+	ca, err := LoadOrCreate(dir)
+	if err != nil {
+		return false, err
+	}
+	if ok, _ := Installed(ca); ok {
+		return true, nil
+	}
+	if ask == nil {
+		return false, nil
+	}
+	certPath, _ := CertPaths(dir)
+	if !ask(InstallPrompt(certPath)) {
+		return false, nil
+	}
+	if err := Install(ca); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// InstallIfNeeded 未安装时直接安装（调用方已经问过用户了）。
+func InstallIfNeeded(dir string) error {
+	_, err := EnsureInstalled(dir, func(string) bool { return true })
+	return err
+}
+
 func errorsFirst(a, b error) error {
 	if a != nil {
 		return a

@@ -65,6 +65,57 @@ func TestDefaultSanity(t *testing.T) {
 	}
 }
 
+// TestLogFilePath 锁住「日志默认落盘、可以把文件日志关掉」这条约定：
+//
+//   - 留空 = 用默认值 tongtu.log（落在数据目录里）
+//   - 只写文件名 = 数据目录下的文件
+//   - 带分隔符 = 就当完整路径
+//   - off / none / - = 不写文件日志
+func TestLogFilePath(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+
+	cfg := Default()
+	if got := cfg.LogFilePath(); got != filepath.Join(Dir(), "tongtu.log") {
+		t.Errorf("默认应落在数据目录: %q", got)
+	}
+
+	cfg.Log.File = "custom.log"
+	if got := cfg.LogFilePath(); got != filepath.Join(Dir(), "custom.log") {
+		t.Errorf("只写文件名应落在数据目录: %q", got)
+	}
+
+	full := filepath.Join(dir, "somewhere", "x.log")
+	cfg.Log.File = full
+	if got := cfg.LogFilePath(); got != full {
+		t.Errorf("带分隔符应按完整路径处理: %q", got)
+	}
+
+	for _, off := range []string{"off", "OFF", "none", "-", "  "} {
+		cfg.Log.File = off
+		if got := cfg.LogFilePath(); got != "" {
+			t.Errorf("log.file=%q 时不该写文件，实际 %q", off, got)
+		}
+	}
+}
+
+// TestValidateFillsLogFile 空值应回填默认文件名：老配置里 log.file 是空串，
+// 升级后要能自动开始落盘（但不重置其它用户设置）。
+func TestValidateFillsLogFile(t *testing.T) {
+	cfg := Default()
+	cfg.Log.File = ""
+	cfg.Services = []string{"github"} // 用户自定义：不该被改动
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if cfg.Log.File != Default().Log.File {
+		t.Errorf("空的 log.file 应回填默认值，实际 %q", cfg.Log.File)
+	}
+	if len(cfg.Services) != 1 || cfg.Services[0] != "github" {
+		t.Errorf("校验不该改动用户的其它设置，实际 %+v", cfg.Services)
+	}
+}
+
 // matchAny 判断 host 是否命中任一通配模式（与 rules.matchPattern 同规则：*.a.com 含裸域 a.com）。
 func matchAny(host string, patterns []string) bool {
 	for _, p := range patterns {

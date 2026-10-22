@@ -224,6 +224,20 @@ func clickLoop(a *app.App, m *menu, done chan struct{}, onQuit func(), onWindow 
 
 		case <-m.mitm.ClickedCh:
 			st := a.Status()
+			if !st.MITM {
+				// 开启前先确认根证书：没有证书的反代只会失败，
+				// 而「去终端执行 tongtu cert install」正是 0.2.0 要去掉的门槛。
+				ok, err := ensureCertForMITM(a.DataDir())
+				if err != nil {
+					fail("安装根证书失败：\n" + err.Error())
+					syncState()
+					continue
+				}
+				if !ok {
+					syncState()
+					continue // 用户放弃安装：开关保持原样
+				}
+			}
 			if err := a.SetMITM(!st.MITM); err != nil {
 				fail("切换无 SNI 反代失败：\n" + err.Error())
 			}

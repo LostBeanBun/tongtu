@@ -46,6 +46,8 @@ type windowStatus struct {
 	Level  windowStateLevel // 状态词的健康度（决定颜色）
 	Items  []windowStatusItem
 	Detail []string // 第二行的信息片段（服务组 / 活跃隧道 / 流量），绘制时用「·」连接
+	// TodoN 是待办项数量：> 0 时第二行会多出一个「待办 N」按钮（见 ui_layout_windows.go）。
+	TodoN int
 }
 
 // windowStatusItem 是一个带状态点的开关项。
@@ -102,5 +104,7 @@ func (s windowStatus) key() string {
 	}
 	b.WriteByte('|')
 	b.WriteString(strings.Join(s.Detail, "\x1f"))
+	b.WriteByte('|')
+	b.WriteString(strconv.Itoa(s.TodoN))
 	return b.String()
 }

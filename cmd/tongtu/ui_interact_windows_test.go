@@ -13,6 +13,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"tongtu/internal/selfcheck"
 )
 
 // 本文件单测「交互层」：把鼠标消息真的发给窗口过程，断言动作被正确触发。
@@ -26,13 +28,20 @@ import (
 // 开关切换现在跑在后台 goroutine 上（见 toggleMode），所以这里的计数都要加锁，
 // 并且可以挂一个 gate 把切换卡住，用来观察「正在切换」时的界面表现。
 type fakeActions struct {
-	mu          sync.Mutex
-	gate        chan struct{} // 非 nil 时 ToggleMode 会等它被关闭
-	toggleCalls []fakeToggle
-	toggleErr   error
-	refreshHits int
-	quitHits    int
-	configHits  int
+	mu           sync.Mutex
+	gate         chan struct{} // 非 nil 时 ToggleMode 会等它被关闭
+	toggleCalls  []fakeToggle
+	toggleErr    error
+	refreshHits  int
+	quitHits     int
+	configHits   int
+	selfTest     []selfcheck.Row // SelfTest 的返回值
+	selfTestHit  int
+	selfTestGate chan struct{} // 非 nil 时 SelfTest 会等它被关闭（模拟「体检中」）
+	certMissing  bool          // true 表示「证书还没装」（默认已装：否则会弹模态框把测试卡住）
+	certHits     int
+	todoItems    []uiTodoItem
+	todoRuns     []string
 }
 
 type fakeToggle struct {
@@ -70,6 +79,30 @@ func (f *fakeActions) actions() windowActions {
 			f.refreshHits++
 			f.mu.Unlock()
 		},
+		SelfTest: func(context.Context) []selfcheck.Row {
+			f.mu.Lock()
+			f.selfTestHit++
+			gate, rows := f.selfTestGate, f.selfTest
+			f.mu.Unlock()
+			if gate != nil {
+				<-gate
+			}
+			return rows
+		},
+		CertReady: func() bool {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.certHits++
+			return !f.certMissing
+		},
+		InstallCert: func() error { return nil },
+		Todos:       func() []uiTodoItem { return f.todoItems },
+		RunTodo: func(id string) error {
+			f.mu.Lock()
+			f.todoRuns = append(f.todoRuns, id)
+			f.mu.Unlock()
+			return nil
+		},
 	}
 }
 
@@ -95,6 +128,12 @@ func (f *fakeActions) configs() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.configHits
+}
+
+func (f *fakeActions) selfTestCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.selfTestHit
 }
 
 // useFakeActions 注入假动作，并在测试结束时清掉（避免影响其它测试）。
@@ -361,7 +400,7 @@ func TestQuitWithoutActionsDoesNothing(t *testing.T) {
 	clickRegion(t, uiIDQuit)  // 不应崩
 }
 
-func TestClearLogButtonClearsEdit(t *testing.T) {
+func TestClearLogMenuEntryClearsEdit(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
@@ -372,9 +411,14 @@ func TestClearLogButtonClearsEdit(t *testing.T) {
 	if got := editText(t); !strings.Contains(got, "清空之前的一行日志") {
 		t.Fatalf("准备条件不成立：日志控件里没有刚写入的行：%q", got)
 	}
-	clickRegion(t, uiIDClear)
+	// 「清空窗口日志」现在是「日志」菜单里的一项：菜单本身是模态的（会阻塞测试），
+	// 因此这里直接分发菜单项的 id——这正是选中菜单项后走的那一步。
+	lw.mu.Lock()
+	hwnd := lw.hwnd
+	lw.mu.Unlock()
+	lw.invokeAction(hwnd, uiIDClear)
 	if got := editText(t); got != "" {
-		t.Errorf("点「清空日志」后日志控件应为空，实际 %q", got)
+		t.Errorf("清空日志后日志控件应为空，实际 %q", got)
 	}
 	lw.mu.Lock()
 	n := len(lw.lines)
@@ -585,5 +629,88 @@ func TestServicesMenuPointIsScreenCoords(t *testing.T) {
 	if pt.X < wr.Left || pt.X > wr.Right || pt.Y < wr.Top || pt.Y > wr.Bottom {
 		t.Errorf("菜单位置 (%d,%d) 不在窗口的屏幕矩形 (%d,%d)-(%d,%d) 内",
 			pt.X, pt.Y, wr.Left, wr.Top, wr.Right, wr.Bottom)
+	}
+}
+
+// TestSelfTestWritesResultsToCard：点「自检」后，结果要写进日志卡片并给一行反馈。
+//
+// 自检本身跑在后台（十来个域名串行访问），因此这里用假动作秒回结果，
+// 专测「点了之后界面该发生什么」：按钮进入进行中、结果成块、结论回填到状态条。
+func TestSelfTestWritesResultsToCard(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, false, true)
+	f := &fakeActions{selfTest: []selfcheck.Row{
+		{Host: "github.com", DNSOK: true, ProxyOK: true, ProxyTested: true, Verdict: selfcheck.VerdictOK},
+		{Host: "raw.githubusercontent.com", DNSOK: true, DirectOK: true, ProxyTested: true,
+			Verdict: selfcheck.VerdictDirectOnly},
+	}}
+	useFakeActions(t, f)
+	lw.clearLog()
+
+	clickRegion(t, uiIDSelfTest)
+	waitFor(t, "自检结果写入日志卡片", func() bool {
+		return strings.Contains(lw.recentText(0), "自检结果")
+	})
+	waitFor(t, "状态条给出结论", func() bool {
+		return strings.Contains(toastText(), "仅直连")
+	})
+	waitFor(t, "自检收尾（按钮回到常态）", func() bool {
+		lw.mu.Lock()
+		defer lw.mu.Unlock()
+		return !lw.selfTesting
+	})
+
+	text := lw.recentText(0)
+	if !strings.Contains(text, "github.com") {
+		t.Errorf("结果里应有被体检的域名，实际：%q", text)
+	}
+	if !strings.Contains(text, "仅直连") {
+		t.Errorf("没走加速的域名要说明「仅直连」，实际：%q", text)
+	}
+	if !strings.Contains(text, "合计") {
+		t.Errorf("结果末尾应有合计行，实际：%q", text)
+	}
+	if got := toastText(); !strings.Contains(got, "仅直连") {
+		t.Errorf("状态条应反馈「有几个没走加速」，实际 %q", got)
+	}
+	if n := f.selfTestCalls(); n != 1 {
+		t.Errorf("应只跑一次自检，实际 %d 次", n)
+	}
+}
+
+// TestSelfTestIgnoredWhileRunning：自检进行中重复点只提示，不会再起一次。
+func TestSelfTestIgnoredWhileRunning(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, false, true)
+	gate := make(chan struct{})
+	f := &fakeActions{selfTest: []selfcheck.Row{{Host: "a", Verdict: selfcheck.VerdictOK}}}
+	f.mu.Lock()
+	f.selfTestGate = gate
+	f.mu.Unlock()
+	useFakeActions(t, f)
+	lw.clearLog()
+
+	clickRegion(t, uiIDSelfTest)
+	waitFor(t, "自检开始", func() bool {
+		lw.mu.Lock()
+		defer lw.mu.Unlock()
+		return lw.selfTesting
+	})
+	clickRegion(t, uiIDSelfTest) // 第二次点击应被忽略
+	if got := toastText(); !strings.Contains(got, "正在进行") {
+		t.Errorf("重复点击应提示「正在进行」，实际 %q", got)
+	}
+	close(gate)
+	waitFor(t, "自检收尾", func() bool {
+		lw.mu.Lock()
+		defer lw.mu.Unlock()
+		return !lw.selfTesting
+	})
+	if n := f.selfTestCalls(); n != 1 {
+		t.Errorf("自检进行中不该再起一次，实际 %d 次", n)
 	}
 }

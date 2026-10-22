@@ -67,6 +67,8 @@ func (l logLine) size() int {
 type logSink interface {
 	addLines([]logLine)
 	addSummary(title string, rows []summaryRow)
+	// recentText 返回最近 n 行的纯文本（「复制诊断」用；n <= 0 表示全部）。
+	recentText(n int) string
 }
 
 const (

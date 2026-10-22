@@ -62,14 +62,15 @@ func TestUILayoutRightAlignsControls(t *testing.T) {
 	}
 
 	// 动作按钮靠右排、在第二行
-	btns := make([]uiRegion, 0, 4)
+	btns := make([]uiRegion, 0, 6)
 	for _, r := range l.Regions {
 		if r.Kind == uiGhost {
 			btns = append(btns, r)
 		}
 	}
-	if len(btns) != 5 { // 退出 / 清空日志 / 打开配置 / 服务组 + 只看警告
-		t.Fatalf("应有 5 个幽灵按钮，实际 %d", len(btns))
+	// 退出 / 日志 / 打开配置 / 服务组 / 自检 + 只看警告（无待办时不出现「待办」）
+	if len(btns) != 6 {
+		t.Fatalf("应有 6 个幽灵按钮，实际 %d", len(btns))
 	}
 	if btns[0].ID != uiIDQuit || btns[0].Rect.Right != w-pad {
 		t.Errorf("最右侧应是「退出」并贴右留白：%+v", btns[0])
@@ -78,7 +79,7 @@ func TestUILayoutRightAlignsControls(t *testing.T) {
 		t.Errorf("动作按钮应在第二行：%+v", btns[0].Rect)
 	}
 	// 详情区不能压到按钮上
-	firstBtn := btns[3] // 服务组（动作按钮表里的最后一个）
+	firstBtn := btns[4] // 自检（动作按钮表里的最后一个）
 	if l.Detail.Right > firstBtn.Rect.Left {
 		t.Errorf("详情区压到了按钮：detail.Right=%d 按钮 left=%d", l.Detail.Right, firstBtn.Rect.Left)
 	}

@@ -6,6 +6,9 @@ package main
 // 「消息进来之后干什么」——所有函数都只在窗口线程（wndProc）上执行。
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -415,6 +418,32 @@ func (w *logWindow) invokeAction(hwnd windows.Handle, id string) {
 		w.toggleMode(act, id)
 	case uiIDServices:
 		w.showServicesMenu(hwnd)
+	case uiIDSelfTest:
+		w.runSelfTest(act)
+	case uiIDTodo:
+		w.showTodoMenu(hwnd)
+	case uiIDLog:
+		w.showLogMenu(hwnd)
+	case uiIDOpenLog:
+		if act.OpenLog == nil {
+			w.toast("当前实例找不到日志文件", styleWarn)
+			return
+		}
+		if err := act.OpenLog(); err != nil {
+			w.report(id, err)
+			return
+		}
+		w.toast("已在资源管理器中定位日志文件", styleOK)
+	case uiIDDiag:
+		if act.Diagnostics == nil {
+			w.toast("当前实例无法生成诊断信息", styleWarn)
+			return
+		}
+		if err := copyToClipboard(act.Diagnostics()); err != nil {
+			w.report(id, err)
+			return
+		}
+		w.toast("诊断信息已复制到剪贴板", styleOK)
 	case uiIDConfig:
 		if act.OpenConfig == nil {
 			w.toast("当前实例无法打开配置文件", styleWarn)
@@ -453,10 +482,33 @@ func (w *logWindow) toggleMode(act windowActions, id string) {
 	w.toast(name+"正在切换…", styleMuted)
 
 	go func() {
+		defer func() {
+			w.mu.Lock()
+			w.pendingMode = ""
+			w.mu.Unlock()
+		}()
+
+		// 无 SNI 反代的前置条件：根证书必须已在当前用户存储里。
+		// 在窗口里点开关的人不该被要求去开终端（0.2.0「不用命令行」）：
+		// 没装就在这里问一次、装完继续开。
+		if on && id == uiIDMITM && act.CertReady != nil && !act.CertReady() {
+			if act.InstallCert == nil {
+				w.report(id, fmt.Errorf("根证书未安装，且当前实例不支持一键安装"))
+				return
+			}
+			if !confirmInstallCert() {
+				w.toast("已取消：开启无 SNI 反代需要根证书", styleMuted)
+				return
+			}
+			w.toast("正在安装根证书（可能弹出系统确认框，请留意屏幕）…", styleMuted)
+			if err := act.InstallCert(); err != nil {
+				w.report(id, err)
+				return
+			}
+			w.toast("根证书已安装，正在开启反代…", styleOK)
+		}
+
 		err := act.ToggleMode(id, on)
-		w.mu.Lock()
-		w.pendingMode = ""
-		w.mu.Unlock()
 		if err != nil {
 			w.report(id, err)
 			return
@@ -478,14 +530,25 @@ func (w *logWindow) report(id string, err error) {
 	w.toast(err.Error(), styleWarn)
 }
 
-// servicesMenuPoint 返回服务组菜单左上角的位置（**屏幕**坐标）：锚在按钮左下角
-// （找不到按钮就退回当前鼠标位置）。
+// —— 弹出菜单（服务组 / 日志 / 待办共用一套）——
+
+// uiMenuItem 是一条弹出菜单项。
+type uiMenuItem struct {
+	ID      string
+	Label   string
+	Checked bool
+}
+
+// menuBase 是弹出菜单项 id 的起点：0 在 TrackPopupMenu 里表示「没选中」。
+const menuBase = 100
+
+// anchorPoint 返回锚点区域左下角的**屏幕**坐标（找不到区域时退回当前鼠标位置）。
 //
 // 必须做客户区 → 屏幕的换算：几何层里的矩形是客户区坐标，而 TrackPopupMenu 认的是
 // 屏幕坐标——漏掉这一步，菜单就会弹到窗口左上角附近的错误位置。
-func (w *logWindow) servicesMenuPoint() pointT {
+func (w *logWindow) anchorPoint(id string) pointT {
 	var pt pointT
-	if r, ok := w.regionAtID(uiIDServices); ok {
+	if r, ok := w.regionAtID(id); ok {
 		pt = pointT{X: r.Rect.Left, Y: r.Rect.Bottom}
 		procClientToScreen.Call(uintptr(w.handle()), uintptr(unsafe.Pointer(&pt)))
 		return pt
@@ -493,6 +556,43 @@ func (w *logWindow) servicesMenuPoint() pointT {
 	// GetCursorPos 给的本来就是屏幕坐标，不用换算
 	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
 	return pt
+}
+
+// servicesMenuPoint 返回「服务组」菜单的锚点（单测直接断言它锚在按钮左下角）。
+func (w *logWindow) servicesMenuPoint() pointT { return w.anchorPoint(uiIDServices) }
+
+// popupMenu 在锚点处弹出一个弹出菜单，返回被选中的项（取消时 ok=false）。
+//
+// 先把窗口设成前台窗口是弹出菜单的标准做法：否则菜单可能不跟随点击自动消失
+// （我们本来就该是前台窗口——用户刚点了这里；这行只是把它变成确定的）。
+func (w *logWindow) popupMenu(hwnd windows.Handle, anchor string, items []uiMenuItem) (uiMenuItem, bool) {
+	if len(items) == 0 {
+		return uiMenuItem{}, false
+	}
+	pt := w.anchorPoint(anchor)
+	procSetForegroundWindow.Call(uintptr(hwnd))
+
+	menu, _, _ := procCreatePopupMenu.Call()
+	if menu == 0 {
+		return uiMenuItem{}, false
+	}
+	defer procDestroyMenu.Call(menu)
+
+	for i, it := range items {
+		flags := uintptr(mfString)
+		if it.Checked {
+			flags |= mfChecked
+		}
+		appendMenuItem(menu, flags, uintptr(menuBase+i), it.Label)
+	}
+
+	cmd, _, _ := procTrackPopupMenu.Call(menu, tpmRightButton|tpmReturnCmd,
+		uintptr(pt.X), uintptr(pt.Y), 0, uintptr(hwnd), 0)
+	idx := int(int32(cmd)) - menuBase
+	if idx < 0 || idx >= len(items) {
+		return uiMenuItem{}, false // 用户点了空白处 / 按了 Esc
+	}
+	return items[idx], true
 }
 
 // showServicesMenu 在「服务组」按钮下弹出可勾选的服务组菜单（与托盘同一套开关）。
@@ -508,39 +608,20 @@ func (w *logWindow) showServicesMenu(hwnd windows.Handle) {
 		return
 	}
 
-	pt := w.servicesMenuPoint()
-
-	// 弹出菜单的标准做法：先把窗口设成前台窗口，否则菜单可能不跟随点击自动消失
-	// （我们本来就该是前台窗口——用户刚点了这里；这行只是把它变成确定的）。
-	procSetForegroundWindow.Call(uintptr(hwnd))
-
-	menu, _, _ := procCreatePopupMenu.Call()
-	if menu == 0 {
-		return
-	}
-	defer procDestroyMenu.Call(menu)
-
-	const base = 100
-	enabled := map[int]string{}
-	for i, s := range svcs {
-		flags := uintptr(mfString)
-		if s.On {
-			flags |= mfChecked
-		}
+	items := make([]uiMenuItem, 0, len(svcs))
+	for _, s := range svcs {
 		label := s.Name
 		if !strings.HasPrefix(label, "加速") {
 			label = "加速 " + label
 		}
-		appendMenuItem(menu, flags, uintptr(base+i), label)
-		enabled[base+i] = s.ID
+		items = append(items, uiMenuItem{ID: s.ID, Label: label, Checked: s.On})
 	}
-
-	cmd, _, _ := procTrackPopupMenu.Call(menu, tpmRightButton|tpmReturnCmd,
-		uintptr(pt.X), uintptr(pt.Y), 0, uintptr(hwnd), 0)
-	id, ok := enabled[int(int32(cmd))]
+	picked, ok := w.popupMenu(hwnd, uiIDServices, items)
 	if !ok {
-		return // 用户点了空白处 / 按了 Esc
+		return
 	}
+	id := picked.ID
+
 	next := make([]string, 0, len(svcs)+1)
 	for _, s := range svcs {
 		if s.On && s.ID != id {
@@ -568,6 +649,116 @@ func (w *logWindow) showServicesMenu(hwnd windows.Handle) {
 	if act.Refresh != nil {
 		act.Refresh()
 	}
+}
+
+// showLogMenu 在「日志」按钮下弹出日志相关动作。
+//
+// 打开日志文件、复制诊断信息、清空窗口日志放在一起：它们都是「看日志」这件事的一部分，
+// 常用的是前两个，清空很少用但不该消失。
+func (w *logWindow) showLogMenu(hwnd windows.Handle) {
+	act := currentWindowActions()
+	items := []uiMenuItem{
+		{ID: uiIDOpenLog, Label: "打开日志文件"},
+		{ID: uiIDDiag, Label: "复制诊断信息"},
+		{ID: uiIDClear, Label: "清空窗口日志"},
+	}
+	if act.LogPath != nil && act.LogPath() == "" {
+		items[0].Label = "打开数据目录（未启用文件日志）"
+	}
+	picked, ok := w.popupMenu(hwnd, uiIDLog, items)
+	if !ok {
+		return
+	}
+	w.invokeAction(hwnd, picked.ID)
+}
+
+// showTodoMenu 在「待办」按钮下弹出待处理事项；选中一项就在后台执行它。
+func (w *logWindow) showTodoMenu(hwnd windows.Handle) {
+	act := currentWindowActions()
+	if act.Todos == nil {
+		w.toast("当前实例没有待办信息", styleWarn)
+		return
+	}
+	todos := act.Todos()
+	if len(todos) == 0 {
+		w.toast("没有待处理的事", styleMuted)
+		return
+	}
+	items := make([]uiMenuItem, 0, len(todos))
+	for _, t := range todos {
+		items = append(items, uiMenuItem{ID: t.ID, Label: t.Label})
+	}
+	picked, ok := w.popupMenu(hwnd, uiIDTodo, items)
+	if !ok {
+		return
+	}
+	if act.RunTodo == nil {
+		w.toast("当前实例无法处理待办", styleWarn)
+		return
+	}
+	w.toast("正在处理："+picked.Label+"…", styleMuted)
+	go func() {
+		if err := act.RunTodo(picked.ID); err != nil {
+			if errors.Is(err, errTodoCancelled) {
+				w.toast(err.Error(), styleMuted)
+				return
+			}
+			w.report(picked.ID, err)
+			return
+		}
+		w.toast("已完成："+picked.Label, styleOK)
+		if act.Refresh != nil {
+			act.Refresh() // 待办数量 / 开关状态都可能变了
+		}
+	}()
+}
+
+// runSelfTest 在后台跑一次端到端自检，把结果写进日志卡片（不新开窗口/面板）。
+//
+// 为什么放后台：一次体检要串行访问十几个域名，最坏几十秒。窗口线程必须保持响应，
+// 否则用户会以为程序卡死了（与切换开关同理）。
+func (w *logWindow) runSelfTest(act windowActions) {
+	if act.SelfTest == nil {
+		w.toast("当前实例没有自检实现", styleWarn)
+		return
+	}
+	w.mu.Lock()
+	if w.selfTesting {
+		w.mu.Unlock()
+		w.toast("自检正在进行，请稍候…", styleMuted)
+		return
+	}
+	w.selfTesting = true
+	w.mu.Unlock()
+
+	hwnd := w.handle()
+	w.toast("正在自检（逐个测试加速域名，约 10 秒）…", styleMuted)
+	if hwnd != 0 {
+		procInvalidateRect.Call(uintptr(hwnd), 0, 0)
+	}
+
+	go func() {
+		// 在 SelfTest 自己的超时之外再留一点余量：它收手后我们还能把结果写出来
+		ctx, cancel := context.WithTimeout(context.Background(), selfCheckTimeout+15*time.Second)
+		defer cancel()
+		rows := act.SelfTest(ctx)
+
+		w.mu.Lock()
+		w.selfTesting = false
+		w.mu.Unlock()
+		if hwnd != 0 {
+			procInvalidateRect.Call(uintptr(hwnd), 0, 0)
+		}
+
+		if len(rows) == 0 {
+			w.toast("自检没有结果（已中断）", styleWarn)
+			return
+		}
+		w.addSummary("自检结果", selfCheckRows(rows))
+		text, style := selfCheckToast(rows)
+		w.toast(text, style)
+		slog.Info("自检完成", "结果", text)
+	}()
 }
 
 // regionAtID 按动作 id 找当前几何里的区域（找不到返回 false）。

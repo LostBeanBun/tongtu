@@ -57,6 +57,7 @@ func TestUISnapshot(t *testing.T) {
 			{Label: "无SNI反代", On: true, Action: uiIDMITM, Tip: uiModeTips[uiIDMITM]},
 		},
 		Detail: []string{"服务组 Steam、GitHub", "活跃隧道 3", "↓1.2 MB ↑340 KB", "系统代理被其他程序接管"},
+		TodoN:  1,
 	})
 	emitSnapshotLog()
 

@@ -647,6 +647,8 @@ type logWindow struct {
 	layoutKey string
 	onlyWarn  bool    // 「只看警告」是否开启
 	toastMsg  uiToast // 当前轻量反馈（零值 = 没有）
+	// selfTesting 表示自检正在后台跑：按钮保持选中态，重复点击只提示「正在进行」。
+	selfTesting bool
 	// pendingMode 是正在后台切换的开关 id（空 = 没有）。
 	// 切换在别的 goroutine 上做（见 toggleMode），窗口线程只负责给反馈。
 	pendingMode string
@@ -702,6 +704,22 @@ func (w *logWindow) addSummary(title string, rows []summaryRow) {
 		return
 	}
 	w.addLines(append([]logLine{{}}, lines...))
+}
+
+// recentText 返回最近 n 行的纯文本（「复制诊断」用；n <= 0 表示全部）。
+func (w *logWindow) recentText(n int) string {
+	w.mu.Lock()
+	lines := append([]logLine(nil), w.lines...)
+	w.mu.Unlock()
+	if n > 0 && len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString(l.plain())
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // addLines 追加显示行，并维持总长度上限（超出后从头丢，按整行丢弃）。
@@ -1267,7 +1285,7 @@ func (w *logWindow) ensureLayout() uiLayout {
 	// 任何一项变了就重算——否则会拿旧几何画新内容（例如标题被当成空串而不画）。
 	st := w.statusSnapshot()
 	key := strconv.FormatUint(uint64(dpi), 10) + "|" + st.Title + "|" + st.State + "|" +
-		itemFingerprint(modeItems(st.Items))
+		itemFingerprint(modeItems(st.Items)) + "|" + strconv.Itoa(st.TodoN)
 	if okW == r.Right && okH == r.Bottom && okKey == key && cur.Regions != nil {
 		return cur
 	}
@@ -1501,7 +1519,7 @@ func (w *logWindow) paintHeader(hdc uintptr, l uiLayout) {
 	theme, dpi := w.theme, w.dpi
 	font, titleFont := w.font, w.fontTitle
 	status, icon := w.status, w.icon
-	onlyWarn := w.onlyWarn
+	onlyWarn, selfTesting := w.onlyWarn, w.selfTesting
 	w.mu.Unlock()
 	toast := w.activeToast() // 已过期/被清掉的提示按「没有」处理
 
@@ -1538,6 +1556,8 @@ func (w *logWindow) paintHeader(hdc uintptr, l uiLayout) {
 			on = status.onOf(r.ID)
 		case r.ID == uiIDOnlyWarn:
 			on = onlyWarn
+		case r.ID == uiIDSelfTest:
+			on = selfTesting // 自检进行中：让按钮保持「按下」的样子
 		}
 		drawRegion(hdc, theme, font, r, dpi, on, w.hoverID == r.ID, w.pressID == r.ID)
 	}

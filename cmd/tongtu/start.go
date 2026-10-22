@@ -20,6 +20,7 @@ import (
 	"tongtu/internal/hosts"
 	"tongtu/internal/mitm"
 	"tongtu/internal/rules"
+	"tongtu/internal/selfcheck"
 	"tongtu/internal/tray"
 )
 
@@ -130,6 +131,18 @@ var startCmd = &cobra.Command{
 		// 因此这里主要在「没有自绘窗口可依赖」时兜底。
 		installConsoleCloseHandler(signalQuit)
 
+		// restartElevatedAsk 是「以管理员身份重启」的统一入口（窗口的待办按钮用它）。
+		// 与托盘菜单一致：先确认（说明会短暂断网），再记下意图并请求退出；
+		// 真正拉起提权实例在下面主流程退出后（见 tray.RelaunchElevated）。
+		restartElevatedAsk := func() bool {
+			if !tray.ConfirmRestartElevated() {
+				return false
+			}
+			restartElevated = true
+			signalQuit()
+			return true
+		}
+
 		// 窗口收到注销/关机通知（WM_QUERYENDSESSION）时：先发退出信号，再等主流程
 		// 把系统代理与 hosts 还原完（最多等 4 秒），然后才放行会话结束。
 		setSessionEndHandler(func() {
@@ -193,8 +206,8 @@ var startCmd = &cobra.Command{
 			rows = append(rows, row)
 		}
 		rows = append(rows, summaryRow{Mark: markInfo, Label: "服务组", Value: strings.Join(st.Services, "、")})
-		if cfg.Log.File != "" {
-			rows = append(rows, summaryRow{Mark: markInfo, Label: "日志文件", Value: cfg.Log.File})
+		if path := cfg.LogFilePath(); path != "" {
+			rows = append(rows, summaryRow{Mark: markInfo, Label: "日志文件", Value: path})
 		}
 		fmt.Print(renderSummaryText(title, rows))
 		// 同一份摘要也写进窗口（此时窗口可能还没创建，会先缓存、稍后带样式回填）
@@ -205,8 +218,12 @@ var startCmd = &cobra.Command{
 		// 窗口顶部状态条：跟随运行状态刷新（还没显示窗口时也照常更新缓存）
 		if hasLogWindow {
 			setWindowStatus(windowStatusOf(a, cfg))
-			wireWindowActions(a, cfg, signalQuit)
-			go refreshWindowStatus(a, cfg, quit)
+			wireWindowActions(a, cfg, signalQuit, restartElevatedAsk)
+			// 状态刷新与待办清单都用 watchStop（退出时关闭）而不是 quit：
+			// quit 是容量 1 的缓冲通道，只够一个接收者拿到信号——多一个 goroutine 抢，
+			// 主流程就可能永远等不到退出信号（托盘点了「退出」却还在跑）。
+			go refreshWindowStatus(a, cfg, watchStop)
+			go runTodoBoard(a, cfg, watchStop)
 		}
 
 		if !flagNoTray {
@@ -371,11 +388,7 @@ func ensureMITMCert(cfg *config.Config, log *slog.Logger, interactive bool) (*mi
 // 有控制台就在终端里问（说明文字可以完整看到）；GUI 模式（双击启动）下没有终端，
 // 改用系统对话框，避免「配置里开了无 SNI 反代却因为没人回答而静默不生效」。
 func askInstallCert(certPath string) bool {
-	desc := "首次启用「无 SNI 反代」需要安装本地根证书：\n\n" +
-		"  · 仅安装到【当前用户】存储（无需管理员），私钥留在本机\n" +
-		"  · 仅对配置列出的域名解密（默认 steamcommunity / raw.githubusercontent），其余流量端到端隧道不解密\n" +
-		"  · Firefox 使用自带证书库，需手动导入 ca.crt；卸载：tongtu cert uninstall\n\n" +
-		fmt.Sprintf("证书文件：%s", certPath)
+	desc := mitm.InstallPrompt(certPath)
 	if !consoleAvailable() {
 		return messageBox("通途 Tongtu — 安装根证书", desc+"\n\n是否现在安装？",
 			mbYesNo|mbIconQuestion) == messageBoxYes
@@ -388,6 +401,32 @@ func askInstallCert(certPath string) bool {
 		return true
 	}
 	return false
+}
+
+// confirmInstallCert 在窗口里询问是否安装本地根证书。
+//
+// 窗口路径总是 GUI（没有终端可问），因此直接用系统对话框。文案与启动时的询问、
+// 托盘的询问共用 mitm.InstallPrompt，三处说的是同一件事。
+func confirmInstallCert() bool {
+	certPath, _ := mitm.CertPaths(config.Dir())
+	return messageBox("通途 Tongtu — 安装根证书",
+		mitm.InstallPrompt(certPath)+"\n\n是否现在安装？",
+		mbYesNo|mbIconQuestion) == messageBoxYes
+}
+
+// openLogInExplorer 在资源管理器里定位日志文件；文件还没生成时退回到打开数据目录。
+//
+// 两种情况都要给出「东西在哪」这个答案：刚启动就点「打开日志文件」时文件可能还没写，
+// 报错说「找不到文件」没有意义。
+func openLogInExplorer(cfg *config.Config) error {
+	path := cfg.LogFilePath()
+	if path == "" {
+		return tray.OpenPath(config.Dir())
+	}
+	if _, err := os.Stat(path); err != nil {
+		return tray.OpenPath(config.Dir())
+	}
+	return tray.OpenLocation(path)
 }
 
 func onOff(b bool) string {
@@ -434,6 +473,8 @@ func windowStatusOf(a *app.App, cfg *config.Config) windowStatus {
 			{Label: "无SNI反代", On: st.MITM, Action: uiIDMITM, Tip: "无 SNI 反代：本地解密被 SNI 封锁的域名，出站剥离 SNI（需先安装根证书）。点击开关"},
 		},
 		Detail: detail,
+		// 待办数量只读缓存（见 todo.go）：算它要问证书存储与计划任务，不能塞进 3 秒轮询。
+		TodoN: todos.count(),
 	}
 }
 
@@ -481,7 +522,9 @@ func refreshWindowStatus(a *app.App, cfg *config.Config, quit <-chan struct{}) {
 //
 // 与托盘菜单走同一套 API（app.SetMode / SetMITM / SetServices），因此两处的行为完全一致：
 // 同样的开关、同样的失败文案。窗口只负责「用户点了什么」，具体怎么做留在这一层。
-func wireWindowActions(a *app.App, cfg *config.Config, quit func()) {
+//
+// restartElevated 用于「待办 → 以管理员身份重启」，返回 false 表示用户在确认框里取消了。
+func wireWindowActions(a *app.App, cfg *config.Config, quit func(), restartElevated func() bool) {
 	setWindowActionsHook(func() windowActions {
 		st := a.Status()
 		return windowActions{
@@ -511,9 +554,25 @@ func wireWindowActions(a *app.App, cfg *config.Config, quit func()) {
 				}
 				return out
 			},
-			OpenConfig: func() error { return tray.OpenInNotepad(a.ConfigPath()) },
-			Quit:       quit,
-			Refresh:    func() { setWindowStatus(windowStatusOf(a, cfg)) },
+			OpenConfig:  func() error { return tray.OpenInNotepad(a.ConfigPath()) },
+			Quit:        quit,
+			Refresh:     func() { setWindowStatus(windowStatusOf(a, cfg)) },
+			SelfTest:    func(ctx context.Context) []selfcheck.Row { return runSelfCheck(ctx, a, cfg) },
+			LogPath:     func() string { return cfg.LogFilePath() },
+			OpenLog:     func() error { return openLogInExplorer(cfg) },
+			Diagnostics: func() string { return buildDiagnostics(a, cfg) },
+			CertReady: func() bool {
+				ok, _ := mitm.CertInstalled(a.DataDir())
+				return ok
+			},
+			InstallCert: func() error { return mitm.InstallIfNeeded(a.DataDir()) },
+			Todos:       todos.list,
+			RunTodo: func(id string) error {
+				err := runTodo(a, cfg, id, restartElevated)
+				// 处理完立刻回读：按钮上的数字要跟着变，不能等下一次兜底刷新
+				todos.refresh(a, cfg)
+				return err
+			},
 		}
 	})
 }

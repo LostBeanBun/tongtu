@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -12,6 +13,10 @@ import (
 
 // CurrentVersion 是配置文件版本：低于该版本的配置会被备份并按新默认值重建。
 const CurrentVersion = 4
+
+// LogFileOff 是 log.file 的特殊值：不写日志文件，只在控制台与窗口里输出。
+// 留空表示用默认值（%APPDATA%\tongtu\tongtu.log）。
+const LogFileOff = "off"
 
 // DNSConfig 控制 DoH 解析行为。
 type DNSConfig struct {
@@ -37,7 +42,9 @@ type MITMConfig struct {
 // LogConfig 控制日志输出。
 type LogConfig struct {
 	Level string `yaml:"level"` // debug / info / warn / error
-	File  string `yaml:"file"`  // 空表示仅输出到控制台
+	// File 是日志文件名或路径：留空用默认值 tongtu.log（落在数据目录，自动轮转）；
+	// 设为 off 表示不写文件，只在控制台与窗口里输出。
+	File string `yaml:"file"`
 }
 
 // Config 是 tongtu 的完整配置。
@@ -114,7 +121,7 @@ func Default() *Config {
 				"github.com",
 			},
 		},
-		Log: LogConfig{Level: "info"},
+		Log: LogConfig{Level: "info", File: "tongtu.log"},
 	}
 }
 
@@ -227,6 +234,10 @@ func (c *Config) Validate() error {
 	if c.HostsRefreshMin <= 0 {
 		c.HostsRefreshMin = 10
 	}
+	if strings.TrimSpace(c.Log.File) == "" {
+		// 日志默认落盘：出问题时要能翻到「刚才发生了什么」，而不是关了窗口就没了。
+		c.Log.File = Default().Log.File
+	}
 	if len(c.MITM.Domains) == 0 {
 		c.MITM.Domains = Default().MITM.Domains
 	} else {
@@ -247,6 +258,19 @@ func (c *Config) Validate() error {
 // DNSTimeout 返回单次 DoH 查询超时。
 func (c *Config) DNSTimeout() time.Duration {
 	return time.Duration(c.DNS.TimeoutSec) * time.Second
+}
+
+// LogFilePath 返回日志文件的完整路径；未启用文件日志（log.file: off）时返回空串。
+// 只写文件名时落在数据目录（%APPDATA%\tongtu）下——界面上的「日志」按钮要用这个路径。
+func (c *Config) LogFilePath() string {
+	f := strings.TrimSpace(c.Log.File)
+	if f == "" || strings.EqualFold(f, LogFileOff) || strings.EqualFold(f, "none") || f == "-" {
+		return ""
+	}
+	if strings.ContainsAny(f, `/\`) {
+		return f
+	}
+	return filepath.Join(Dir(), f)
 }
 
 // HostsRefresh 返回 hosts 刷新周期。
