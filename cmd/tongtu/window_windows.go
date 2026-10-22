@@ -652,9 +652,11 @@ type logWindow struct {
 	// pendingMode 是正在后台切换的开关 id（空 = 没有）。
 	// 切换在别的 goroutine 上做（见 toggleMode），窗口线程只负责给反馈。
 	pendingMode string
-	font        uintptr
-	fontTitle   uintptr
-	theme       uiTheme
+	// pauseBusy 表示「暂停 / 恢复」正在后台执行（同样可能耗时几秒）。
+	pauseBusy bool
+	font      uintptr
+	fontTitle uintptr
+	theme     uiTheme
 	// 深/浅两套配色在创建窗口时就把画刷准备好：切换主题时整套替换，
 	// 不新建也不删除 GDI 对象（因此反复切换也不会泄漏）。
 	themeDarkSet  uiTheme
@@ -1285,7 +1287,8 @@ func (w *logWindow) ensureLayout() uiLayout {
 	// 任何一项变了就重算——否则会拿旧几何画新内容（例如标题被当成空串而不画）。
 	st := w.statusSnapshot()
 	key := strconv.FormatUint(uint64(dpi), 10) + "|" + st.Title + "|" + st.State + "|" +
-		itemFingerprint(modeItems(st.Items)) + "|" + strconv.Itoa(st.TodoN)
+		itemFingerprint(modeItems(st.Items)) + "|" + strconv.Itoa(st.TodoN) + "|" +
+		strconv.FormatBool(st.Paused) // 暂停 / 恢复的标签不同，几何（按钮宽度）随之变
 	if okW == r.Right && okH == r.Bottom && okKey == key && cur.Regions != nil {
 		return cur
 	}
@@ -1775,7 +1778,10 @@ func wndProc(hwnd windows.Handle, msg uint32, wparam uintptr, lparam unsafe.Poin
 		return 0
 
 	case wmContextMenu:
-		lw.showContextMenu(hwnd, uintptr(lparam))
+		// WM_CONTEXTMENU 的参数容易搞反：wParam 是「被右键的那个窗口」（这里应等于日志控件），
+		// lParam 是屏幕坐标（键盘唤起时为 -1）。0.2.0 曾把 lParam 当子窗口句柄比，
+		// 于是日志区右键永远弹不出菜单——真机点一次就露馅。
+		lw.showContextMenu(hwnd, uintptr(wparam), uintptr(lparam))
 		return 0
 	}
 	ret, _, _ := procDefWindowProcW.Call(uintptr(hwnd), uintptr(msg), wparam, uintptr(lparam))
@@ -1806,12 +1812,12 @@ func (w *logWindow) ctlColor(hwnd windows.Handle, msg uint32, hdc, child uintptr
 	return theme.cardBrush
 }
 
-// showContextMenu 在日志区右键时给出「复制 / 全选 / 打开配置 / 清空日志」。
-func (w *logWindow) showContextMenu(hwnd windows.Handle, child uintptr) {
-	w.mu.Lock()
-	edit := w.edit
-	w.mu.Unlock()
-	if edit == 0 || child != uintptr(edit) {
+// showContextMenu 在日志区右键时给出「复制 / 全选 / 复制代理地址 / 打开配置 / 清空日志」。
+//
+// child 是 WM_CONTEXTMENU 的 wParam（被右键的子窗口）；screenPos 是 lParam（屏幕坐标，
+// 键盘唤起时为 -1，此时退回鼠标位置）。
+func (w *logWindow) showContextMenu(hwnd windows.Handle, child, screenPos uintptr) {
+	if !w.isLogEdit(child) {
 		return
 	}
 	menu, _, _ := procCreatePopupMenu.Call()
@@ -1821,31 +1827,53 @@ func (w *logWindow) showContextMenu(hwnd windows.Handle, child uintptr) {
 	defer procDestroyMenu.Call(menu)
 
 	const (
-		idCopy   = 1
-		idSelAll = 2
-		idClear  = 3
-		idConfig = 4
+		idCopy      = 1
+		idSelAll    = 2
+		idClear     = 3
+		idConfig    = 4
+		idProxyAddr = 5
 	)
 	appendMenuItem(menu, mfString, idCopy, "复制")
 	appendMenuItem(menu, mfString, idSelAll, "全选")
 	appendMenuItem(menu, mfSeparator, 0, "")
+	appendMenuItem(menu, mfString, idProxyAddr, "复制代理地址")
 	appendMenuItem(menu, mfString, idConfig, "打开配置文件")
 	appendMenuItem(menu, mfString, idClear, "清空日志")
 
 	var pt pointT
-	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
+	if screenPos != ^uintptr(0) {
+		// lParam 的低/高 16 位是屏幕坐标（各自按有符号 short 解释，多显示器下可能是负数）。
+		pos := uint32(screenPos)
+		pt.X = int32(int16(pos & 0xFFFF))
+		pt.Y = int32(int16((pos >> 16) & 0xFFFF))
+	} else {
+		// 键盘唤起（Shift+F10 / 菜单键）：没有坐标，用鼠标位置。
+		procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
+	}
 	cmd, _, _ := procTrackPopupMenu.Call(menu, tpmRightButton|tpmReturnCmd,
 		uintptr(pt.X), uintptr(pt.Y), 0, uintptr(hwnd), 0)
+	w.mu.Lock()
+	edit := w.edit
+	w.mu.Unlock()
 	switch int32(cmd) {
 	case idCopy:
 		procSendMessageW.Call(uintptr(edit), wmCopy, 0, 0)
 	case idSelAll:
 		procSendMessageW.Call(uintptr(edit), emSetSel, 0, ^uintptr(0))
+	case idProxyAddr:
+		w.invokeAction(hwnd, uiIDCopyProxy)
 	case idConfig:
 		w.invokeAction(hwnd, uiIDConfig)
 	case idClear:
 		w.invokeAction(hwnd, uiIDClear)
 	}
+}
+
+// isLogEdit 判断右键是否发生在日志控件上（WM_CONTEXTMENU 的 wParam 才是被点的子窗口）。
+func (w *logWindow) isLogEdit(child uintptr) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.edit != 0 && child == uintptr(w.edit)
 }
 
 // saveState 记住窗口位置与大小（最大化状态也一起记）。

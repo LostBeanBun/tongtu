@@ -32,6 +32,7 @@ type Status struct {
 	MITM        bool              `json:"mitm"`                // 无 SNI 反代是否启用
 	MITMNote    string            `json:"mitm_note,omitempty"` // 反代未启用的原因（启用时为空）
 	MITMLocal   bool              `json:"mitm_local"`          // hosts 直连用本地 :443 是否就绪
+	Paused      bool              `json:"paused"`              // 是否处于「一键暂停」（进程仍在，对外影响已撤回）
 	Services    []string          `json:"services"`
 	Proxy       proxy.Snapshot    `json:"proxy"`
 	DNS         []resolver.Health `json:"dns"`
@@ -69,6 +70,10 @@ type App struct {
 
 	warm bool // 启动后是否预热反代/白名单域名
 
+	// paused 记录被「一键暂停」撤掉的项（nil = 当前没有暂停）。
+	// 与 Shutdown 的区别：暂停只撤掉对外影响，进程与本地监听继续运行，随时可以恢复。
+	paused *pauseState
+
 	mu           sync.Mutex
 	ln           net.Listener
 	srv          *http.Server
@@ -97,6 +102,11 @@ func New(opts Options) *App {
 		RemoteHosts: opts.Config.DNS.RemoteHosts,
 		StaticHosts: opts.Config.DNS.StaticHosts,
 	}, log)
+	// 自定义站点（config.custom）与内置服务组合并成同一个白名单：
+	// 后续的代理分流、hosts 覆盖、反代名单都只看这一个 Set。
+	if opts.Rules != nil {
+		opts.Rules.AddPatterns(opts.Config.ProxyPatterns())
+	}
 	px := proxy.New(opts.Rules, res, log)
 	px.SetLookupAll(res.LookupAll)                 // 隧道路径也用多端点并查候选
 	px.SetLookupAllUncached(res.LookupAllUncached) // 无 SNI 优选用新鲜候选
@@ -131,7 +141,7 @@ func New(opts Options) *App {
 // 剥离后握手直接失败（实测 tls: internal error），会把本来正常的页面一起弄坏。
 func (a *App) configureMITM(ca *mitm.CA) {
 	a.px.EnableMITM(ca, func(host string) bool {
-		return rules.MatchPatterns(host, a.cfg.MITM.Domains)
+		return rules.MatchPatterns(host, a.cfg.MITMPatterns())
 	})
 	a.mitmCa = ca
 	a.mitmNote = "" // 已启用，「未启用原因」不再适用
@@ -157,7 +167,7 @@ func (a *App) warmHosts() []string {
 		}
 	}
 	if a.cfg != nil {
-		for _, d := range a.cfg.MITM.Domains {
+		for _, d := range a.cfg.MITMPatterns() {
 			if !strings.Contains(d, "*") {
 				add(d)
 			}
@@ -173,7 +183,7 @@ func (a *App) mitmLocalNamesFor(rs *rules.Set) []string {
 	}
 	var out []string
 	for _, h := range rs.Hosts() {
-		if rules.MatchPatterns(h, a.cfg.MITM.Domains) {
+		if rules.MatchPatterns(h, a.cfg.MITMPatterns()) {
 			out = append(out, h)
 		}
 	}
@@ -392,7 +402,28 @@ func (a *App) SetMode(sys, hostsWant bool) error {
 	if sysChanged || hostsChanged {
 		a.saveConfigLocked()
 	}
+	// 手动打开某一项后，它就不再属于「被暂停」的项了（暂停按钮上的数字/状态要跟着变）。
+	a.unpauseLocked(sys, hostsWant, false)
 	return errors.Join(errs...)
+}
+
+// unpauseLocked 把用户手动打开（或已恢复）的项从「暂停」记录里去掉（需持有 a.mu）。
+func (a *App) unpauseLocked(sys, hosts, mitm bool) {
+	if a.paused == nil {
+		return
+	}
+	if sys {
+		a.paused.sys = false
+	}
+	if hosts {
+		a.paused.hosts = false
+	}
+	if mitm {
+		a.paused.mitm = false
+	}
+	if !a.paused.active() {
+		a.paused = nil
+	}
 }
 
 // SetMITM 运行时开关「无 SNI 反代」（托盘菜单用）。
@@ -422,25 +453,13 @@ func (a *App) SetMITM(on bool) error {
 			a.startLocalMITM()
 			a.applyHostsLocked("启用无 SNI 反代")
 		}
+		a.unpauseLocked(false, false, true)
 		a.log.Info("无 SNI 反代已启用")
 	} else {
-		// 顺序很重要：先把 hosts 里的本地回环指向改回真实 IP，再关本地 :443/:80 监听。
-		// 反过来会留下一个「hosts 指着 127.0.0.1、但没人监听」的窗口——改写 hosts 还要
-		// 重新解析域名，可能要几百毫秒到几秒，这段时间这些域名全是连接失败。
-		a.hm.SetLocalHosts(nil)
-		a.hm.SetLocalIPv6(false)
-		if a.hostsOn && !a.applyHostsLocked("停用无 SNI 反代") {
-			// hosts 没改成功：这时绝不能关本地监听，否则托管块里的域名会指向死端口。
-			// 整体回滚成「反代仍然开着」，把失败原因交给界面显示，让用户重试。
-			a.hm.SetLocalHosts(a.mitmLocalNames)
-			a.hm.SetLocalIPv6(a.px.LocalIPv6Up())
-			return fmt.Errorf("停用无 SNI 反代失败：hosts 未能更新（可能仍需要管理员权限），已保持开启状态")
+		if err := a.disableMITMLocked(); err != nil {
+			return err
 		}
-		a.px.DisableMITM()
-		a.mitmCa = nil
-		a.mitmLocalNames = nil
 		a.cfg.MITM.Enabled = false
-		a.stopLocalMITM()
 		a.log.Info("无 SNI 反代已停用")
 	}
 	a.saveConfigLocked()
@@ -453,28 +472,207 @@ func (a *App) SetServices(ids []string) error {
 	if err != nil {
 		return err
 	}
+	rs.AddPatterns(a.cfg.ProxyPatterns()) // 自定义站点不随服务组切换丢失
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.ln == nil {
 		return fmt.Errorf("服务未启动")
 	}
+	a.applyRulesLocked(rs, ids, a.cfg.Custom, a.cfg.MITM.Domains)
+	a.saveConfigLocked()
+	a.log.Info("加速服务已切换", "services", a.svcIDs)
+	return nil
+}
+
+// applyRulesLocked 应用一份新的匹配集合与相应的配置（需持有 a.mu）。
+//
+// 代理分流、hosts 覆盖、反代名单三者必须同时更新：只改其中一个会留下
+// 「白名单里有、hosts 里没有」这种半生效状态，排查起来非常费劲。
+func (a *App) applyRulesLocked(rs *rules.Set, svcIDs []string, custom config.CustomConfig, mitmDomains []string) {
 	a.rs = rs
-	a.svcIDs = append([]string(nil), ids...)
-	a.cfg.Services = append([]string(nil), ids...)
+	a.svcIDs = append([]string(nil), svcIDs...)
+	a.cfg.Services = append([]string(nil), svcIDs...)
+	a.cfg.Custom = config.CustomConfig{
+		Domains:     append([]string(nil), custom.Domains...),
+		MITMDomains: append([]string(nil), custom.MITMDomains...),
+	}
+	a.cfg.MITM.Domains = append([]string(nil), mitmDomains...)
 	a.px.SetRules(rs)
 	a.hm.SetHosts(rs.Hosts())
 
-	// 反代本地名单随服务组变化
+	// 反代名单可能变了：重新装配 match（EnableMITM 支持整体替换，见 proxy.EnableMITM）。
 	if a.mitmCa != nil {
-		a.mitmLocalNames = a.mitmLocalNamesFor(rs)
+		a.configureMITM(a.mitmCa)
 		a.hm.SetLocalHosts(a.mitmLocalNames)
 		a.hm.SetLocalIPv6(a.mitmLocal443 && a.px.LocalIPv6Up())
 	}
 	if a.hostsOn {
-		a.applyHostsLocked("切换加速服务")
+		a.applyHostsLocked("更新加速规则")
 	}
-	a.saveConfigLocked()
-	a.log.Info("加速服务已切换", "services", a.svcIDs)
+}
+
+// ReloadRules 重新应用配置文件里的「服务组 / 自定义站点 / 反代域名」，返回是否真的发生了变化。
+//
+// 只处理这几个字段：改端口、DNS 端点、日志级别都需要重建组件或重启进程，假装热更新只会
+// 让人以为生效了。界面上的「配置已重新加载」按 changed 决定要不要提示。
+func (a *App) ReloadRules(next *config.Config) (bool, error) {
+	if next == nil {
+		return false, fmt.Errorf("配置为空")
+	}
+	rs, err := rules.Load(next.Services)
+	if err != nil {
+		return false, err
+	}
+	rs.AddPatterns(next.ProxyPatterns())
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.ln == nil || a.stopped {
+		return false, fmt.Errorf("服务未启动")
+	}
+	if equalStrings(a.svcIDs, next.Services) &&
+		equalStrings(a.cfg.ProxyPatterns(), next.ProxyPatterns()) &&
+		equalStrings(a.cfg.MITMPatterns(), next.MITMPatterns()) {
+		return false, nil
+	}
+	a.applyRulesLocked(rs, next.Services, next.Custom, next.MITM.Domains)
+	// 刻意不写回配置文件：文件本身就是用户刚保存的那份，再写一遍会丢注释、也会把
+	// 我们没热更新的字段（端口 / 日志级别）用旧值覆盖回去。
+	// 也不在这里打日志：调用方（watchConfigFile）会用「配置已热生效」把变化说清楚，
+	// 一件事只留一条日志。
+	return true, nil
+}
+
+// PauseState 记载「一键暂停」撤掉了哪几项。
+type pauseState struct {
+	sys   bool
+	hosts bool
+	mitm  bool
+}
+
+func (p *pauseState) active() bool { return p != nil && (p.sys || p.hosts || p.mitm) }
+
+// StopAll 一键暂停：还原系统代理、退出 hosts 接管、关掉无 SNI 反代，但进程与本地监听继续运行。
+//
+// 与 Shutdown 的区别：Shutdown 是终态（退出，不再恢复）；StopAll 只撤掉「对外的影响」，
+// 配置里的意图不动，随时可以用 Resume 原样回来。这两件事混在一起做，用户就分不清
+// 「我想暂时关掉」和「我要退出」了。
+func (a *App) StopAll() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.ln == nil || a.stopped {
+		return fmt.Errorf("服务未启动")
+	}
+	p := &pauseState{
+		sys:   a.sysOn && a.sysProxyHeld(),
+		hosts: a.hostsOn,
+		mitm:  a.mitmCa != nil,
+	}
+	if !p.active() {
+		a.paused = nil
+		return nil
+	}
+	var errs []error
+	// 顺序与 Shutdown 一致：先撤反代（它依赖 hosts 指向本地），再退 hosts，最后还原系统代理。
+	if p.mitm {
+		if err := a.disableMITMLocked(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if p.hosts && a.hostsOn {
+		if _, err := a.hm.Remove(); err != nil {
+			errs = append(errs, fmt.Errorf("退出 hosts 接管: %w", err))
+		} else {
+			a.hostsOn = false
+			a.stopLocalMITM()
+		}
+	}
+	if p.sys && a.sysOn {
+		out, err := sysproxy.Disable(a.sysSaved)
+		switch {
+		case err != nil:
+			errs = append(errs, err)
+		case out == sysproxy.NotHeld:
+			a.log.Warn("系统代理已被其他程序接管，暂停时未还原（避免覆盖对方的设置）")
+		}
+		a.sysOn, a.sysSaved = false, nil
+	}
+	a.paused = p
+	a.log.Info("已暂停加速：系统代理、hosts 与反代均已还原", "可恢复", true)
+	return errors.Join(errs...)
+}
+
+// Paused 报告当前是否处于「一键暂停」状态。
+func (a *App) Paused() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.paused.active()
+}
+
+// Resume 恢复「一键暂停」撤掉的那些项。
+func (a *App) Resume() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.ln == nil || a.stopped {
+		return fmt.Errorf("服务未启动")
+	}
+	p := a.paused
+	if !p.active() {
+		a.paused = nil
+		return nil
+	}
+	var errs []error
+	// 恢复顺序与暂停相反：先把反代装回来（hosts 需要它把域名指向本地），再接管 hosts，最后系统代理。
+	if p.mitm && a.mitmCa == nil {
+		ca, err := mitm.LoadOrCreate(config.Dir())
+		if err != nil {
+			return fmt.Errorf("加载本地 CA 失败: %w", err)
+		}
+		if installed, _ := mitm.Installed(ca); !installed {
+			return fmt.Errorf("根证书已被移除，无法恢复无 SNI 反代；请先安装证书")
+		}
+		a.configureMITM(ca)
+	}
+	if p.hosts && !a.hostsOn {
+		a.startLocalMITM()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if _, err := a.hm.Apply(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("重新接管 hosts: %w", err))
+		} else {
+			a.hostsOn = true
+			if a.loopCtx != nil {
+				go a.hm.Run(a.loopCtx)
+			}
+		}
+	}
+	if p.sys && !a.sysOn {
+		if saved, err := sysproxy.Enable(a.proxyAddr()); err != nil {
+			errs = append(errs, err)
+		} else {
+			a.sysSaved, a.sysOn = saved, true
+		}
+	}
+	a.paused = nil
+	a.log.Info("已恢复加速")
+	return errors.Join(errs...)
+}
+
+// disableMITMLocked 关闭无 SNI 反代（需持有 a.mu，不碰配置与日志）。
+// 顺序很重要：先把 hosts 里的本地回环指向改回真实 IP，再关本地 :443/:80 监听。
+func (a *App) disableMITMLocked() error {
+	a.hm.SetLocalHosts(nil)
+	a.hm.SetLocalIPv6(false)
+	if a.hostsOn && !a.applyHostsLocked("停用无 SNI 反代") {
+		// hosts 没改成功：这时绝不能关本地监听，否则托管块里的域名会指向死端口。
+		a.hm.SetLocalHosts(a.mitmLocalNames)
+		a.hm.SetLocalIPv6(a.px.LocalIPv6Up())
+		return fmt.Errorf("停用无 SNI 反代失败：hosts 未能更新（可能仍需要管理员权限），已保持开启状态")
+	}
+	a.px.DisableMITM()
+	a.mitmCa = nil
+	a.mitmLocalNames = nil
+	a.stopLocalMITM()
 	return nil
 }
 
@@ -557,6 +755,7 @@ func (a *App) Status() Status {
 		MITMNote:    a.mitmNote,
 		MITMLocal:   a.mitmLocal443,
 		Services:    append([]string(nil), a.svcIDs...),
+		Paused:      a.paused.active(),
 		DNS:         a.res.Health(),
 	}
 	if a.sysOn && !st.SystemProxy {
@@ -640,4 +839,17 @@ func staleOwnerAlive() (string, bool) {
 		return "", false
 	}
 	return addr, true
+}
+
+// equalStrings 比较两个字符串列表是否完全相同（顺序敏感：配置里的顺序会体现在界面上）。
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

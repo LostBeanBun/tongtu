@@ -171,6 +171,12 @@ var startCmd = &cobra.Command{
 			startGuard(log)
 		}
 
+		// 改完 config.yaml 保存即生效：只热更新服务组 / 自定义站点 / 反代域名。
+		// 放在这里而不是界面就绪之后：--no-tray 或窗口创建失败时同样需要它。
+		watchCtx, stopWatch := context.WithCancel(context.Background())
+		defer stopWatch()
+		go watchConfigFile(watchCtx, a, configPath(), log)
+
 		st := a.Status()
 		// 上一轮（提权运行时）留下的 hosts 托管块，如果这一轮没能清掉、也没有接管 hosts，
 		// 那些域名会指向一个没人监听的本地端口——必须让用户看见，而不是只躺在日志里。
@@ -448,10 +454,13 @@ func windowStatusOf(a *app.App, cfg *config.Config) windowStatus {
 		modeWish{cfg.Hosts, st.Hosts},
 		modeWish{cfg.MITM.Enabled, st.MITM})
 	state := "运行中"
-	switch level {
-	case stateDegraded:
+	switch {
+	case st.Paused:
+		// 用户自己按了「暂停」：这不是故障，别报成「部分生效」吓人。
+		state, level = "已暂停", stateOff
+	case level == stateDegraded:
 		state = "部分生效"
-	case stateOff:
+	case level == stateOff:
 		state = "已停止"
 	}
 	detail := []string{
@@ -459,14 +468,19 @@ func windowStatusOf(a *app.App, cfg *config.Config) windowStatus {
 		fmt.Sprintf("活跃隧道 %d", st.Proxy.Active),
 		fmt.Sprintf("↓%s ↑%s", humanBytes(st.Proxy.BytesIn), humanBytes(st.Proxy.BytesOut)),
 	}
+	// 运行时长放最后：窗口窄到放不下时先丢它（fitDetail 从右往左砍），服务组与流量更要紧。
+	if st.Running {
+		detail = append(detail, "已运行 "+humanUptime(st.UptimeSec))
+	}
 	if st.ProxyNote != "" {
 		// 运行期被别的程序顶掉了系统代理：明说出来，别让人以为还好好的
 		detail = append(detail, "系统代理"+st.ProxyNote)
 	}
 	return windowStatus{
-		Title: "通途 Tongtu " + Version,
-		State: state,
-		Level: level,
+		Title:  "通途 Tongtu " + Version,
+		State:  state,
+		Level:  level,
+		Paused: st.Paused,
 		Items: []windowStatusItem{
 			{Label: "系统代理", On: st.SystemProxy, Action: uiIDSys, Tip: "系统代理模式：接管浏览器与系统流量（无需管理员）。点击开关"},
 			{Label: "Hosts", On: st.Hosts, Action: uiIDHosts, Tip: "Hosts 模式：覆盖 hosts 解析，供 Steam 客户端等不走代理的程序使用（需管理员）。点击开关"},
@@ -572,6 +586,24 @@ func wireWindowActions(a *app.App, cfg *config.Config, quit func(), restartEleva
 				// 处理完立刻回读：按钮上的数字要跟着变，不能等下一次兜底刷新
 				todos.refresh(a, cfg)
 				return err
+			},
+			StopAll: func() error {
+				if err := a.StopAll(); err != nil {
+					return err
+				}
+				todos.refresh(a, cfg) // 暂停后待办会变（例如「夺回系统代理」不再需要）
+				return nil
+			},
+			Resume: func() error {
+				err := a.Resume()
+				todos.refresh(a, cfg)
+				return err
+			},
+			ProxyAddr: func() string {
+				if st := a.Status(); st.Running {
+					return st.Listen
+				}
+				return ""
 			},
 		}
 	})

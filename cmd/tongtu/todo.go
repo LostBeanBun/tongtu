@@ -81,41 +81,51 @@ func runTodoBoard(a *app.App, cfg *config.Config, stop <-chan struct{}) {
 // 判定原则：只说**当前配置下**确实没做到的事，并且每一件都能一键解决。
 // 因此不列「建议开启某功能」这类产品建议——那是菜单的事，不是待办。
 func todoItems(a *app.App, cfg *config.Config) []uiTodoItem {
-	st := a.Status()
+	return compileTodos(a.Status(), cfg, autostart.IsAdmin(), autoStartEnabled(), func() bool {
+		ok, err := mitm.CertInstalled(a.DataDir())
+		return err == nil && !ok
+	})
+}
+
+// compileTodos 是 todoItems 的纯函数内核：状态与几个外部探测结果都由调用方给，
+// 这样「暂停中不该催用户重开」这类规则可以直接用假状态测。
+func compileTodos(st app.Status, cfg *config.Config, admin, autostartOn bool, certMissing func() bool) []uiTodoItem {
 	var out []uiTodoItem
 
-	// 配了要开反代，但反代没起来、且证书确实没装：装证书就能解决。
-	// （反代没起来也可能是别的原因，那种情况不在这里假装能一键修好。）
-	if cfg.MITM.Enabled && !st.MITM {
-		if ok, err := mitm.CertInstalled(a.DataDir()); err == nil && !ok {
+	// 暂停中「该开却没开」全是用户自己按的，一条都不该报：否则刚点完「暂停」，
+	// 界面就催「重新接管系统代理（当前被其他程序占用）」，纯属自己吓自己。
+	if !st.Paused {
+		// 配了要开反代，但反代没起来、且证书确实没装：装证书就能解决。
+		// （反代没起来也可能是别的原因，那种情况不在这里假装能一键修好。）
+		if cfg.MITM.Enabled && !st.MITM && certMissing != nil && certMissing() {
 			out = append(out, uiTodoItem{
 				ID:    uiIDTodoCert,
 				Label: "安装本地根证书（无 SNI 反代需要）",
 			})
 		}
+
+		// 想要 hosts 模式，但当前不是管理员：只能提权重启。
+		if st.Running && cfg.Hosts && !st.Hosts && !admin {
+			out = append(out, uiTodoItem{
+				ID:    uiIDTodoElev,
+				Label: "以管理员身份重启（让 Hosts 模式生效）",
+			})
+		}
+
+		// 系统代理被别的程序顶掉了：一键夺回。
+		if st.Running && cfg.SystemProxy && !st.SystemProxy {
+			out = append(out, uiTodoItem{
+				ID:    uiIDTodoTake,
+				Label: "重新接管系统代理（当前被其他程序占用）",
+			})
+		}
 	}
 
-	// 想要 hosts 模式，但当前不是管理员：只能提权重启。
-	if st.Running && cfg.Hosts && !st.Hosts && !autostart.IsAdmin() {
-		out = append(out, uiTodoItem{
-			ID:    uiIDTodoElev,
-			Label: "以管理员身份重启（让 Hosts 模式生效）",
-		})
-	}
-
-	// 开机自启没配：这台机器重启后要手动打开，属于「没配好」。
-	if !autoStartEnabled() {
+	// 开机自启没配：这台机器重启后要手动打开，属于「没配好」。与暂停无关。
+	if !autostartOn {
 		out = append(out, uiTodoItem{
 			ID:    uiIDTodoAuto,
 			Label: "开启开机自启（登录后自动启动）",
-		})
-	}
-
-	// 系统代理被别的程序顶掉了：一键夺回。
-	if st.Running && cfg.SystemProxy && !st.SystemProxy {
-		out = append(out, uiTodoItem{
-			ID:    uiIDTodoTake,
-			Label: "重新接管系统代理（当前被其他程序占用）",
 		})
 	}
 	return out

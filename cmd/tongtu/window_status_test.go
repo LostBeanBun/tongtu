@@ -107,3 +107,28 @@ func TestWindowStatusOfDegraded(t *testing.T) {
 		t.Errorf("标题与第二行信息不应为空: title=%q detail=%v", st.Title, st.Detail)
 	}
 }
+
+// TestHumanUptime 运行时长要写成人话，且只保留一两个量级（状态条一行放不下更多）。
+func TestHumanUptime(t *testing.T) {
+	cases := []struct {
+		sec  int64
+		want string
+	}{
+		{-5, "0 秒"},
+		{0, "0 秒"},
+		{59, "59 秒"},
+		{60, "1 分钟"},
+		{3599, "59 分钟"},
+		{3600, "1 小时"},
+		{3660, "1 小时 1 分"},
+		{86399, "23 小时 59 分"},
+		{86400, "1 天"},
+		{90000, "1 天 1 小时"},
+		{3*86400 + 4*3600 + 7*60, "3 天 4 小时"},
+	}
+	for _, c := range cases {
+		if got := humanUptime(c.sec); got != c.want {
+			t.Errorf("humanUptime(%d) = %q，期望 %q", c.sec, got, c.want)
+		}
+	}
+}

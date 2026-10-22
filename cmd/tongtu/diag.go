@@ -37,6 +37,16 @@ func buildDiagnostics(a *app.App, cfg *config.Config) string {
 	}
 	fmt.Fprintf(&b, "监听: %s（系统代理=%v · hosts=%v · 反代=%v）\n",
 		st.Listen, st.SystemProxy, st.Hosts, st.MITM)
+	if st.Running {
+		fmt.Fprintf(&b, "运行时长: %s%s\n", humanUptime(st.UptimeSec), pauseWord(st.Paused))
+	}
+	if custom := cfg.ProxyPatterns(); len(custom) > 0 {
+		// 「我的站点没加速」第一件事就是确认规则到底读进去了没有
+		fmt.Fprintf(&b, "自定义站点: %s\n", strings.Join(custom, "、"))
+	}
+	if mitm := cfg.Custom.MITMDomains; len(mitm) > 0 {
+		fmt.Fprintf(&b, "自定义反代: %s\n", strings.Join(mitm, "、"))
+	}
 	if st.ProxyNote != "" {
 		fmt.Fprintf(&b, "系统代理说明: %s\n", st.ProxyNote)
 	}
@@ -66,4 +76,12 @@ func buildDiagnostics(a *app.App, cfg *config.Config) string {
 		}
 	}
 	return b.String()
+}
+
+// pauseWord 在诊断信息里给「运行时长」补一句是否处于暂停，省得把「暂停中」当成故障排查。
+func pauseWord(paused bool) string {
+	if !paused {
+		return ""
+	}
+	return "（当前已暂停：对外影响已撤回）"
 }

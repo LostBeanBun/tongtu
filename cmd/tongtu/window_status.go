@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -36,6 +37,33 @@ func statusLevel(running bool, modes ...modeWish) windowStateLevel {
 	return stateOK
 }
 
+// humanUptime 把运行秒数写成「人话」：3 天 4 小时 / 1 小时 23 分 / 5 分钟 / 12 秒。
+//
+// 只保留一两个量级：状态条第二行放不下更多，也没人需要「3 天 4 小时 7 分 12 秒」这种精度。
+func humanUptime(sec int64) string {
+	if sec < 0 {
+		sec = 0
+	}
+	switch {
+	case sec < 60:
+		return fmt.Sprintf("%d 秒", sec)
+	case sec < 3600:
+		return fmt.Sprintf("%d 分钟", sec/60)
+	case sec < 86400:
+		h, m := sec/3600, (sec%3600)/60
+		if m == 0 {
+			return fmt.Sprintf("%d 小时", h)
+		}
+		return fmt.Sprintf("%d 小时 %d 分", h, m)
+	default:
+		d, h := sec/86400, (sec%86400)/3600
+		if h == 0 {
+			return fmt.Sprintf("%d 天", d)
+		}
+		return fmt.Sprintf("%d 天 %d 小时", d, h)
+	}
+}
+
 // windowStatus 是窗口顶部状态条要展示的内容（跨平台共用，Windows 上由窗口自绘）。
 //
 // 状态条不用 STATIC 控件而是自己绘制：这样状态点、状态词的颜色（按健康度）和文字才能
@@ -48,6 +76,9 @@ type windowStatus struct {
 	Detail []string // 第二行的信息片段（服务组 / 活跃隧道 / 流量），绘制时用「·」连接
 	// TodoN 是待办项数量：> 0 时第二行会多出一个「待办 N」按钮（见 ui_layout_windows.go）。
 	TodoN int
+	// Paused 表示当前处于「一键暂停」（对外影响已撤回，进程还在跑）。
+	// 动作按钮上的标签因此在「暂停」与「恢复」之间切换。
+	Paused bool
 }
 
 // windowStatusItem 是一个带状态点的开关项。
@@ -106,5 +137,11 @@ func (s windowStatus) key() string {
 	b.WriteString(strings.Join(s.Detail, "\x1f"))
 	b.WriteByte('|')
 	b.WriteString(strconv.Itoa(s.TodoN))
+	b.WriteByte('|')
+	if s.Paused {
+		b.WriteByte('1')
+	} else {
+		b.WriteByte('0')
+	}
 	return b.String()
 }

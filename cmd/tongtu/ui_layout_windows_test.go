@@ -68,9 +68,9 @@ func TestUILayoutRightAlignsControls(t *testing.T) {
 			btns = append(btns, r)
 		}
 	}
-	// 退出 / 日志 / 打开配置 / 服务组 / 自检 + 只看警告（无待办时不出现「待办」）
-	if len(btns) != 6 {
-		t.Fatalf("应有 6 个幽灵按钮，实际 %d", len(btns))
+	// 退出 / 日志 / 打开配置 / 服务组 / 自检 / 暂停 + 只看警告（无待办时不出现「待办」）
+	if len(btns) != 7 {
+		t.Fatalf("应有 7 个幽灵按钮，实际 %d", len(btns))
 	}
 	if btns[0].ID != uiIDQuit || btns[0].Rect.Right != w-pad {
 		t.Errorf("最右侧应是「退出」并贴右留白：%+v", btns[0])
@@ -79,7 +79,10 @@ func TestUILayoutRightAlignsControls(t *testing.T) {
 		t.Errorf("动作按钮应在第二行：%+v", btns[0].Rect)
 	}
 	// 详情区不能压到按钮上
-	firstBtn := btns[4] // 自检（动作按钮表里的最后一个）
+	firstBtn := btns[5] // 暂停（动作按钮表里的最后一个）
+	if firstBtn.ID != uiIDPause {
+		t.Fatalf("最左侧的动作按钮应是「暂停」：%+v", firstBtn)
+	}
 	if l.Detail.Right > firstBtn.Rect.Left {
 		t.Errorf("详情区压到了按钮：detail.Right=%d 按钮 left=%d", l.Detail.Right, firstBtn.Rect.Left)
 	}
@@ -212,6 +215,49 @@ func TestResolveThemeBlend(t *testing.T) {
 		}
 		if got.hoverBrush == 0 || got.inputBrush == 0 {
 			continue // 画刷由 buildBrushes 准备（没有窗口时不建）
+		}
+	}
+}
+
+// TestPauseButtonLabel 暂停 / 恢复共用同一个按钮：文案与提示随状态切换，宽度不变（整排不跳）。
+func TestPauseButtonLabel(t *testing.T) {
+	for _, c := range []struct {
+		paused bool
+		label  string
+		tip    string
+	}{
+		{false, "暂停", uiPauseTip},
+		{true, "恢复", uiResumeTip},
+	} {
+		st := layoutStatus()
+		st.Paused = c.paused
+		var got uiRegion
+		found := false
+		for _, r := range uiActionButtons(st) {
+			if r.ID == uiIDPause {
+				got, found = r, true
+			}
+		}
+		if !found {
+			t.Fatalf("动作按钮里应始终有「暂停 / 恢复」")
+		}
+		if got.Label != c.label || got.Tip != c.tip {
+			t.Errorf("paused=%v：label=%q tip=%q，期望 %q / %q",
+				c.paused, got.Label, got.Tip, c.label, c.tip)
+		}
+	}
+
+	// 两个标签同宽：切换时按钮位置不应左右跳（用固定字宽的量尺验证）
+	off := uiActionButtons(layoutStatus())
+	on := layoutStatus()
+	on.Paused = true
+	onRegions := uiActionButtons(on)
+	if len(off) != len(onRegions) {
+		t.Fatalf("按钮数量不该变化: %d vs %d", len(off), len(onRegions))
+	}
+	for i := range off {
+		if off[i].ID != onRegions[i].ID {
+			t.Fatalf("按钮顺序不该变化: %q vs %q", off[i].ID, onRegions[i].ID)
 		}
 	}
 }

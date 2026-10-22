@@ -15,19 +15,21 @@ import (
 // 自绘控件的动作 id。
 // 命中判定、悬浮说明与动作分发共用这一组常量，避免在三处写错同一个字符串。
 const (
-	uiIDSys      = "sys"      // 系统代理开关
-	uiIDHosts    = "hosts"    // Hosts 开关
-	uiIDMITM     = "mitm"     // 无 SNI 反代开关
-	uiIDServices = "services" // 服务组菜单
-	uiIDSelfTest = "selftest" // 端到端自检
-	uiIDTodo     = "todo"     // 待办菜单（只在有需要处理的事时出现）
-	uiIDLog      = "log"      // 日志菜单
-	uiIDConfig   = "config"   // 打开配置文件
-	uiIDClear    = "clear"    // 清空窗口日志（日志菜单里的一项）
-	uiIDOpenLog  = "openlog"  // 打开日志文件（日志菜单里的一项）
-	uiIDDiag     = "diag"     // 复制诊断信息（日志菜单里的一项）
-	uiIDQuit     = "quit"     // 退出程序
-	uiIDOnlyWarn = "onlywarn" // 只看警告
+	uiIDSys       = "sys"       // 系统代理开关
+	uiIDHosts     = "hosts"     // Hosts 开关
+	uiIDMITM      = "mitm"      // 无 SNI 反代开关
+	uiIDServices  = "services"  // 服务组菜单
+	uiIDSelfTest  = "selftest"  // 端到端自检
+	uiIDPause     = "pause"     // 一键暂停 / 恢复全部加速
+	uiIDTodo      = "todo"      // 待办菜单（只在有需要处理的事时出现）
+	uiIDLog       = "log"       // 日志菜单
+	uiIDConfig    = "config"    // 打开配置文件
+	uiIDClear     = "clear"     // 清空窗口日志（日志菜单里的一项）
+	uiIDOpenLog   = "openlog"   // 打开日志文件（日志菜单里的一项）
+	uiIDDiag      = "diag"      // 复制诊断信息（日志菜单里的一项）
+	uiIDCopyProxy = "copyproxy" // 复制本地代理地址（日志区右键菜单里的一项）
+	uiIDQuit      = "quit"      // 退出程序
+	uiIDOnlyWarn  = "onlywarn"  // 只看警告
 
 	// 待办项的动作 id（由「待办」菜单触发）。
 	uiIDTodoCert = "todocert" // 安装本地根证书
@@ -82,6 +84,13 @@ type windowActions struct {
 	Todos func() []uiTodoItem
 	// RunTodo 执行一条待办（id 取 uiIDTodo* 之一）。
 	RunTodo func(id string) error
+
+	// StopAll 一键暂停：还原系统代理与 hosts、关掉反代，但进程继续运行。
+	StopAll func() error
+	// Resume 把「一键暂停」撤掉的项原样恢复。
+	Resume func() error
+	// ProxyAddr 返回本地代理地址（如 127.0.0.1:19180），用于「复制代理地址」。
+	ProxyAddr func() string
 }
 
 var windowActionsHook func() windowActions

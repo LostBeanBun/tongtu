@@ -70,3 +70,14 @@ func TestShortBytes(t *testing.T) {
 		}
 	}
 }
+
+// TestTooltipTextPaused 暂停时提示写成「已暂停」：这不是故障，也不该显示成「运行中」。
+func TestTooltipTextPaused(t *testing.T) {
+	got := tooltipText(app.Status{Running: true, Paused: true})
+	if !strings.Contains(got, "已暂停") {
+		t.Errorf("暂停中应写「已暂停」: %s", got)
+	}
+	if strings.Contains(got, "运行中") {
+		t.Errorf("暂停中不该同时写「运行中」: %s", got)
+	}
+}

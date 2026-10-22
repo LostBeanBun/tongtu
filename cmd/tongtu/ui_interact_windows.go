@@ -15,6 +15,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"tongtu/internal/clipboard"
 )
 
 // —— Win32 常量（只在本文件使用）——
@@ -267,6 +269,7 @@ func (w *logWindow) toast(text string, style logStyle) {
 	if text == "" {
 		return
 	}
+
 	hwnd := w.handle()
 	w.mu.Lock()
 	w.toastMsg = uiToast{Text: text, Style: style, Until: time.Now().Add(uiToastMS * time.Millisecond)}
@@ -281,6 +284,18 @@ func (w *logWindow) toast(text string, style logStyle) {
 func (w *logWindow) onTimer(hwnd windows.Handle, id uintptr) {
 	switch id {
 	case uiTimerToast:
+		// WM_TIMER 不携带「这是哪一条提示的定时器」：上一条提示的定时器可能正好在
+		// 新提示刚发出时到点。若无条件清空，就会把新提示一起吞掉——「正在暂停…」
+		// 之后那句「已暂停」偶尔不出现，正是这个原因。所以只清真正到点的那一条，
+		// 还没到点就按剩余时间重新挂一次。
+		w.mu.Lock()
+		t := w.toastMsg
+		remain := time.Until(t.Until)
+		w.mu.Unlock()
+		if t.Text != "" && remain > 0 {
+			procSetTimer.Call(uintptr(hwnd), uiTimerToast, uintptr(remain.Milliseconds())+1, 0)
+			return
+		}
 		procKillTimer.Call(uintptr(hwnd), uiTimerToast)
 		w.mu.Lock()
 		w.toastMsg = uiToast{}
@@ -439,11 +454,32 @@ func (w *logWindow) invokeAction(hwnd windows.Handle, id string) {
 			w.toast("当前实例无法生成诊断信息", styleWarn)
 			return
 		}
-		if err := copyToClipboard(act.Diagnostics()); err != nil {
+		if err := clipboard.Copy(act.Diagnostics()); err != nil {
 			w.report(id, err)
 			return
 		}
 		w.toast("诊断信息已复制到剪贴板", styleOK)
+	case uiIDCopyProxy:
+		if act.ProxyAddr == nil {
+			w.toast("当前实例没有本地代理地址", styleWarn)
+			return
+		}
+		addr := act.ProxyAddr()
+		if addr == "" {
+			w.toast("本地代理还没启动，暂时没有地址可复制", styleWarn)
+			return
+		}
+		if err := clipboard.Copy("http://" + addr); err != nil {
+			w.report(id, err)
+			return
+		}
+		w.toast("已复制代理地址 http://"+addr, styleOK)
+	case uiIDPause:
+		if act.StopAll == nil || act.Resume == nil {
+			w.toast("当前实例无法暂停加速", styleWarn)
+			return
+		}
+		w.togglePause(act)
 	case uiIDConfig:
 		if act.OpenConfig == nil {
 			w.toast("当前实例无法打开配置文件", styleWarn)
@@ -520,6 +556,53 @@ func (w *logWindow) toggleMode(act windowActions, id string) {
 		w.toast(name+word, styleOK)
 		if act.Refresh != nil {
 			act.Refresh() // 立刻回读真实状态，不等下一轮 3 秒轮询
+		}
+	}()
+}
+
+// togglePause 一键暂停 / 恢复全部加速。
+//
+// 和 toggleMode 一样放到后台：暂停要还原系统代理、退出 hosts 接管，可能要几秒；
+// 在窗口线程里做会让窗口在这几秒里完全不响应。暂停期间重复点击只提示，不再派发。
+func (w *logWindow) togglePause(act windowActions) {
+	w.mu.Lock()
+	paused := w.status.Paused
+	if w.pauseBusy {
+		w.mu.Unlock()
+		w.toast("正在切换，请稍候…", styleMuted)
+		return
+	}
+	w.pauseBusy = true
+	w.mu.Unlock()
+
+	if paused {
+		w.toast("正在恢复加速…", styleMuted)
+	} else {
+		w.toast("正在暂停加速…", styleMuted)
+	}
+	go func() {
+		defer func() {
+			w.mu.Lock()
+			w.pauseBusy = false
+			w.mu.Unlock()
+		}()
+		var err error
+		if paused {
+			err = act.Resume()
+		} else {
+			err = act.StopAll()
+		}
+		if err != nil {
+			w.report(uiIDPause, err)
+			return
+		}
+		if paused {
+			w.toast("已恢复加速", styleOK)
+		} else {
+			w.toast("已暂停加速：系统代理与 hosts 已还原，点「恢复」可再打开", styleOK)
+		}
+		if act.Refresh != nil {
+			act.Refresh()
 		}
 	}()
 }
@@ -743,21 +826,23 @@ func (w *logWindow) runSelfTest(act windowActions) {
 		defer cancel()
 		rows := act.SelfTest(ctx)
 
+		// 先把结果写出来，最后才把「体检中」标记放下：标记一放下，按钮就回到「自检」，
+		// 用户（以及测试）就会以为这件事已经彻底结束。放到结果之后收尾，
+		// 「按钮恢复」与「结果出现」这两个信号才是同一件事。
+		if len(rows) == 0 {
+			w.toast("自检没有结果（已中断）", styleWarn)
+		} else {
+			w.addSummary("自检结果", selfCheckRows(rows))
+			text, style := selfCheckToast(rows)
+			w.toast(text, style)
+			slog.Info("自检完成", "结果", text)
+		}
 		w.mu.Lock()
 		w.selfTesting = false
 		w.mu.Unlock()
 		if hwnd != 0 {
 			procInvalidateRect.Call(uintptr(hwnd), 0, 0)
 		}
-
-		if len(rows) == 0 {
-			w.toast("自检没有结果（已中断）", styleWarn)
-			return
-		}
-		w.addSummary("自检结果", selfCheckRows(rows))
-		text, style := selfCheckToast(rows)
-		w.toast(text, style)
-		slog.Info("自检完成", "结果", text)
 	}()
 }
 

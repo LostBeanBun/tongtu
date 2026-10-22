@@ -21,6 +21,7 @@ import (
 
 	"tongtu/internal/app"
 	"tongtu/internal/autostart"
+	"tongtu/internal/clipboard"
 	"tongtu/internal/icon"
 )
 
@@ -63,6 +64,7 @@ func Exit() {
 
 // menu 汇总全部菜单项，便于在单一 goroutine 中统一读写。
 type menu struct {
+	pause    *systray.MenuItem
 	sys      *systray.MenuItem
 	hosts    *systray.MenuItem
 	mitm     *systray.MenuItem
@@ -72,6 +74,7 @@ type menu struct {
 	autoElev *systray.MenuItem
 	elev     *systray.MenuItem
 	window   *systray.MenuItem
+	copyAddr *systray.MenuItem
 	openCfg  *systray.MenuItem
 	openDir  *systray.MenuItem
 	quit     *systray.MenuItem
@@ -86,7 +89,13 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 	title.Disable()
 	systray.AddSeparator()
 
+	// 「暂停 / 恢复」放在最上面：一键撤掉全部对外影响，再点一次原样回来。
+	// 它和下面的三个开关是两种粒度：开关调单项，这里是「全都关掉 / 全都开回来」。
+	pause := systray.AddMenuItem("暂停全部加速", "还原系统代理与 hosts、关掉无 SNI 反代；进程继续运行，再点一次原样恢复")
+	systray.AddSeparator()
+
 	m := &menu{
+		pause: pause,
 		// —— 加速模式 ——
 		sys:   systray.AddMenuItemCheckbox("系统代理模式", "接管浏览器与系统流量（无需管理员）", false),
 		hosts: systray.AddMenuItemCheckbox("Hosts 模式", "覆盖 hosts 解析，供 Steam 客户端使用（需管理员）", false),
@@ -123,6 +132,7 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 	}
 	m.openCfg = systray.AddMenuItem("打开配置文件", "用记事本打开 config.yaml")
 	m.openDir = systray.AddMenuItem("打开配置目录", "在资源管理器中打开数据目录")
+	m.copyAddr = systray.AddMenuItem("复制代理地址", "把本地代理地址复制到剪贴板，便于填到别的程序里")
 	systray.AddSeparator()
 	m.quit = systray.AddMenuItem("退出", "停止加速并还原系统代理与 hosts")
 
@@ -137,6 +147,7 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 	// syncState 同步「运行状态」相关勾选。轮询是为了反映控制 API 的变更，
 	// 以及启动时接管失败的实际情况（例如未以管理员身份运行时 hosts 未生效）。
 	// 顺带刷新托盘悬停提示：不打开窗口也能看到状态与流量。
+	pauseTitle := "" // 记住当前标题，只在真正变化时才 SetTitle（避免每 3 秒重建一次菜单）
 	syncState := func() {
 		st := a.Status()
 		setCheck(m.sys, st.SystemProxy)
@@ -144,6 +155,14 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 		setCheck(m.mitm, st.MITM)
 		setCheck(m.steam, contains(st.Services, "steam"))
 		setCheck(m.github, contains(st.Services, "github"))
+		want := "暂停全部加速"
+		if st.Paused {
+			want = "恢复全部加速"
+		}
+		if want != pauseTitle {
+			pauseTitle = want
+			m.pause.SetTitle(want)
+		}
 		systray.SetTooltip(tooltipText(st))
 	}
 
@@ -206,6 +225,16 @@ func clickLoop(a *app.App, m *menu, done chan struct{}, onQuit func(), onWindow 
 			return
 
 		case <-syncReq:
+			syncState()
+
+		case <-m.pause.ClickedCh:
+			if a.Paused() {
+				if err := a.Resume(); err != nil {
+					fail("恢复加速失败：\n" + err.Error())
+				}
+			} else if err := a.StopAll(); err != nil {
+				fail("暂停加速失败：\n" + err.Error())
+			}
 			syncState()
 
 		case <-m.sys.ClickedCh:
@@ -288,6 +317,16 @@ func clickLoop(a *app.App, m *menu, done chan struct{}, onQuit func(), onWindow 
 			onRestartElevated()
 			return
 
+		case <-m.copyAddr.ClickedCh:
+			st := a.Status()
+			if !st.Running || st.Listen == "" {
+				fail("本地代理还没启动，暂时没有地址可复制")
+				continue
+			}
+			if err := clipboard.Copy("http://" + st.Listen); err != nil {
+				fail("复制代理地址失败：\n" + err.Error())
+			}
+
 		case <-m.openCfg.ClickedCh:
 			if err := openInNotepad(a.ConfigPath()); err != nil {
 				fail("打开配置文件失败：\n" + err.Error() + "\n路径：" + a.ConfigPath())
@@ -362,12 +401,47 @@ func contains(list []string, want string) bool {
 // 期望却没生效时状态条会用橙色写出「部分生效」，两处各司其职。
 func tooltipText(st app.Status) string {
 	state := "已停止"
-	if st.Running {
+	switch {
+	case st.Paused:
+		state = "已暂停"
+	case st.Running:
 		state = "运行中"
+	}
+	if st.Running && st.UptimeSec > 0 {
+		// 托盘提示没有宽度压力，把「跑了多久」放在状态词后面：排查「是不是刚重启过」很有用。
+		state += "（已运行 " + humanUptime(st.UptimeSec) + "）"
 	}
 	return fmt.Sprintf("通途 Tongtu · %s · 系统代理%s · Hosts%s · 反代%s · ↓%s ↑%s",
 		state, mark(st.SystemProxy), mark(st.Hosts), mark(st.MITM),
 		shortBytes(st.Proxy.BytesIn), shortBytes(st.Proxy.BytesOut))
+}
+
+// humanUptime 把运行秒数写成「人话」（与窗口状态条同一套文案，见 cmd/tongtu/window_status.go）。
+//
+// 两处各留一份是有意的：托盘的提示文案要独立可测，且 cmd 与 internal 之间不该为了
+// 一行格式化函数互相依赖。
+func humanUptime(sec int64) string {
+	if sec < 0 {
+		sec = 0
+	}
+	switch {
+	case sec < 60:
+		return fmt.Sprintf("%d 秒", sec)
+	case sec < 3600:
+		return fmt.Sprintf("%d 分钟", sec/60)
+	case sec < 86400:
+		h, m := sec/3600, (sec%3600)/60
+		if m == 0 {
+			return fmt.Sprintf("%d 小时", h)
+		}
+		return fmt.Sprintf("%d 小时 %d 分", h, m)
+	default:
+		d, h := sec/86400, (sec%86400)/3600
+		if h == 0 {
+			return fmt.Sprintf("%d 天", d)
+		}
+		return fmt.Sprintf("%d 天 %d 小时", d, h)
+	}
 }
 
 func mark(on bool) string {

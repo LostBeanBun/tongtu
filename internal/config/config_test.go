@@ -175,3 +175,69 @@ func TestDefaultReverseProxyCoversBlockedHosts(t *testing.T) {
 		}
 	}
 }
+
+// TestCustomPatterns 自定义站点：规范化（小写 / 去空白 / 去重）与两套模式列表的合并。
+func TestCustomPatterns(t *testing.T) {
+	cfg := Default()
+	cfg.Custom = CustomConfig{
+		Domains:     []string{"  My.Site.com ", "my.site.com", "*.Example.COM", ""},
+		MITMDomains: []string{"blocked.site.com", "MY.SITE.COM"},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got := cfg.Custom.Domains; len(got) != 2 || got[0] != "my.site.com" || got[1] != "*.example.com" {
+		t.Fatalf("custom.domains 未规范化/去重: %v", got)
+	}
+	if got := cfg.Custom.MITMDomains; len(got) != 2 || got[0] != "blocked.site.com" || got[1] != "my.site.com" {
+		t.Fatalf("custom.mitm_domains 未规范化/去重: %v", got)
+	}
+
+	// 反代域名必须同时进白名单，否则流量根本不会经过本地代理。
+	proxy := cfg.ProxyPatterns()
+	wantProxy := map[string]bool{"my.site.com": true, "*.example.com": true, "blocked.site.com": true}
+	if len(proxy) != len(wantProxy) {
+		t.Fatalf("白名单应为 %d 项，实际 %v", len(wantProxy), proxy)
+	}
+	for _, p := range proxy {
+		if !wantProxy[p] {
+			t.Errorf("白名单多了 %q", p)
+		}
+	}
+
+	// 反代名单 = 配置里的 mitm.domains + 自定义 mitm_domains（且不含纯白名单域名）。
+	mitm := cfg.MITMPatterns()
+	seen := make(map[string]bool, len(mitm))
+	for _, p := range mitm {
+		seen[p] = true
+	}
+	for _, want := range []string{"blocked.site.com", "my.site.com", "*.steamcommunity.com"} {
+		if !seen[want] {
+			t.Errorf("反代名单缺少 %s（实际 %v）", want, mitm)
+		}
+	}
+	if seen["*.example.com"] {
+		t.Error("只加进 custom.domains 的域名不该被反代")
+	}
+	if len(mitm) != len(cfg.MITM.Domains)+2 {
+		t.Errorf("反代名单应为内置 %d 项 + 自定义 2 项，实际 %d 项：%v",
+			len(cfg.MITM.Domains), len(mitm), mitm)
+	}
+}
+
+// TestCustomPatternsRejected 写错的规则必须在加载时报错，而不是存进去以后永远匹配不上。
+func TestCustomPatternsRejected(t *testing.T) {
+	cases := map[string][]string{
+		"协议头": {"https://my.site.com"},
+		"端口":  {"my.site.com:8443"},
+		"路径":  {"my.site.com/abc"},
+		"通配":  {"my.*.site.com"},
+	}
+	for name, patterns := range cases {
+		cfg := Default()
+		cfg.Custom.Domains = patterns
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("%s：应报错，实际通过（%v）", name, patterns)
+		}
+	}
+}

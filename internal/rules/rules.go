@@ -31,6 +31,7 @@ var builtin = map[string][]byte{
 // Set 是已启用服务的匹配集合。
 type Set struct {
 	services []Service
+	custom   []string // 自定义域名（来自配置 custom.domains / custom.mitm_domains）
 }
 
 // Load 按 id 列表加载内置规则。
@@ -61,6 +62,30 @@ func BuiltinIDs() []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// AddPatterns 追加自定义域名模式（支持 "*.example.com"，含裸域），用于「加速自己的站点」。
+//
+// 与内置服务组的区别：这些域名不进服务组菜单、也不会被默认值合并覆盖；
+// 重复添加是幂等的（同一个模式只保留一份）。
+func (s *Set) AddPatterns(patterns []string) {
+	have := make(map[string]bool, len(s.custom))
+	for _, p := range s.custom {
+		have[normalize(p)] = true
+	}
+	for _, raw := range patterns {
+		p := normalize(raw)
+		if p == "" || have[p] {
+			continue
+		}
+		have[p] = true
+		s.custom = append(s.custom, p)
+	}
+}
+
+// CustomPatterns 返回自定义模式的副本（界面展示与测试用）。
+func (s *Set) CustomPatterns() []string {
+	return append([]string(nil), s.custom...)
 }
 
 // Services 返回已启用服务的副本。
@@ -95,6 +120,11 @@ func (s *Set) Match(host string) bool {
 			}
 		}
 	}
+	for _, pattern := range s.custom {
+		if matchPattern(host, pattern) {
+			return true
+		}
+	}
 	return false
 }
 
@@ -113,17 +143,28 @@ func MatchPatterns(host string, patterns []string) bool {
 }
 
 // Hosts 返回去重后的 hosts 覆盖名单（保持规则内顺序）。
+//
+// 自定义域名的精确主机名也会进来（hosts 模式才能覆盖它们）；
+// 通配模式无法枚举，只能靠系统代理模式生效——这一点在文档里写清楚。
 func (s *Set) Hosts() []string {
 	seen := make(map[string]bool)
 	var out []string
+	add := func(h string) {
+		h = normalize(h)
+		if h == "" || seen[h] {
+			return
+		}
+		seen[h] = true
+		out = append(out, h)
+	}
 	for i := range s.services {
 		for _, h := range s.services[i].Hosts {
-			h = normalize(h)
-			if h == "" || seen[h] {
-				continue
-			}
-			seen[h] = true
-			out = append(out, h)
+			add(h)
+		}
+	}
+	for _, p := range s.custom {
+		if !strings.Contains(p, "*") {
+			add(p)
 		}
 	}
 	return out

@@ -44,12 +44,19 @@ type uiLayout struct {
 // 「待办」只在确实有需要处理的事情时出现——没问题时界面不该多一个让人猜的按钮。
 // 「清空日志」收进了「日志」菜单：它很少用，第二行的宽度要留给常用动作。
 func uiActionButtons(st windowStatus) []uiRegion {
+	// 暂停 / 恢复是同一个按钮的两种状态：随时一键撤掉全部对外影响，再一键原样回来。
+	// 标签只差一个字、同宽，切换时不会让整排按钮左右跳动。
+	pauseLabel, pauseTip := "暂停", uiPauseTip
+	if st.Paused {
+		pauseLabel, pauseTip = "恢复", uiResumeTip
+	}
 	out := []uiRegion{
 		{ID: uiIDQuit, Label: "退出", Kind: uiGhost, Tip: "退出：停止加速并还原系统代理与 hosts（点窗口的 × 只是隐藏窗口）"},
 		{ID: uiIDLog, Label: "日志", Kind: uiGhost, Tip: uiLogTip},
 		{ID: uiIDConfig, Label: "打开配置", Kind: uiGhost, Tip: "打开配置文件：用记事本打开 config.yaml"},
 		{ID: uiIDServices, Label: "服务组", Kind: uiGhost, Tip: "加速服务组：选择要为哪些站点加速（至少保留一个）"},
 		{ID: uiIDSelfTest, Label: "自检", Kind: uiGhost, Tip: uiSelfTestTip},
+		{ID: uiIDPause, Label: pauseLabel, Kind: uiGhost, Tip: pauseTip},
 	}
 	if st.TodoN > 0 {
 		out = append(out, uiRegion{
@@ -71,6 +78,8 @@ const uiFilterTip = "过滤日志：输入关键字（不区分大小写），�
 const uiSelfTestTip = "自检：逐个测试加速域名的解析、直连与经代理访问，确认加速是否真的生效（约 10 秒）"
 const uiLogTip = "日志：打开日志文件 / 复制诊断信息 / 清空窗口日志"
 const uiTodoTip = "待办：还有没配置好的事情（安装证书、以管理员重启、开机自启…），点开可一键处理"
+const uiPauseTip = "暂停：一键还原系统代理与 hosts、关掉反代（进程继续运行，随时可以点「恢复」）"
+const uiResumeTip = "恢复：把暂停前开着的加速项原样打开"
 
 // computeUILayout 计算一帧的几何。
 //

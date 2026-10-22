@@ -42,6 +42,10 @@ type fakeActions struct {
 	certHits     int
 	todoItems    []uiTodoItem
 	todoRuns     []string
+	pauseGate    chan struct{} // 非 nil 时 StopAll / Resume 会等它被关闭（模拟「暂停中」）
+	pauseCalls   []string      // 依次记录 "stop" / "resume"
+	pauseErr     error
+	proxyAddr    string
 }
 
 type fakeToggle struct {
@@ -103,7 +107,33 @@ func (f *fakeActions) actions() windowActions {
 			f.mu.Unlock()
 			return nil
 		},
+		StopAll: func() error { return f.recordPause("stop") },
+		Resume:  func() error { return f.recordPause("resume") },
+		ProxyAddr: func() string {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			return f.proxyAddr
+		},
 	}
+}
+
+// recordPause 记录一次暂停 / 恢复，并在需要时卡住（模拟耗时的接管 / 还原）。
+func (f *fakeActions) recordPause(what string) error {
+	f.mu.Lock()
+	f.pauseCalls = append(f.pauseCalls, what)
+	gate, err := f.pauseGate, f.pauseErr
+	f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+	return err
+}
+
+// pauses 返回暂停 / 恢复的调用序列。
+func (f *fakeActions) pauses() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.pauseCalls...)
 }
 
 func (f *fakeActions) calls() []fakeToggle {
@@ -142,11 +172,18 @@ func useFakeActions(t *testing.T, f *fakeActions) {
 	setWindowActionsHook(f.actions)
 	t.Cleanup(func() {
 		setWindowActionsHook(nil)
-		// 等后台切换收尾，别把「切换中」的状态留给后面的测试
+		// 等后台动作收尾，别把「切换中」的状态留给后面的测试
 		waitFor(t, "后台切换结束", func() bool {
 			lw.mu.Lock()
 			defer lw.mu.Unlock()
-			return lw.pendingMode == ""
+			return lw.pendingMode == "" && !lw.pauseBusy
+		})
+		// 自检也可能是上一条用例点起来的：它的结果提示会落到下一条用例里
+		// （「已暂停加速」被一句迟到的「自检通过」顶掉，就是这么来的）。
+		waitFor(t, "自检收尾", func() bool {
+			lw.mu.Lock()
+			defer lw.mu.Unlock()
+			return !lw.selfTesting
 		})
 	})
 }
@@ -554,11 +591,35 @@ func TestToastExpiresOnTimer(t *testing.T) {
 	}
 	lw.mu.Lock()
 	hwnd := lw.hwnd
+	// 把它改成「已过期」再送定时器消息：真实的定时器到点就是这个状态。
+	lw.toastMsg.Until = time.Now().Add(-time.Millisecond)
 	lw.mu.Unlock()
 	procSendMessageW.Call(uintptr(hwnd), wmTimer, uiTimerToast, 0)
 	if got := lw.activeToast(); got.Text != "" {
 		t.Errorf("定时器到点后提示应消失，实际 %+v", got)
 	}
+}
+
+// TestToastStaleTimerKeepsFreshToast 上一条提示的定时器提前到点，不能把刚发出的新提示吞掉。
+//
+// 这不是假想：暂停 / 恢复这类操作会先提示「正在暂停加速…」，几百毫秒后再提示结果，
+// 两个 SetTimer 用的同一个 id，旧定时器的 WM_TIMER 可能正好落在新提示刚设置之后。
+func TestToastStaleTimerKeepsFreshToast(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	lw.toast("第一条提示", styleMuted)
+	lw.toast("第二条提示", styleOK) // 立刻替换：旧定时器还挂在队列里
+	lw.mu.Lock()
+	hwnd := lw.hwnd
+	lw.mu.Unlock()
+	procSendMessageW.Call(uintptr(hwnd), wmTimer, uiTimerToast, 0)
+	if got := lw.activeToast(); got.Text != "第二条提示" {
+		t.Fatalf("旧定时器不该清掉新提示，实际 %+v", got)
+	}
+	lw.mu.Lock()
+	lw.toastMsg = uiToast{}
+	lw.mu.Unlock()
 }
 
 func TestActiveToastIgnoresExpired(t *testing.T) {
@@ -712,5 +773,174 @@ func TestSelfTestIgnoredWhileRunning(t *testing.T) {
 	})
 	if n := f.selfTestCalls(); n != 1 {
 		t.Errorf("自检进行中不该再起一次，实际 %d 次", n)
+	}
+}
+
+// pausedStatus 摆一份「已暂停」的状态条：三个开关都是关的，暂停按钮变成「恢复」。
+func pausedStatus(paused bool) {
+	setWindowStatus(windowStatus{
+		Title:  "通途 Tongtu " + Version,
+		State:  "运行中",
+		Level:  stateOK,
+		Paused: paused,
+		Items: []windowStatusItem{
+			{Label: "系统代理", On: !paused, Action: uiIDSys},
+			{Label: "Hosts", On: false, Action: uiIDHosts},
+			{Label: "无SNI反代", On: !paused, Action: uiIDMITM},
+		},
+		Detail: []string{"服务组 steam"},
+	})
+}
+
+// waitToast 等一条包含 want 的提示出现。
+//
+// 失败时把期间出现过的提示按顺序打出来：提示是会被后来的操作顶掉的，
+// 只说「超时」根本看不出是没出现、还是被谁盖掉了。
+func waitToast(t *testing.T, what, want string) {
+	t.Helper()
+	var trail []string
+	last := ""
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		txt := toastText()
+		if txt != last {
+			trail = append(trail, txt)
+			last = txt
+		}
+		if strings.Contains(txt, want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s：等待提示 %q 超时，期间的提示：%v", what, want, trail)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestPauseButtonStopsAndResumes 点「暂停」走 StopAll，状态变成已暂停后同一个按钮走 Resume。
+func TestPauseButtonStopsAndResumes(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	pausedStatus(false)
+	f := &fakeActions{}
+	useFakeActions(t, f)
+	waitFor(t, "窗口拿到状态", func() bool {
+		lw.mu.Lock()
+		defer lw.mu.Unlock()
+		return !lw.status.Paused
+	})
+
+	clickRegion(t, uiIDPause)
+	waitFor(t, "暂停被调用", func() bool { return len(f.pauses()) == 1 })
+	if got := f.pauses()[0]; got != "stop" {
+		t.Fatalf("应调用 StopAll，实际 %q", got)
+	}
+	waitToast(t, "暂停后的反馈", "已暂停加速")
+	waitFor(t, "回读状态", func() bool { return f.refreshes() > 0 })
+
+	// 状态回读后按钮变成「恢复」：再点一次走 Resume
+	pausedStatus(true)
+	waitFor(t, "按钮变成恢复", func() bool {
+		r, ok := lw.regionAtID(uiIDPause)
+		return ok && r.Label == "恢复"
+	})
+	clickRegion(t, uiIDPause)
+	waitFor(t, "恢复被调用", func() bool { return len(f.pauses()) == 2 })
+	if got := f.pauses()[1]; got != "resume" {
+		t.Fatalf("应调用 Resume，实际 %q", got)
+	}
+	waitToast(t, "恢复后的反馈", "已恢复加速")
+}
+
+// TestPauseButtonIgnoresRepeatClicks 暂停还在进行时重复点击只提示，不再派发第二次。
+func TestPauseButtonIgnoresRepeatClicks(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	pausedStatus(false)
+	f := &fakeActions{pauseGate: make(chan struct{})}
+	useFakeActions(t, f)
+	waitFor(t, "窗口拿到状态", func() bool {
+		lw.mu.Lock()
+		defer lw.mu.Unlock()
+		return !lw.status.Paused
+	})
+
+	clickRegion(t, uiIDPause)
+	waitFor(t, "暂停被调用", func() bool { return len(f.pauses()) == 1 })
+	clickRegion(t, uiIDPause)
+	waitFor(t, "重复点击的提示", func() bool { return strings.Contains(toastText(), "请稍候") })
+	if n := len(f.pauses()); n != 1 {
+		t.Fatalf("暂停进行中不该再次派发，实际 %d 次", n)
+	}
+
+	close(f.pauseGate)
+	waitFor(t, "暂停收尾", func() bool { return strings.Contains(toastText(), "已暂停加速") })
+}
+
+// TestPauseFailureReported 暂停失败要把原因写出来（并允许重试），而不是静默留在后台。
+func TestPauseFailureReported(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	pausedStatus(false)
+	f := &fakeActions{pauseErr: errors.New("hosts 被别的程序改写了")}
+	useFakeActions(t, f)
+	waitFor(t, "窗口拿到状态", func() bool {
+		lw.mu.Lock()
+		defer lw.mu.Unlock()
+		return !lw.status.Paused
+	})
+
+	clickRegion(t, uiIDPause)
+	waitFor(t, "失败反馈", func() bool { return strings.Contains(toastText(), "hosts 被别的程序改写了") })
+	// 失败后不应该卡在「切换中」
+	waitFor(t, "允许重试", func() bool {
+		lw.mu.Lock()
+		defer lw.mu.Unlock()
+		return !lw.pauseBusy
+	})
+}
+
+// TestCopyProxyAddrWithoutAddress 代理还没起来时点「复制代理地址」给提示，不写剪贴板。
+func TestCopyProxyAddrWithoutAddress(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	f := &fakeActions{proxyAddr: ""}
+	useFakeActions(t, f)
+
+	lw.mu.Lock()
+	hwnd := lw.hwnd
+	lw.mu.Unlock()
+	lw.invokeAction(hwnd, uiIDCopyProxy)
+	if got := toastText(); !strings.Contains(got, "没有地址可复制") {
+		t.Fatalf("应提示没有地址，实际 %q", got)
+	}
+}
+
+// TestContextMenuTargetsLogEdit 右键菜单只应在日志控件上弹出。
+//
+// 回归保护：WM_CONTEXTMENU 的子窗口句柄在 wParam、坐标在 lParam，
+// 早先误把 lParam 当子窗口句柄比较，菜单永远弹不出来。
+func TestContextMenuTargetsLogEdit(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	lw.mu.Lock()
+	edit := lw.edit
+	lw.mu.Unlock()
+	if edit == 0 {
+		t.Skip("日志控件尚未创建")
+	}
+	if !lw.isLogEdit(uintptr(edit)) {
+		t.Error("日志控件上的右键应被接受")
+	}
+	if lw.isLogEdit(0) {
+		t.Error("没有子窗口（0）时不该弹菜单")
+	}
+	if lw.isLogEdit(uintptr(edit) + 4) {
+		t.Error("别的子窗口不该弹菜单")
 	}
 }

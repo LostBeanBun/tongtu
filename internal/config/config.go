@@ -47,18 +47,32 @@ type LogConfig struct {
 	File string `yaml:"file"`
 }
 
+// CustomConfig 是用户自己加的站点规则（「能加速自己的站点」）。
+//
+// 为什么单独一节而不是让用户去改 services：内置服务组是按 id 加载、会随版本更新的；
+// 自定义站点属于用户自己的东西，放这里既不会被默认值合并动到，也不会被服务组菜单的
+// 勾选逻辑覆盖。改完保存即生效（见 watchConfig），不需要重启。
+type CustomConfig struct {
+	// Domains 追加到代理白名单：写 my.site.com（含裸域）或 *.my.site.com。
+	Domains []string `yaml:"domains"`
+	// MITMDomains 追加到「无 SNI 反代」名单：只给确实被 SNI 阻断的域名加。
+	// 这些域名同时会进入白名单——否则反代根本没有流量经过。
+	MITMDomains []string `yaml:"mitm_domains"`
+}
+
 // Config 是 tongtu 的完整配置。
 type Config struct {
-	Version         int        `yaml:"version"`               // 配置文件版本
-	Listen          string     `yaml:"listen"`                // 本地代理监听地址
-	Control         string     `yaml:"control"`               // 控制 API 监听地址（仅回环）
-	SystemProxy     bool       `yaml:"system_proxy"`          // 启动时接管系统代理
-	Hosts           bool       `yaml:"hosts"`                 // 启动时接管 hosts
-	Services        []string   `yaml:"services"`              // 启用的服务组 id
-	HostsRefreshMin int        `yaml:"hosts_refresh_minutes"` // hosts IP 刷新周期
-	DNS             DNSConfig  `yaml:"dns"`
-	MITM            MITMConfig `yaml:"mitm"`
-	Log             LogConfig  `yaml:"log"`
+	Version         int          `yaml:"version"`               // 配置文件版本
+	Listen          string       `yaml:"listen"`                // 本地代理监听地址
+	Control         string       `yaml:"control"`               // 控制 API 监听地址（仅回环）
+	SystemProxy     bool         `yaml:"system_proxy"`          // 启动时接管系统代理
+	Hosts           bool         `yaml:"hosts"`                 // 启动时接管 hosts
+	Services        []string     `yaml:"services"`              // 启用的服务组 id
+	HostsRefreshMin int          `yaml:"hosts_refresh_minutes"` // hosts IP 刷新周期
+	DNS             DNSConfig    `yaml:"dns"`
+	MITM            MITMConfig   `yaml:"mitm"`
+	Custom          CustomConfig `yaml:"custom"`
+	Log             LogConfig    `yaml:"log"`
 
 	// UpgradedFrom 记录本次加载触发配置升级前的旧版本号（0 表示未升级）。
 	UpgradedFrom int `yaml:"-"`
@@ -252,7 +266,81 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	// 自定义站点：规范化并检查写法。写错时直接报错比「静默不生效」好得多。
+	domains, err := normalizePatterns("custom.domains", c.Custom.Domains)
+	if err != nil {
+		return err
+	}
+	mitmDomains, err := normalizePatterns("custom.mitm_domains", c.Custom.MITMDomains)
+	if err != nil {
+		return err
+	}
+	c.Custom.Domains, c.Custom.MITMDomains = domains, mitmDomains
 	return nil
+}
+
+// ProxyPatterns 返回要追加到代理白名单的自定义域名：
+// custom.domains 加上 custom.mitm_domains（反代域名也必须先进白名单，否则流量根本不会经过本地代理）。
+func (c *Config) ProxyPatterns() []string {
+	out := make([]string, 0, len(c.Custom.Domains)+len(c.Custom.MITMDomains))
+	out = append(out, c.Custom.Domains...)
+	out = append(out, c.Custom.MITMDomains...)
+	return dedupePatterns(out)
+}
+
+// MITMPatterns 返回实际生效的反代域名：内置/配置里的 mitm.domains + 自定义 mitm_domains。
+func (c *Config) MITMPatterns() []string {
+	out := make([]string, 0, len(c.MITM.Domains)+len(c.Custom.MITMDomains))
+	out = append(out, c.MITM.Domains...)
+	out = append(out, c.Custom.MITMDomains...)
+	return dedupePatterns(out)
+}
+
+// normalizePatterns 去空白、转小写、去重，并拒绝明显不是域名的写法。
+//
+// 之所以要在加载时就报错：自定义规则最常见的失败不是「没匹配上」，而是写成了
+// https://example.com/ 或 example.com:8443 —— 存进去以后永远匹配不到，用户只会觉得
+// 「这个功能没用」。宁可让配置加载失败并说清楚原因。
+func normalizePatterns(section string, in []string) ([]string, error) {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for _, raw := range in {
+		p := strings.ToLower(strings.TrimSpace(raw))
+		if p == "" {
+			continue
+		}
+		switch {
+		case strings.Contains(p, "://"):
+			return nil, fmt.Errorf("%s 里的 %q 带了协议头：只写主机名，例如 my.site.com", section, raw)
+		case strings.ContainsAny(p, `/\ :?`):
+			return nil, fmt.Errorf("%s 里的 %q 不是主机名：不要带端口、路径或空格", section, raw)
+		case strings.Contains(p, "*") && !strings.HasPrefix(p, "*."):
+			return nil, fmt.Errorf("%s 里的 %q 通配写法不对：只支持 *.example.com 这种前缀通配", section, raw)
+		case strings.HasPrefix(p, "*.") && len(p) <= 2:
+			return nil, fmt.Errorf("%s 里的 %q 少了域名", section, raw)
+		}
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// dedupePatterns 去重并保持顺序（大小写不敏感）。
+func dedupePatterns(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for _, raw := range in {
+		p := strings.ToLower(strings.TrimSpace(raw))
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
 }
 
 // DNSTimeout 返回单次 DoH 查询超时。
