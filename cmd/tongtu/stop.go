@@ -9,7 +9,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"tongtu/internal/app"
+	"tongtu/internal/autostart"
 	"tongtu/internal/control"
+	"tongtu/internal/hosts"
+	"tongtu/internal/sysproxy"
 )
 
 var stopCmd = &cobra.Command{
@@ -46,6 +49,13 @@ var stopCmd = &cobra.Command{
 		}
 		log := newLogger(cfg)
 		app.RecoverStale(log)
+		// 遗留状态已清理干净：撤掉「下次登录还原」项，别在系统里留下常驻命令。
+		// 没清完（例如 hosts 缺管理员权限、或仍由别的实例持有）就保留，留给下次登录再兜底。
+		if !sysproxy.Active() && !hosts.Managed(hosts.DefaultPath()) {
+			if err := autostart.ClearRunOnce(); err != nil {
+				log.Warn("撤掉断电自愈项失败", "err", err)
+			}
+		}
 		fmt.Println("tongtu 未在运行，已检查并清理遗留的系统状态")
 		return nil
 	},

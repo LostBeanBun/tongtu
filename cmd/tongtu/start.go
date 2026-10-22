@@ -88,6 +88,8 @@ var startCmd = &cobra.Command{
 		// 再拉监护，中间这段时间崩溃就没人还原了。此刻可能还什么都没接管：监护进程醒来
 		// 走的 RecoverStale 是幂等的，没有待还原状态时它什么都不会做。
 		if wantSys || wantHosts {
+			// 断电自愈项也要在接管之前登记：万一刚写进注册表就掉电，__recover 是幂等的。
+			armRunOnce(log)
 			startGuard(log)
 		}
 
@@ -155,6 +157,8 @@ var startCmd = &cobra.Command{
 
 		cs := control.New(cfg.Control, a, log)
 		cs.OnShutdown = signalQuit
+		// 自绘界面没有控件树：把几何快照挂到 /ui/layout 上，真机脚本按 ID 点按钮。
+		cs.Layout = uiLayoutSnapshot
 		if err := cs.Start(); err != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
@@ -168,6 +172,7 @@ var startCmd = &cobra.Command{
 		defer close(watchStop)
 		go watchGuard(a, log, watchStop)
 		if guardNeeded(a) {
+			armRunOnce(log)
 			startGuard(log)
 		}
 
@@ -249,6 +254,8 @@ var startCmd = &cobra.Command{
 			}, toggleWindow, func() {
 				restartElevated = true
 				signalQuit()
+			}, func() {
+				checkUpdateDialog(log)
 			})
 			fmt.Println("  托盘图标已就绪（右键可退出并还原系统设置）")
 			// 双击启动的实例在托盘就绪后弹出通途自己的窗口；随后与控制台分离，
@@ -283,6 +290,9 @@ var startCmd = &cobra.Command{
 			// 状态还原成功：顺手回收本轮监护令牌，别在数据目录里留下陈旧文件。
 			// 还原失败时故意留着——监护进程还能凭它做兜底还原。
 			releaseGuard()
+			// 同样撤掉断电自愈项：系统里已经没有需要还原的东西了。
+			// （还原失败时不撤，留给下次登录的 __recover 兜底。）
+			disarmRunOnce(log)
 		}
 		if err := cs.Shutdown(ctx); err != nil {
 			errs = append(errs, err)

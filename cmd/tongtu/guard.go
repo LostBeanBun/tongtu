@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"tongtu/internal/app"
+	"tongtu/internal/autostart"
 	"tongtu/internal/config"
 )
 
@@ -282,12 +283,19 @@ func guardNeeded(a *app.App) bool {
 
 // watchGuard 轮询「是否已接管系统状态」，一旦发生就确保监护进程在跑。
 // 托盘里手动打开系统代理 / hosts 之后也由它补上监护。
+//
+// 同一轮里顺带维护「断电自愈项」（见 recover.go）：监护进程管「进程死了」，
+// RunOnce 管「机器死了」（掉电 / 蓝屏）——两者都只在接管期间存在。
 func watchGuard(a *app.App, log *slog.Logger, quit <-chan struct{}) {
 	t := time.NewTicker(1500 * time.Millisecond)
 	defer t.Stop()
 	for {
 		if guardNeeded(a) {
+			armRunOnce(log)
 			startGuard(log)
+		} else {
+			// 暂停 / 手动关掉接管之后已经没有需要还原的东西：撤掉自愈项。
+			disarmRunOnce(log)
 		}
 		select {
 		case <-quit:
@@ -346,6 +354,11 @@ func runGuard(pid int, token string) {
 	}
 	guardLog("开始还原系统代理与 hosts")
 	app.RecoverStale(nil)
+	// 状态已经还原：撤掉「下次登录还原」项，别在系统里留下指向本程序的常驻命令。
+	// （如果这期间又有实例接管，它会在下一轮巡检里重新登记。）
+	if err := autostart.ClearRunOnce(); err != nil {
+		guardLog("撤掉断电自愈项失败: %v", err)
+	}
 	_ = os.Remove(guardStatePath())
 	guardLog("还原完成")
 }

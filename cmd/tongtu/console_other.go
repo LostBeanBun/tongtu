@@ -31,9 +31,12 @@ func messageBox(string, string, uint32) int32 { return 0 }
 func installConsoleCloseHandler(func()) {}
 
 const (
-	mbOK           = 0
-	mbIconError    = 0
-	mbYesNo        = 0
-	mbIconQuestion = 0
-	messageBoxYes  = 6
+	mbOK              = 0
+	mbIconError       = 0
+	mbIconInformation = 0
+	mbYesNo           = 0
+	mbIconQuestion    = 0
+	mbSetForeground   = 0
+	mbTopMost         = 0
+	messageBoxYes     = 6
 )

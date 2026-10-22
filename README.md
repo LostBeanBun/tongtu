@@ -40,6 +40,12 @@
 - **异常退出不留错配置**：接管系统代理 / hosts 期间会拉起一个同名「监护进程」，
   主进程一旦崩溃或被强杀，它立刻把系统代理与 hosts 还原成原来的样子；注销 / 关机由窗口消息触发还原
   （进程被强杀来不及还原时，下次启动也会自动清理遗留状态）。
+- **断电之后也能自愈**：接管期间在 `HKCU\...\RunOnce` 登记一次性的 `TongtuRecover`，
+  监护进程每 1.5 秒巡检补写；下次登录时先把上一轮残留的系统代理 / hosts / 锁文件收干净，
+  然后自己撤掉——只兜底一次，不留常驻项。断电、蓝屏、长按电源键都属于这一类。
+- **检查更新（只查不下载）**：托盘「检查更新」或 `tongtu version --check` 查 GitHub Releases；
+  有新版本就问一句，点是打开 Release 页面。绿色单文件不做自动替换——在 Windows 上替换
+  正在运行的 exe 不可靠，悄悄失败比不升级更糟。
 - **CLI + 系统托盘**：托盘右键菜单承载全部可配置项，点一下即开/关并写回配置。
 - **常规窗口界面**：标准的系统标题栏（跟随深浅色）+ 不透明窗口底 + 自绘状态条
   （状态点 + 文字 + 一条与卡片对齐的发丝分隔线）+ 圆角日志卡片与发丝描边；
@@ -145,8 +151,12 @@ cmd/tongtu/            CLI 入口 + 全部界面/托盘装配 + 监护进程（W
   main.go              进程入口：DPI、控制台、监护进程分支
   root.go              cobra 根命令、日志装配（控制台/文件/窗口三路）
   start.go / stop.go   启动与停止的生命周期（status.go / test.go / cert.go / autostart.go 是各子命令）
+  recover.go           断电自愈：登记 / 撤销 RunOnce，`__recover` 兜底清理（幂等）
+  update.go            「检查更新」弹框（只查不下载）
+  version.go           `version` 与 `version --check`
   window*.go           自绘窗口：状态条、日志卡片、主题、右键菜单
   ui_layout_windows.go 界面几何层：一帧里所有自绘控件的位置（绘制与命中判定共用一份）
+  ui_snapshot_windows.go 把几何快照暴露成 `/ui/layout`（给自动化验收脚本读按钮矩形）
   ui_interact_windows.go 交互层：悬停/点击、悬浮提示、轻量反馈、日志过滤、动作分发
   ui_actions.go        界面动作的注入点（窗口只描述「点了什么」，具体怎么做留在 start.go）
   tongtu.manifest      exe 清单：请求 comctl32 v6（过滤框提示文字、提示条与滚动条外观）
@@ -166,12 +176,17 @@ internal/selfcheck/   自检逻辑（干净解析 + 直连 + 经代理），CLI 
 internal/hosts/       系统 hosts 的托管块写入与还原（原子写）
 internal/sysproxy/    系统代理（HKCU 注册表）接管与还原
 internal/mitm/        无 SNI 反代所需的本地根证书（CA）
-internal/control/     仅回环的本地控制 API（status / mode / shutdown）
+internal/control/     仅回环的本地控制 API（status / mode / shutdown / ui-layout）
 internal/tray/        托盘图标与右键菜单
-internal/autostart/   开机自启（HKCU Run / 最高权限计划任务）
+internal/update/      检查更新：GitHub Releases API 查询与版本比较
+internal/autostart/   开机自启（HKCU Run / 最高权限计划任务）与 RunOnce 自愈项
 internal/icon/        应用图标（托盘与窗口共用）
 tools/genicon/        把图标重绘成多尺寸 ICO（开发工具）
 tools/crash-test.ps1  崩溃防护验收：强杀主进程，验证系统状态被自动还原
+tools/recover-test.ps1 断电自愈验收：杀监护 → 杀主进程 → `__recover`，断言状态干净且幂等
+tools/ui-smoke.ps1    界面点击验收：读 `/ui/layout` 精确定位按钮，点暂停/恢复并断言标签翻转
+tools/soak-test.ps1   长时间浸泡测试（默认 24 小时）：采样内存/句柄/连接，结束时给出结论
+tools/uninstall.ps1   卸载清理：撤销自启、证书、RunOnce、代理与 hosts 残留（可选删数据与 exe）
 VERSION               版本号（唯一权威来源，见 bump.ps1 / CHANGELOG.md）
 ```
 
@@ -260,7 +275,7 @@ dist\tongtu.exe test steamcommunity.com github.com
 | `tongtu autostart on` | 开启开机自启（默认：当前用户；`--elevated` 则用最高权限计划任务） |
 | `tongtu autostart off` | 关闭开机自启 |
 | `tongtu autostart status` | 查看开机自启状态 |
-| `tongtu version` | 显示版本号 |
+| `tongtu version` | 显示版本号（`--check` 联网检查是否有新版本，只查不下载） |
 
 全局标志：`--config <路径>`（默认 `%APPDATA%\tongtu\config.yaml`）。
 `--no-tray` / `--no-sysproxy` / `--no-hosts` / `--no-mitm` / `--hidden` 挂在根命令上，
@@ -290,6 +305,7 @@ Hosts 模式            [✓]
 ────────────────
 显示/隐藏窗口
 复制代理地址
+检查更新
 打开配置文件
 打开配置目录
 ────────────────
@@ -306,6 +322,8 @@ Hosts 模式            [✓]
 - **「以管理员身份重启」**（非管理员时可点）：先弹窗确认 → 还原系统代理与 hosts 并退出当前实例 →
   释放控制端口后再弹 UAC 拉起提权实例。顺序是刻意安排的：先退出再提权，新实例才不会撞上
   「tongtu 已在运行」；若在 UAC 里点了取消，只是本次重启作罢（不弹错误框），需要时手动再启动一次。
+- **「检查更新」只查不下载**：联网查 GitHub Releases，结果用弹框告诉你（已是最新 / 发现 vX.Y.Z）；
+  有新版本时点「是」打开 Release 页面，由你自己下载。查询失败会说清是网络问题还是仓库还没有发布版本。
 - 所有菜单操作失败都会弹出提示框（开机自启没有界面时同样可见）。
 - **双击 exe 启动后显示的是通途自己的窗口**（承载启动信息与运行日志，不是黑底控制台），
   **双击时不会出现 cmd 窗口**：exe 以图形子系统编译。**点窗口的 × 只是隐藏窗口**，
@@ -516,7 +534,7 @@ tongtu 会临时修改**系统代理**与 **hosts**，因此会尽最大努力�
 | 关闭启动它的终端窗口 | 界面就绪后进程已脱离控制台，**不受影响** | — |
 | **注销 / 关机** | 窗口收到 `WM_QUERYENDSESSION` → 主流程还原（最多等 4 秒）后才放行结束会话 | 会话结束前 |
 | **崩溃 / 被任务管理器强杀** | **监护进程**（同名 exe 的隐藏子进程）等到主进程退出后立即还原 | 毫秒级 |
-| 断电 / 蓝屏 / 直接拔电 | 无法执行任何代码；**下次启动自动清理**（开了「开机自启」的话登录时就会清理） | 下次 `start` / `stop` |
+| 断电 / 蓝屏 / 直接拔电 | 无法执行任何代码；接管期间登记的 `RunOnce` 自愈项会在**下次登录**时清理一次并自撤 | 下次登录或下次 `start` / `stop` |
 
 细节：
 
@@ -530,6 +548,15 @@ tongtu 会临时修改**系统代理**与 **hosts**，因此会尽最大努力�
 - **监护进程也可能被限制**：某些启动方式（IDE、CI、任务计划、被作业对象包住的终端）下，
   子进程无法脱离作业对象，会随主进程一起被结束——此时崩溃防护实际失效。通途检测到这种情况会在
   日志里告警，并在启动摘要里显示「崩溃防护：受限（…异常退出要等下次启动才还原）」，不会让人误以为万无一失。
+- **断电自愈（RunOnce）**：监护进程还活着才能兜住崩溃；连机器都断电了就没人执行清理。
+  为此接管系统期间会在 `HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce` 登记
+  `TongtuRecover = "<exe>" __recover`（当前用户权限，不需要管理员），监护进程每 1.5 秒巡检一次，
+  被别的清理软件删掉就补回来（值相同不写注册表）。下次登录时 Windows 执行它：
+  清理上一轮残留的系统代理 / hosts / `guard.json`，然后**自己删掉 RunOnce**，只兜底一次。
+  暂停、手动关掉接管、正常退出、监护进程完成还原后都会立即撤销这一项。
+  `__recover` 是幂等的——发现还有活着的持有者（例如只是界面崩了、服务仍在跑）就什么都不做。
+  - 已知边界：如果上一轮是**提权**运行、留下了 hosts 托管块，而这次 `__recover` 不是管理员，
+    它清不掉 hosts，只能在日志里明确写一条警告；下一次以管理员身份启动的通途会在接管前清掉它。
 - **自己验证一遍**：`.\tools\crash-test.ps1` 会快照当前网络设置 → 启动 → `taskkill /F` 强杀主进程 →
   断言系统代理 / hosts / guard.json / 残留进程都在规定时间内清理干净 → 打印检查表并还原快照。
   它还会区分「环境限制」与「代码问题」（前者会看到 `guard.log` 里提到作业对象）。
@@ -572,6 +599,23 @@ tongtu 会临时修改**系统代理**与 **hosts**，因此会尽最大努力�
   不接管时不会多一个进程。
 
 因此：**不运行时不会残留任何接管状态**；进程退出后不占用 CPU/内存（监护进程完成还原后自行退出）。
+
+## 卸载
+
+通途是绿色单文件，但它在系统里留下过自启、证书、RunOnce 与接管状态，建议按顺序撤销，
+而不是只把 exe 拖进回收站——否则可能出现「开机时冒出一个报错」或「浏览器还指着一个不存在的代理」。
+仓库自带脚本把这些步骤按顺序做完，并逐条报告结果：
+
+```powershell
+.\tools\uninstall.ps1                    # 停实例 + 撤销自启、证书、RunOnce、代理/hosts 残留（保留 exe 与配置）
+.\tools\uninstall.ps1 -Purge             # 连 %APPDATA%\tongtu（配置 / 证书 / 日志）一起删
+.\tools\uninstall.ps1 -Purge -RemoveExe  # 彻底删除
+```
+
+- 默认**不删** exe 与配置：误删配置的代价比多点一次高。
+- 证书装在「当前用户」存储，撤销不需要管理员；只有清 hosts 托管块需要管理员，权限不够时脚本会点明该怎么做。
+- `-KeepCert` 可保留本地根证书（例如你还要用别的工具复用同一套 CA）。
+- 手工卸载的顺序与每一步在做什么，见 [USAGE.md 的「卸载」](USAGE.md#卸载)。
 
 ## 已知限制
 

@@ -1296,6 +1296,8 @@ func (w *logWindow) ensureLayout() uiLayout {
 	w.mu.Lock()
 	w.uiLayout, w.layoutW, w.layoutH, w.layoutKey = l, r.Right, r.Bottom, key
 	w.mu.Unlock()
+	// 把几何同步给控制端口（真机脚本按控件 ID 精确点击用，见 ui_snapshot_windows.go）。
+	recordUILayout(l, r.Right, r.Bottom, st)
 	return l
 }
 

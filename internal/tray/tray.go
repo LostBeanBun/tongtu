@@ -38,17 +38,18 @@ var ErrElevationCancelled = errors.New("用户取消了 UAC 授权")
 // onWindow 为「显示/隐藏窗口」（可为 nil，表示当前平台没有独立窗口，菜单项不出现）。
 // onRestartElevated 为「以管理员身份重启」（可为 nil）：调用方应当先优雅还原再退出，
 // 最后在控制端口释放之后拉起提权实例（见 RelaunchElevated 的说明）。
+// onCheckUpdate 为「检查更新」（可为 nil）：调用方负责联网查询与弹框，托盘只转发点击。
 //
 // 注意：fyne.io/systray 的消息循环（创建托盘窗口并 GetMessage）必须始终运行在同一个
 // 操作系统线程上，否则 Windows 收不到鼠标事件——表现为「托盘图标可见，但左右键无反应」。
 // 这里用 LockOSThread 把本 goroutine 钉在其线程上，保证消息循环不会因 Go 调度迁移线程。
-func Run(a *app.App, onQuit func(), ready func(), onWindow func() error, onRestartElevated func()) {
+func Run(a *app.App, onQuit func(), ready func(), onWindow func() error, onRestartElevated func(), onCheckUpdate func()) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
 	done := make(chan struct{})
 	systray.Run(func() {
-		onReady(a, onQuit, done, onWindow, onRestartElevated)
+		onReady(a, onQuit, done, onWindow, onRestartElevated, onCheckUpdate)
 		if ready != nil {
 			ready()
 		}
@@ -77,10 +78,11 @@ type menu struct {
 	copyAddr *systray.MenuItem
 	openCfg  *systray.MenuItem
 	openDir  *systray.MenuItem
+	checkUpd *systray.MenuItem
 	quit     *systray.MenuItem
 }
 
-func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() error, onRestartElevated func()) {
+func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() error, onRestartElevated func(), onCheckUpdate func()) {
 	systray.SetIcon(icon.ICO)
 	systray.SetTitle("通途")
 	systray.SetTooltip("通途（Tongtu）· 网络加速（Steam / GitHub）")
@@ -133,6 +135,7 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 	m.openCfg = systray.AddMenuItem("打开配置文件", "用记事本打开 config.yaml")
 	m.openDir = systray.AddMenuItem("打开配置目录", "在资源管理器中打开数据目录")
 	m.copyAddr = systray.AddMenuItem("复制代理地址", "把本地代理地址复制到剪贴板，便于填到别的程序里")
+	m.checkUpd = systray.AddMenuItem("检查更新", "联网查询 GitHub 最新发布版本（只检查，不自动下载）")
 	systray.AddSeparator()
 	m.quit = systray.AddMenuItem("退出", "停止加速并还原系统代理与 hosts")
 
@@ -189,7 +192,7 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 		}
 	}
 
-	go clickLoop(a, m, done, onQuit, onWindow, onRestartElevated, syncReq, syncState, refreshAuto, fail)
+	go clickLoop(a, m, done, onQuit, onWindow, onRestartElevated, onCheckUpdate, syncReq, syncState, refreshAuto, fail)
 
 	// 周期同步勾选状态（反映控制 API 的变更与启动失败的实际情况）
 	go func() {
@@ -208,7 +211,7 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 
 // clickLoop 是唯一读写菜单项的 goroutine。
 func clickLoop(a *app.App, m *menu, done chan struct{}, onQuit func(), onWindow func() error,
-	onRestartElevated func(), syncReq chan struct{}, syncState, refreshAuto func(), fail func(string)) {
+	onRestartElevated func(), onCheckUpdate func(), syncReq chan struct{}, syncState, refreshAuto func(), fail func(string)) {
 	// 没有「显示/隐藏窗口」菜单项时 windowCh 为 nil，对应分支永不触发。
 	var windowCh chan struct{}
 	if m.window != nil {
@@ -335,6 +338,13 @@ func clickLoop(a *app.App, m *menu, done chan struct{}, onQuit func(), onWindow 
 		case <-m.openDir.ClickedCh:
 			if err := openPath(a.DataDir()); err != nil {
 				fail("打开配置目录失败：\n" + err.Error() + "\n路径：" + a.DataDir())
+			}
+
+		case <-m.checkUpd.ClickedCh:
+			// 联网查询可能要好几秒，还可能弹模态框：必须离开消息循环，
+			// 否则这期间托盘菜单完全点不动（用户会以为程序卡死了）。
+			if onCheckUpdate != nil {
+				go onCheckUpdate()
 			}
 
 		case <-m.quit.ClickedCh:

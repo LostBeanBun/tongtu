@@ -1,6 +1,7 @@
 package control
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -111,6 +112,59 @@ func TestFreeLoopbackAddrBadInput(t *testing.T) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil || host != "127.0.0.1" {
 		t.Fatalf("非法输入应退化为 127.0.0.1: %q (%v)", addr, err)
+	}
+}
+
+// TestHandleLayout 覆盖 /ui/layout：自绘控件没有无障碍信息，真机脚本靠它按 ID 点按钮。
+// 没窗口 / 还没画过时必须明确返回 404，脚本据此报「没有界面可点」而不是乱点。
+func TestHandleLayout(t *testing.T) {
+	s := &Server{}
+
+	get := func() *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		s.handleLayout(rec, httptest.NewRequest(http.MethodGet, "/ui/layout", nil))
+		return rec
+	}
+
+	if rec := get(); rec.Code != http.StatusNotFound {
+		t.Fatalf("没注入 Layout 时应返回 404，实际 %d", rec.Code)
+	}
+
+	s.Layout = func() any { return nil }
+	if rec := get(); rec.Code != http.StatusNotFound {
+		t.Fatalf("窗口还没画过时返回 404，实际 %d", rec.Code)
+	}
+
+	s.Layout = func() any {
+		return map[string]any{
+			"dpi": 96, "client_w": 855, "client_h": 481, "paused": false,
+			"regions": []map[string]any{
+				{"id": "pause", "label": "暂停", "left": 508, "top": 37, "right": 562, "bottom": 61},
+			},
+		}
+	}
+	rec := get()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("有几何时应返回 200，实际 %d", rec.Code)
+	}
+	var got struct {
+		Regions []struct {
+			ID    string `json:"id"`
+			Label string `json:"label"`
+			Left  int32  `json:"left"`
+		} `json:"regions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v", err)
+	}
+	if len(got.Regions) != 1 || got.Regions[0].ID != "pause" || got.Regions[0].Label != "暂停" || got.Regions[0].Left != 508 {
+		t.Fatalf("几何内容不符: %+v", got.Regions)
+	}
+
+	rec = httptest.NewRecorder()
+	s.handleLayout(rec, httptest.NewRequest(http.MethodPost, "/ui/layout", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("非 GET 应返回 405，实际 %d", rec.Code)
 	}
 }
 

@@ -39,3 +39,15 @@ func TaskCommand() string { return "" }
 
 // Query 在非 Windows 平台返回空配置。
 func Query() (Info, error) { return Info{}, nil }
+
+// RecoverCommand 在非 Windows 平台也生成同样的命令行（便于测试与诊断）。
+func RecoverCommand(exe string) string { return `"` + exe + `" __recover` }
+
+// SetRunOnce 在非 Windows 平台返回不支持。
+func SetRunOnce(string) error { return errUnsupported }
+
+// ClearRunOnce 在非 Windows 平台为空实现。
+func ClearRunOnce() error { return nil }
+
+// RunOnceCommand 在非 Windows 平台返回空。
+func RunOnceCommand() (string, error) { return "", nil }

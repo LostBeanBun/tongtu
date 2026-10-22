@@ -29,6 +29,7 @@ func buildDiagnostics(a *app.App, cfg *config.Config) string {
 	fmt.Fprintf(&b, "通途 Tongtu %s 诊断信息\n", Version)
 	fmt.Fprintf(&b, "生成时间: %s\n", time.Now().Format("2006-01-02 15:04:05"))
 	fmt.Fprintf(&b, "系统: %s/%s · 管理员=%v\n", runtime.GOOS, runtime.GOARCH, autostart.IsAdmin())
+	fmt.Fprintf(&b, "断电自愈: %s\n", runOnceWord())
 	fmt.Fprintf(&b, "配置: %s\n", a.ConfigPath())
 	if path := cfg.LogFilePath(); path != "" {
 		fmt.Fprintf(&b, "日志: %s\n", path)
@@ -84,4 +85,17 @@ func pauseWord(paused bool) string {
 		return ""
 	}
 	return "（当前已暂停：对外影响已撤回）"
+}
+
+// runOnceWord 描述「断电自愈项」的现状：排查「掉电重启后网络没自动恢复」时先看这一行。
+func runOnceWord() string {
+	cmdLine, err := autostart.RunOnceCommand()
+	switch {
+	case err != nil:
+		return "状态未知（" + err.Error() + "）"
+	case cmdLine == "":
+		return "未登记（当前没有需要还原的接管状态）"
+	default:
+		return "已登记（" + cmdLine + "）"
+	}
 }

@@ -30,6 +30,11 @@ type Server struct {
 
 	// OnShutdown 在收到 /shutdown 后异步触发（由调用方注入退出逻辑）。
 	OnShutdown func()
+
+	// Layout 返回当前窗口的几何快照（/ui/layout），没有窗口时返回 nil。
+	// 自绘控件没有 UI Automation 信息，真机冒烟脚本靠它按 ID 精确点击。
+	// 只读、仅回环，不参与任何加速逻辑。
+	Layout func() any
 }
 
 // New 创建控制服务（未监听）。
@@ -51,6 +56,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/status", s.handleStatus)
 	mux.HandleFunc("/mode", s.handleMode)
 	mux.HandleFunc("/shutdown", s.handleShutdown)
+	mux.HandleFunc("/ui/layout", s.handleLayout)
 	s.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		if err := s.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -106,6 +112,24 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleLayout 返回自绘控件的几何快照（客户区坐标）。
+// 窗口还没创建（例如 --no-tray 且界面创建失败）时返回 404，让调用方知道自己没界面可点。
+func (s *Server) handleLayout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.Layout == nil {
+		http.Error(w, "no window", http.StatusNotFound)
+		return
+	}
+	snap := s.Layout()
+	if snap == nil {
+		http.Error(w, "window not painted yet", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, snap)
+}
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(v)

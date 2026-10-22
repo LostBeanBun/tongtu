@@ -123,11 +123,14 @@ func detachConsole() bool {
 
 // messageBox 弹出系统对话框（GUI 模式下没有终端，错误与询问都靠它）。
 const (
-	mbOK           = 0x00000000
-	mbIconError    = 0x00000010
-	mbYesNo        = 0x00000004
-	mbIconQuestion = 0x00000020
-	messageBoxYes  = 6
+	mbOK              = 0x00000000
+	mbIconError       = 0x00000010
+	mbIconInformation = 0x00000040
+	mbYesNo           = 0x00000004
+	mbIconQuestion    = 0x00000020
+	mbSetForeground   = 0x00010000
+	mbTopMost         = 0x00040000
+	messageBoxYes     = 6
 )
 
 func messageBox(title, text string, flags uint32) int32 {
