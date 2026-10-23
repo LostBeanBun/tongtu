@@ -102,7 +102,12 @@ var (
 // onMouseMove 更新悬停高亮、手型光标与悬浮提示（都在同一份几何上判定）。
 func (w *logWindow) onMouseMove(hwnd windows.Handle, lparam uintptr) {
 	x, y := mousePoint(lparam)
-	w.trackMouseLeave(hwnd)
+	// 只有真实鼠标在客户区内时才请求 WM_MOUSELEAVE。否则 TrackMouseEvent 会立刻
+	// 投递一条 leave（因为光标本来就在窗口外），把刚设好的悬停状态又清掉——自动化
+	// 测试用 SendMessage 合成 WM_MOUSEMOVE 时就会撞上这个竞态。
+	if cursorInClient(hwnd) {
+		w.trackMouseLeave(hwnd)
+	}
 
 	r, ok := w.regionAt(x, y)
 	id := ""
@@ -131,6 +136,23 @@ func (w *logWindow) onMouseLeave(hwnd windows.Handle) {
 func (w *logWindow) trackMouseLeave(hwnd windows.Handle) {
 	tme := trackMouseT{Size: uint32(unsafe.Sizeof(trackMouseT{})), Flags: tmeLeave, HwndTrack: hwnd}
 	procTrackMouseEvent.Call(uintptr(unsafe.Pointer(&tme)))
+}
+
+// cursorInClient 报告真实鼠标当前是否落在窗口客户区内。
+//
+// 合成鼠标消息（测试 / 自动化）不会移动真实光标；此时 TrackMouseEvent 会认为
+// 鼠标在窗口外并立刻投递 WM_MOUSELEAVE，把刚设好的悬停状态清掉。真实输入不会
+// 出现这种情况（WM_MOUSEMOVE 本来只在客户区内产生），所以按真实光标位置决定
+// 是否跟踪离开既不影响手感，也让测试不再依赖消息循环的调度顺序。
+func cursorInClient(hwnd windows.Handle) bool {
+	var pt pointT
+	if ok, _, _ := procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt))); ok == 0 {
+		return false
+	}
+	procScreenToClient.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&pt)))
+	var cr rectT
+	procGetClientRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&cr)))
+	return pt.X >= cr.Left && pt.X < cr.Right && pt.Y >= cr.Top && pt.Y < cr.Bottom
 }
 
 // onSetCursor 在可点击区域上显示手型光标，其余交回系统（箭头）。

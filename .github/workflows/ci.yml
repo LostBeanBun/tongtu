@@ -71,7 +71,7 @@ jobs:
           go test ./... -count=1 -timeout 20m 2>&1 | Tee-Object -FilePath $log
           $status = $LASTEXITCODE
           if ($status -ne 0) {
-            $summary = Select-String -Path $log -Pattern '^--- FAIL|^FAIL|^panic:|WARNING: DATA RACE|^\s+tongtu/' |
+            $summary = Select-String -Path $log -Pattern '^--- FAIL|^FAIL|^panic:|WARNING: DATA RACE|^\s+\S+_test\.go:\d+:|^\s+tongtu/' |
               Select-Object -First 10 | ForEach-Object { $_.Line }
             if (-not $summary) { $summary = Get-Content $log -Tail 10 }
             $summary | ForEach-Object {
@@ -94,7 +94,7 @@ jobs:
           go test -race ./... -count=1 -timeout 20m 2>&1 | tee /tmp/go-test.log || status=$?
           if [ "$status" -ne 0 ]; then
             echo "===== 失败摘要 ====="
-            summary=$(grep -E '^(--- FAIL|FAIL|panic:)|WARNING: DATA RACE|Found [0-9]+ data race|^[[:space:]]+tongtu/' /tmp/go-test.log | head -n 10 || true)
+            summary=$(grep -E '^(--- FAIL|FAIL|panic:)|WARNING: DATA RACE|Found [0-9]+ data race|^[[:space:]]+[^[:space:]]+_test\.go:[0-9]+:|^[[:space:]]+tongtu/' /tmp/go-test.log | head -n 10 || true)
             if [ -z "$summary" ]; then
               summary=$(tail -n 10 /tmp/go-test.log || true)
             fi

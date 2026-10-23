@@ -1005,7 +1005,14 @@ func TestWindowProcHandlesSessionEnd(t *testing.T) {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
 	hwnd := lw.handle()
-	defer setSessionEndHandler(nil)
+	defer func() {
+		setSessionEndHandler(nil)
+		// 把去重时间戳也清掉：否则下一条用例（或 -count 的下一轮）会在 3 秒内
+		// 被误判成「同一次关机」，还原回调根本不会触发。
+		sessionEndMu.Lock()
+		sessionEndLast = time.Time{}
+		sessionEndMu.Unlock()
+	}()
 
 	hits := make(chan struct{}, 4)
 	setSessionEndHandler(func() { hits <- struct{}{} })
