@@ -62,9 +62,24 @@ jobs:
           cache: true
 
       # Windows 是目标平台：窗口/注册表/证书相关的测试只在这里跑得到。
+      # 失败摘要同样写成 annotation，方便公开仓库排障。
       - name: go test（Windows）
         if: runner.os == 'Windows'
-        run: go test ./... -count=1 -timeout 20m
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:TEMP "go-test-windows.log"
+          go test ./... -count=1 -timeout 20m 2>&1 | Tee-Object -FilePath $log
+          $status = $LASTEXITCODE
+          if ($status -ne 0) {
+            $summary = Select-String -Path $log -Pattern '^--- FAIL|^FAIL|^panic:|WARNING: DATA RACE|^\s+tongtu/' |
+              Select-Object -First 10 | ForEach-Object { $_.Line }
+            if (-not $summary) { $summary = Get-Content $log -Tail 10 }
+            $summary | ForEach-Object {
+              Write-Host $_
+              Write-Host "::error title=Windows 测试失败::$_"
+            }
+            exit $status
+          }
 
       # Linux 上跑 -race：竞态检测不需要真的 Windows，能覆盖大部分核心包。
       # 失败时把关键行写成 annotation：公开仓库的 Actions 日志要登录才能下载，
