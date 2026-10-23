@@ -73,6 +73,15 @@
   过程中修掉两处只在 CI 暴露的问题：staticcheck 在 Linux 下把 Windows 专用符号误报为 U1000
   （改为按 Windows 目标平台检查）；非 Windows 的 `processAlive` 恒为 false，导致监护令牌
   回收测试误判（改为按 Unix 的 signal 0 语义判断进程存活）。
+- 首次 Release 实跑成功（run `39885561462`，tag `v0.5.0` → `6023468`）：质量门、构建、
+  打包与创建 Release 全部通过。`releases/latest` 已指向 v0.5.0；下载的
+  `tongtu-0.5.0-windows-x64.exe`（9,973,248 字节）SHA-256 为
+  `a4c21b41d921d30f62e4bda71b00f0122b2af2be464d68d274c6c5daf877f31f`，
+  与 Release 附件 `SHA256SUMS.txt` 一致。
+- 修掉两个 Windows UI 测试 flake：合成 `WM_MOUSEMOVE` 时真实光标在窗口外，
+  `TrackMouseEvent` 会立刻投递 `WM_MOUSELEAVE` 把悬停状态清掉（改为只在真实光标位于
+  客户区时跟踪离开）；`TestWindowProcHandlesSessionEnd` 未清理关机去重时间戳，
+  会让后续用例在 3 秒内被误判成「同一次关机」。
 
 ## [0.4.0] - 2026-10-22
 
