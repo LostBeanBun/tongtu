@@ -37,6 +37,14 @@ jobs:
           }
           Write-Host "发布版本：$ver" -ForegroundColor Cyan
 
+      # Windows 上 Git 默认可能把 Go 文件 checkout 成 CRLF，gofmt 会把每个文件都判成
+      # 「未格式化」。统一成 LF 再跑质量门，避免这种只在 Windows runner 出现的假失败。
+      - name: 统一换行符（LF）
+        shell: pwsh
+        run: |
+          git config core.autocrlf false
+          git reset --hard HEAD
+
       - name: 质量门
         shell: pwsh
         run: |
