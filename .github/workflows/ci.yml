@@ -38,7 +38,9 @@ jobs:
       - name: staticcheck
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
-          staticcheck ./...
+          # 按目标平台（Windows）检查：Linux 下 Windows 专用文件会被排除，
+          # 那些「只在 Windows 代码里被引用」的符号会被误报成 U1000。
+          GOOS=windows GOARCH=amd64 staticcheck ./...
 
       - name: 交叉编译（Windows / Linux）
         run: |
@@ -65,6 +67,24 @@ jobs:
         run: go test ./... -count=1 -timeout 20m
 
       # Linux 上跑 -race：竞态检测不需要真的 Windows，能覆盖大部分核心包。
+      # 失败时把关键行写成 annotation：公开仓库的 Actions 日志要登录才能下载，
+      # annotation 则可以匿名读取，排障时不用让人帮忙翻日志。
       - name: go test -race（Linux）
         if: runner.os == 'Linux'
-        run: go test -race ./... -count=1 -timeout 20m
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -race ./... -count=1 -timeout 20m 2>&1 | tee /tmp/go-test.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo "===== 失败摘要 ====="
+            summary=$(grep -E '^(--- FAIL|FAIL|panic:)|WARNING: DATA RACE|Found [0-9]+ data race|^[[:space:]]+tongtu/' /tmp/go-test.log | head -n 10)
+            if [ -z "$summary" ]; then
+              summary=$(tail -n 10 /tmp/go-test.log)
+            fi
+            echo "$summary"
+            while IFS= read -r line; do
+              [ -n "$line" ] && echo "::error title=Linux 测试失败::$line"
+            done <<< "$summary"
+            exit "$status"
+          fi
