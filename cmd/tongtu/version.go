@@ -19,7 +19,7 @@ import (
 //
 // 发布构建还会用 -ldflags "-X main.Version=..." 再覆盖一次（见 build.ps1），
 // 所以即使忘了同步这里，exe 里的版本号也是对的。
-var Version = "0.4.0"
+var Version = "0.5.0"
 
 var flagCheckUpdate bool
 

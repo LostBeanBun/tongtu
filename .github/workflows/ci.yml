@@ -1,0 +1,70 @@
+name: CI
+
+# 每次推到 main 或提 PR 都跑：格式、静态检查、跨平台编译与测试。
+# 目标是把「记得本地跑一遍」变成机器替你记——0.4.0 之前这些全靠手工。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: 格式与静态检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "以下文件没有按 gofmt 格式化："
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+          staticcheck ./...
+
+      - name: 交叉编译（Windows / Linux）
+        run: |
+          GOOS=windows GOARCH=amd64 go build ./...
+          GOOS=linux GOARCH=amd64 go build ./...
+
+  test:
+    name: 测试（${{ matrix.os }}）
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Windows 是目标平台：窗口/注册表/证书相关的测试只在这里跑得到。
+      - name: go test（Windows）
+        if: runner.os == 'Windows'
+        run: go test ./... -count=1 -timeout 20m
+
+      # Linux 上跑 -race：竞态检测不需要真的 Windows，能覆盖大部分核心包。
+      - name: go test -race（Linux）
+        if: runner.os == 'Linux'
+        run: go test -race ./... -count=1 -timeout 20m

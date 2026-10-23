@@ -3,16 +3,20 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 )
 
-// TestLoadUpgradesOldConfig 旧版（无 version 字段）配置应被备份并按新默认值重建。
+// TestLoadUpgradesOldConfig 旧版（无 version 字段）配置升级时：
+// 用户设置必须保留，新默认值只填补缺失字段，已知的错误值被定点修正。
 func TestLoadUpgradesOldConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	old := "listen: 127.0.0.1:9999\n" +
+		"services: [github]\n" +
 		"log:\n  level: debug\n" +
+		"custom:\n  domains: ['my.site.com']\n" +
 		"dns:\n  endpoints: ['https://1.1.1.1/dns-query', 'https://223.5.5.5/dns-query']\n"
 	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
 		t.Fatal(err)
@@ -28,13 +32,37 @@ func TestLoadUpgradesOldConfig(t *testing.T) {
 	if cfg.UpgradedFrom != 0 {
 		t.Fatalf("UpgradedFrom 应为 0，实际 %d", cfg.UpgradedFrom)
 	}
+
+	// 用户亲手写下的设置必须原样保留——升级不是「恢复出厂设置」的机会。
+	if cfg.Listen != "127.0.0.1:9999" {
+		t.Errorf("用户端口被改写: %s", cfg.Listen)
+	}
+	if cfg.Log.Level != "debug" {
+		t.Errorf("用户日志级别被改写: %s", cfg.Log.Level)
+	}
+	if len(cfg.Services) != 1 || cfg.Services[0] != "github" {
+		t.Errorf("用户服务组被改写: %v", cfg.Services)
+	}
+	if len(cfg.Custom.Domains) != 1 || cfg.Custom.Domains[0] != "my.site.com" {
+		t.Errorf("用户自定义站点丢失: %v", cfg.Custom.Domains)
+	}
+
+	// 语义修正：只把已知错误的端点换掉，用户自己加的端点保留。
 	for _, ep := range cfg.DNS.Endpoints {
 		if strings.HasSuffix(ep, "223.5.5.5/dns-query") {
-			t.Fatalf("旧的错误端点未被替换: %s", ep)
+			t.Errorf("旧的错误端点未被替换: %s", ep)
 		}
 	}
-	if !cfg.MITM.Enabled || len(cfg.MITM.Domains) == 0 {
-		t.Fatalf("MITM 默认配置缺失: %+v", cfg.MITM)
+	if !slices.Contains(cfg.DNS.Endpoints, "https://223.5.5.5/resolve") {
+		t.Errorf("修正后的端点缺失: %v", cfg.DNS.Endpoints)
+	}
+	if !slices.Contains(cfg.DNS.Endpoints, "https://1.1.1.1/dns-query") {
+		t.Errorf("用户保留的端点被删: %v", cfg.DNS.Endpoints)
+	}
+
+	// 缺失字段使用新默认值。
+	if !cfg.SystemProxy || !cfg.MITM.Enabled || len(cfg.MITM.Domains) == 0 {
+		t.Errorf("缺失字段没有取新默认值: system_proxy=%v mitm=%+v", cfg.SystemProxy, cfg.MITM)
 	}
 	if _, err := os.Stat(path + ".v0.bak"); err != nil {
 		t.Fatalf("缺少旧配置备份: %v", err)
@@ -51,6 +79,83 @@ func TestLoadUpgradesOldConfig(t *testing.T) {
 	}
 	if cfg2.UpgradedFrom != 0 {
 		t.Fatal("不应重复触发升级")
+	}
+}
+
+// TestLoadUpgradeKeepsVersionedConfig 带版本号的旧配置：保留设置，备份名带旧版本号。
+func TestLoadUpgradeKeepsVersionedConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	old := "version: 3\n" +
+		"listen: 127.0.0.1:18080\n" +
+		"hosts: false\n" +
+		"services: [steam]\n" +
+		"mitm:\n  enabled: false\n" +
+		"custom:\n  mitm_domains: ['blocked.site.com']\n"
+	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.UpgradedFrom != 3 {
+		t.Errorf("UpgradedFrom = %d，期望 3", cfg.UpgradedFrom)
+	}
+	if cfg.Listen != "127.0.0.1:18080" || cfg.Hosts || cfg.MITM.Enabled {
+		t.Errorf("用户开关被改写: listen=%s hosts=%v mitm=%v", cfg.Listen, cfg.Hosts, cfg.MITM.Enabled)
+	}
+	if len(cfg.Custom.MITMDomains) != 1 || cfg.Custom.MITMDomains[0] != "blocked.site.com" {
+		t.Errorf("用户反代域名丢失: %v", cfg.Custom.MITMDomains)
+	}
+	if _, err := os.Stat(path + ".v3.bak"); err != nil {
+		t.Fatalf("缺少 .v3.bak 备份: %v", err)
+	}
+}
+
+// TestLoadRejectsNewerConfig 旧程序遇到新版本配置要明确拒绝，不能读一遍再写回去。
+func TestLoadRejectsNewerConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	old := "version: " + strconv.Itoa(CurrentVersion+1) + "\nlisten: 127.0.0.1:19180\n"
+	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("更高版本的配置应当报错")
+	} else if !strings.Contains(err.Error(), "高于") {
+		t.Fatalf("错误信息没说清原因: %v", err)
+	}
+}
+
+// TestSaveIsReadableAndAtomic 保存后的配置能被读回，且不残留临时文件。
+func TestSaveIsReadableAndAtomic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	cfg := Default()
+	cfg.Log.Level = "debug"
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	// 覆盖已存在的文件也要成功（Windows 的 rename 语义容易在这里出问题）。
+	cfg.Log.Level = "warn"
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("覆盖 Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Log.Level != "warn" {
+		t.Fatalf("保存的设置没读回: %s", got.Log.Level)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".config-") && strings.HasSuffix(e.Name(), ".tmp") {
+			t.Fatalf("残留临时文件: %s", e.Name())
+		}
 	}
 }
 

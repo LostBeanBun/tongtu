@@ -41,7 +41,7 @@ var startCmd = &cobra.Command{
 			return err
 		}
 		if cfg.UpgradedFrom > 0 {
-			fmt.Printf("提示: 配置已从 v%d 升级到 v%d，旧文件备份为 %s.v%d.bak\n",
+			fmt.Printf("提示: 配置已从 v%d 升级到 v%d（用户设置已保留），旧文件备份为 %s.v%d.bak\n",
 				cfg.UpgradedFrom, config.CurrentVersion, config.DefaultPath(), cfg.UpgradedFrom)
 		}
 		log := newLogger(cfg)

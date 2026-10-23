@@ -189,6 +189,27 @@ github.com            140.82.112.3 +3      2009ms  249ms    HTTP 200   HTTP 200 
 > 运行时的所有开关（加速模式、服务组、开机自启）都可以直接点**托盘右键菜单**切换，
 > 无需改配置文件或重启。
 
+### 升级
+
+```powershell
+tongtu version --check     # 只检查，不下载；有新版本会打印版本号与 Release 地址
+```
+
+托盘右键也有「检查更新」。查到新版本后：
+
+1. 打开 Release 页面，下载 `tongtu-X.Y.Z-windows-x64.exe`；
+2. 用同页的 `SHA256SUMS.txt` 校验（PowerShell）：
+
+   ```powershell
+   Get-FileHash .\tongtu-X.Y.Z-windows-x64.exe -Algorithm SHA256
+   ```
+
+3. 退出通途（托盘右键「退出」或 `tongtu stop`），用新 exe 覆盖旧的，再启动。
+
+配置、证书与日志都在 `%APPDATA%\tongtu`，覆盖 exe 不会丢。配置版本升级时会先备份为
+`config.yaml.vN.bak`，再**保留你的设置**升级（只补新字段、修正已知错误值）。
+不做自动下载替换：绿色单文件在 Windows 上替换正在运行的 exe 不可靠。
+
 ---
 
 ## 5. 开机自启
@@ -219,7 +240,9 @@ tongtu autostart status
 
 ## 6. 配置说明
 
-配置文件：`%APPDATA%\tongtu\config.yaml`（带版本号；旧版本会被备份为 `config.yaml.vN.bak` 并按新默认重建）。
+配置文件：`%APPDATA%\tongtu\config.yaml`（带版本号；旧版本会先备份为 `config.yaml.vN.bak`，
+再在**保留你已有设置**的前提下升级——只补新字段、修正已知错误值，不会把你改过的端口、
+服务组、自定义站点重置掉）。
 
 ```yaml
 version: 4

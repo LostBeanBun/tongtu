@@ -11,7 +11,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// CurrentVersion 是配置文件版本：低于该版本的配置会被备份并按新默认值重建。
+// CurrentVersion 是配置文件版本：低于该版本的配置会先备份，再在**保留用户设置**的
+// 前提下升级到新版本（见 Load 与 migrate）。
 const CurrentVersion = 4
 
 // LogFileOff 是 log.file 的特殊值：不写日志文件，只在控制台与窗口里输出。
@@ -180,14 +181,30 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("解析配置 %s 失败: %w", path, err)
 	}
 	if fileCfg.Version < CurrentVersion {
-		// 旧版配置：备份原文件后按新默认值重建（v2 修正了 DoH 端点等关键默认项）
-		bak := fmt.Sprintf("%s.v%d.bak", path, fileCfg.Version)
+		// 旧版配置升级：先备份原文件，然后**保留用户设置**地升级。
+		//
+		// 为什么不再「按新默认值重建」：那会把用户自己的端口、服务组、自定义站点、
+		// 日志设置一并丢掉，只留下一个 .bak 让用户自己去翻。正确做法是
+		// 「新默认值打底、旧文件覆盖」——文件里写过的字段（包括用户手改过的）优先，
+		// 只有缺失的字段才取新默认值；语义确实变了的字段由 migrate 逐版本修正。
+		from := fileCfg.Version
+		bak := fmt.Sprintf("%s.v%d.bak", path, from)
 		_ = os.WriteFile(bak, data, 0o644)
 		cfg = Default()
-		cfg.UpgradedFrom = fileCfg.Version
+		if err := yaml.Unmarshal(data, cfg); err != nil {
+			return nil, fmt.Errorf("解析配置 %s 失败: %w", path, err)
+		}
+		migrate(cfg, from)
+		cfg.Version = CurrentVersion
+		cfg.UpgradedFrom = from
 		if e := EnsureDir(); e == nil {
 			_ = Save(path, cfg)
 		}
+	} else if fileCfg.Version > CurrentVersion {
+		// 用旧程序打开新配置：宁可明确拒绝，也不要按旧结构读一遍再写回去，
+		// 那会悄悄丢掉新版本才有的字段。
+		return nil, fmt.Errorf("配置 %s 的版本 %d 高于当前程序支持的 %d，请升级通途后再运行",
+			path, fileCfg.Version, CurrentVersion)
 	} else {
 		// 当前版本：文件值覆盖默认值（保持缺失字段使用默认）
 		if err := yaml.Unmarshal(data, cfg); err != nil {
@@ -200,13 +217,50 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// migrate 把旧版配置里语义已经变化的值修正到当前语义。
+//
+// 只做「定点修正」，不重置整份配置：用户的端口、服务组、自定义站点、日志设置
+// 都是他们自己的选择，升级没有理由替他们改掉。以后每次抬 CurrentVersion，
+// 都在这里补一段对应的修正逻辑，并在 config_test.go 里留下升级用例。
+func migrate(cfg *Config, from int) {
+	if from < 4 {
+		// v4 之前 223.5.5.5 的 DoH 路径写成了 /dns-query（阿里返回 400），
+		// 修正成 /resolve；只动这一个已知错误值，用户自己加的端点原样保留。
+		for i, ep := range cfg.DNS.Endpoints {
+			if strings.EqualFold(strings.TrimSpace(ep), "https://223.5.5.5/dns-query") {
+				cfg.DNS.Endpoints[i] = "https://223.5.5.5/resolve"
+			}
+		}
+	}
+}
+
 // Save 将配置写入 path。
+//
+// 先写同目录临时文件再改名：写一半被强杀 / 蓝屏时，磁盘上不会留下半截 YAML
+// （配置损坏意味着下次启动直接失败，代价比多一次 rename 大得多）。
 func Save(path string, cfg *Config) error {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // Validate 校验并补全配置中的零值。

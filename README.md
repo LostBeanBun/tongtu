@@ -1,5 +1,8 @@
 # 通途（Tongtu）
 
+[![CI](https://github.com/LostBeanBun/tongtu/actions/workflows/ci.yml/badge.svg)](https://github.com/LostBeanBun/tongtu/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/LostBeanBun/tongtu?label=release)](https://github.com/LostBeanBun/tongtu/releases/latest)
+
 > 天堑变通途 —— 轻量的 Steam / GitHub 网络加速。
 
 面向境内网络的 **Steam 社区**与 **GitHub 及其附属站点**加速工具（Windows x64，独立实现、绿色单文件）：
@@ -187,6 +190,8 @@ tools/recover-test.ps1 断电自愈验收：杀监护 → 杀主进程 → `__re
 tools/ui-smoke.ps1    界面点击验收：读 `/ui/layout` 精确定位按钮，点暂停/恢复并断言标签翻转
 tools/soak-test.ps1   长时间浸泡测试（默认 24 小时）：采样内存/句柄/连接，结束时给出结论
 tools/uninstall.ps1   卸载清理：撤销自启、证书、RunOnce、代理与 hosts 残留（可选删数据与 exe）
+tools/release-notes.ps1 从 CHANGELOG 提取版本条目，生成 Release 说明
+.github/workflows/    CI（格式/静态检查/跨平台测试）与 Release（打 tag 自动构建发布）
 VERSION               版本号（唯一权威来源，见 bump.ps1 / CHANGELOG.md）
 ```
 
@@ -221,6 +226,26 @@ rsrc -arch amd64 -ico internal/icon/icon.ico -manifest cmd/tongtu/tongtu.manifes
 `build.ps1` 自动读取 `VERSION` 并把版本号写进 exe（`tongtu version` 可见）。
 每个版本的改动记在 [CHANGELOG.md](CHANGELOG.md)；`0.0.x` 属开发期，配置与命令行为都可能变，
 到 `1.0.0` 才承诺向后兼容。
+
+### 发布与升级
+
+重要版本会打 `vX.Y.Z` tag，推上去后由 [`.github/workflows/release.yml`](.github/workflows/release.yml)
+自动完成：跑质量门 → 构建 Windows x64 单文件 → 生成 `SHA256SUMS.txt` 与发布说明 → 发布 GitHub Release。
+CI（[`ci.yml`](.github/workflows/ci.yml)）在每次 push / PR 时跑 gofmt、vet、staticcheck、跨平台编译与测试。
+
+升级方式（绿色单文件，没有安装器）：
+
+1. 托盘右键「检查更新」，或执行 `tongtu version --check`；有新版本时打开 Release 页面。
+2. 下载 `tongtu-X.Y.Z-windows-x64.exe`，用 `SHA256SUMS.txt` 校验：
+
+   ```powershell
+   Get-FileHash .\tongtu-X.Y.Z-windows-x64.exe -Algorithm SHA256
+   ```
+
+3. 退出通途（托盘右键「退出」或 `tongtu stop`），用新 exe 覆盖旧的，再启动。
+   `%APPDATA%\tongtu` 里的配置、证书与日志都会保留；配置版本升级时会先备份、再保留你的设置升级。
+
+> 不做「自动下载替换」：在 Windows 上替换正在运行的 exe 不可靠，静默失败比不升级更糟。
 
 ## 快速开始
 
@@ -450,7 +475,7 @@ tongtu autostart status
 
 ## 配置说明
 
-`%APPDATA%\tongtu\config.yaml`（带版本号，升级时自动备份为 `config.yaml.vN.bak` 并重建）：
+`%APPDATA%\tongtu\config.yaml`（带版本号，升级时先备份为 `config.yaml.vN.bak`，再保留用户设置升级）：
 
 ```yaml
 version: 4

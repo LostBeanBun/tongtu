@@ -1,0 +1,111 @@
+name: Release
+
+# 推送形如 v0.5.0 的 tag 时：跑质量门 → 构建 Windows x64 单文件 → 生成校验和与说明 → 发布 Release。
+#
+# 为什么由 CI 发布而不是手工上传：
+#   1. 构建环境固定，谁打 tag 都得到同一个结果；
+#   2. 发布前一定跑过测试，避免「本地能跑、发出去坏了」；
+#   3. Release 说明直接取自 CHANGELOG，版本记录不会出现两套说法。
+#
+# 需要的权限只有 contents: write（用仓库自带的 GITHUB_TOKEN 即可，不用另配 token）。
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 构建并发布
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 校验 tag 与 VERSION 一致
+        shell: pwsh
+        run: |
+          $ver = (Get-Content VERSION -Raw).Trim()
+          if ($env:GITHUB_REF_NAME -ne "v$ver") {
+            throw "tag 是 $env:GITHUB_REF_NAME，但 VERSION 是 $ver；先 bump 版本再打 tag"
+          }
+          Write-Host "发布版本：$ver" -ForegroundColor Cyan
+
+      - name: 质量门
+        shell: pwsh
+        run: |
+          $unformatted = gofmt -l .
+          if ($LASTEXITCODE -ne 0) { throw "gofmt 运行失败" }
+          if ($unformatted) {
+            $unformatted | ForEach-Object { Write-Host "未格式化: $_" }
+            throw "有文件没有按 gofmt 格式化"
+          }
+          go vet ./...
+          if ($LASTEXITCODE -ne 0) { throw "go vet 失败" }
+          $env:PATH = "$(go env GOPATH)\bin;$env:PATH"
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+          if ($LASTEXITCODE -ne 0) { throw "安装 staticcheck 失败" }
+          staticcheck ./...
+          if ($LASTEXITCODE -ne 0) { throw "staticcheck 失败" }
+          go test ./... -count=1 -timeout 20m
+          if ($LASTEXITCODE -ne 0) { throw "测试失败" }
+
+      - name: 构建
+        shell: pwsh
+        run: .\build.ps1
+
+      - name: 打包、校验和与发布说明
+        shell: pwsh
+        run: |
+          $ver = (Get-Content VERSION -Raw).Trim()
+          $asset = "tongtu-$ver-windows-x64.exe"
+          Copy-Item -Path "dist\tongtu.exe" -Destination "dist\$asset" -Force
+
+          # 构建产物先自报一次版本：防止「tag 对了、exe 里的版本号没进去」这种发布事故。
+          # 注意 stdout / stderr 必须是两个文件：Start-Process 不接受同一个路径。
+          $out = Join-Path $env:TEMP "tongtu-version-out.txt"
+          $err = Join-Path $env:TEMP "tongtu-version-err.txt"
+          $p = Start-Process -FilePath "dist\tongtu.exe" -ArgumentList "version" -Wait -PassThru `
+            -RedirectStandardOutput $out -RedirectStandardError $err
+          $printed = ((Get-Content $out -Raw) + (Get-Content $err -Raw)).Trim()
+          Write-Host $printed
+          if ($p.ExitCode -ne 0) { throw "构建出的 exe 运行失败（退出码 $($p.ExitCode)）" }
+          if ($printed -notmatch [regex]::Escape($ver)) { throw "exe 里的版本号与 $ver 不一致" }
+
+          $hash = (Get-FileHash -Path "dist\$asset" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $asset" | Set-Content -Path "dist\SHA256SUMS.txt" -Encoding ascii
+          Write-Host "SHA256: $hash" -ForegroundColor Gray
+
+          .\tools\release-notes.ps1 -Version $ver -OutFile "dist\release-notes.md"
+
+      - name: 发布到 GitHub Releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ver = (Get-Content VERSION -Raw).Trim()
+          $asset = "dist\tongtu-$ver-windows-x64.exe"
+
+          # 可重复执行：同名 Release 已存在时改为覆盖附件与说明，而不是整个 workflow 红掉。
+          gh release view $env:GITHUB_REF_NAME --json tagName 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release 已存在，覆盖附件与说明" -ForegroundColor Yellow
+            gh release upload $env:GITHUB_REF_NAME $asset "dist\SHA256SUMS.txt" --clobber
+            if ($LASTEXITCODE -ne 0) { throw "上传附件失败" }
+            gh release edit $env:GITHUB_REF_NAME --notes-file "dist\release-notes.md"
+            if ($LASTEXITCODE -ne 0) { throw "更新发布说明失败" }
+          } else {
+            gh release create $env:GITHUB_REF_NAME --verify-tag `
+              --title "通途 $env:GITHUB_REF_NAME" `
+              --notes-file "dist\release-notes.md" `
+              --latest `
+              $asset "dist\SHA256SUMS.txt"
+            if ($LASTEXITCODE -ne 0) { throw "创建 Release 失败" }
+          }
+          Write-Host "已发布：$env:GITHUB_REF_NAME" -ForegroundColor Green
