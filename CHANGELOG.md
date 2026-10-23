@@ -69,6 +69,10 @@
   确认用户端口 / 服务组 / 自定义站点 / 日志级别保留，错误端点被定点修正，缺失字段取新默认值。
 - `gofmt` / `go vet` / `staticcheck` / `go test ./...` / `GOOS=linux go build ./...` 全绿。
 - 两个 workflow 用 YAML 解析器校验通过；`release-notes.ps1 -Version 0.4.0` 本地预览正常。
+- CI 实跑全绿（run `39882488577`）：格式与静态检查、Windows 完整测试、Linux `go test -race` 均通过。
+  过程中修掉两处只在 CI 暴露的问题：staticcheck 在 Linux 下把 Windows 专用符号误报为 U1000
+  （改为按 Windows 目标平台检查）；非 Windows 的 `processAlive` 恒为 false，导致监护令牌
+  回收测试误判（改为按 Unix 的 signal 0 语义判断进程存活）。
 
 ## [0.4.0] - 2026-10-22
 
