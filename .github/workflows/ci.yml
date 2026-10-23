@@ -73,18 +73,21 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          set -o pipefail
-          go test -race ./... -count=1 -timeout 20m 2>&1 | tee /tmp/go-test.log
-          status=${PIPESTATUS[0]}
+          # GitHub 默认给 bash 加了 -e：go test 失败会直接退出脚本，
+          # 后面的失败摘要就永远执行不到。用 `|| status=$?` 接住退出码。
+          status=0
+          go test -race ./... -count=1 -timeout 20m 2>&1 | tee /tmp/go-test.log || status=$?
           if [ "$status" -ne 0 ]; then
             echo "===== 失败摘要 ====="
-            summary=$(grep -E '^(--- FAIL|FAIL|panic:)|WARNING: DATA RACE|Found [0-9]+ data race|^[[:space:]]+tongtu/' /tmp/go-test.log | head -n 10)
+            summary=$(grep -E '^(--- FAIL|FAIL|panic:)|WARNING: DATA RACE|Found [0-9]+ data race|^[[:space:]]+tongtu/' /tmp/go-test.log | head -n 10 || true)
             if [ -z "$summary" ]; then
-              summary=$(tail -n 10 /tmp/go-test.log)
+              summary=$(tail -n 10 /tmp/go-test.log || true)
             fi
-            echo "$summary"
+            printf '%s\n' "$summary"
             while IFS= read -r line; do
-              [ -n "$line" ] && echo "::error title=Linux 测试失败::$line"
+              if [ -n "$line" ]; then
+                echo "::error title=Linux 测试失败::$line"
+              fi
             done <<< "$summary"
             exit "$status"
           fi
