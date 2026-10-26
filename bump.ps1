@@ -43,7 +43,9 @@ switch ($Target.ToLower()) {
 }
 if ($new -eq $current) { throw "版本号没有变化: $current" }
 
-Set-Content -Path $versionFile -Value $new -Encoding ASCII
+# VERSION 是单行纯文本、不带行尾（与仓库里的既有格式一致）：
+# Set-Content 会补 CRLF，既产生无意义的 diff，也会被 git diff --check 判成行尾空白。
+[System.IO.File]::WriteAllText($versionFile, $new, [System.Text.Encoding]::ASCII)
 
 # 同步 version.go 里的默认值（保留其余内容与缩进）
 $go = Get-Content $versionGo -Raw
