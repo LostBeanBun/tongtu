@@ -77,6 +77,11 @@
   Linux `go test -race` 均通过。过程中修掉一个只在 Windows CI 暴露的测试竞态：
   `healthLoop` 的首次健康检查可能先于用例断言完成自愈，前置条件改为接受
   「端口已释放」或「后台已完成自愈」两种路径。
+- Release 实跑成功（run `40258184336`，tag `v0.6.0` → `4275ab4`）：质量门、构建、exe 版本自检、
+  打包与发布全部通过。`releases/latest` 已指向 v0.6.0；`tongtu-0.6.0-windows-x64.exe`
+  （10,026,496 字节）SHA-256 为
+  `c8b9172af52d92cc032d0b80559d8da5891636c73a4ee98762780139b1dae4a2`，
+  与 Release 附件 `SHA256SUMS.txt` 一致（通过 GitHub 资产 digest 交叉核对）。
 
 ## [0.5.0] - 2026-10-23
 
