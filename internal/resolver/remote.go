@@ -29,6 +29,8 @@ type remoteHosts struct {
 	entries  map[string][]net.IP
 	fetched  time.Time
 	fetching bool
+	// gen 在每次 invalidate 时递增：用于丢弃「换网前发出、换网后才回来」的旧抓取结果。
+	gen uint64
 }
 
 func newRemoteHosts(urls []string, ttl time.Duration, client *http.Client, log *slog.Logger) *remoteHosts {
@@ -44,7 +46,8 @@ func (rh *remoteHosts) ips(host string) []net.IP {
 	defer rh.mu.Unlock()
 	if len(rh.urls) > 0 && !rh.fetching && (rh.fetched.IsZero() || time.Since(rh.fetched) > rh.ttl) {
 		rh.fetching = true
-		go rh.refresh()
+		gen := rh.gen
+		go rh.refresh(gen)
 	}
 	out := rh.entries[host]
 	if len(out) == 0 {
@@ -55,7 +58,21 @@ func (rh *remoteHosts) ips(host string) []net.IP {
 	return cp
 }
 
-func (rh *remoteHosts) refresh() {
+// invalidate 丢弃当前远程 hosts 数据，并让下一次 ips 重新抓取。
+//
+// 换网后旧列表里的 IP 可能已经不可达；同时递增 gen，使仍在途的旧抓取结果被丢弃，
+// 不会在换网之后又把旧数据写回来。
+func (rh *remoteHosts) invalidate() {
+	rh.mu.Lock()
+	rh.gen++
+	rh.entries = map[string][]net.IP{}
+	rh.fetched = time.Time{}
+	rh.fetching = false
+	rh.mu.Unlock()
+	rh.client.CloseIdleConnections()
+}
+
+func (rh *remoteHosts) refresh(gen uint64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -74,6 +91,10 @@ func (rh *remoteHosts) refresh() {
 
 	rh.mu.Lock()
 	defer rh.mu.Unlock()
+	if gen != rh.gen {
+		// 本轮抓取已被 Reset 作废：丢弃结果；fetching 归新一轮抓取所有。
+		return
+	}
 	rh.fetching = false
 	if got == 0 {
 		// 全部失败：延长下次重试间隔，避免频繁请求

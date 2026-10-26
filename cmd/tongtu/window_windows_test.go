@@ -1047,6 +1047,69 @@ func TestWindowProcHandlesSessionEnd(t *testing.T) {
 	}
 }
 
+// TestWindowProcHandlesPowerResume 睡眠/休眠恢复消息：三种恢复事件都要触发回调，
+// 非恢复事件不触发；同一轮恢复的多个事件只跑一遍。
+func TestWindowProcHandlesPowerResume(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	hwnd := lw.handle()
+	defer func() {
+		setPowerResumeHandler(nil)
+		powerResumeMu.Lock()
+		powerResumeLast = time.Time{}
+		powerResumeMu.Unlock()
+	}()
+
+	hits := make(chan string, 8)
+	setPowerResumeHandler(func(reason string) { hits <- reason })
+
+	for _, tc := range []struct {
+		name string
+		ev   uintptr
+	}{
+		{"自动恢复", pbtAPMResumeAutomatic},
+		{"用户恢复", pbtAPMResumeSuspend},
+		{"严重休眠恢复", pbtAPMResumeCritical},
+	} {
+		powerResumeMu.Lock()
+		powerResumeLast = time.Time{}
+		powerResumeMu.Unlock()
+		if r := wndProc(hwnd, wmPowerBroadcast, tc.ev, nil); r != 1 {
+			t.Errorf("%s: WM_POWERBROADCAST 应返回 1，实际 %d", tc.name, r)
+		}
+		select {
+		case reason := <-hits:
+			if reason == "" {
+				t.Errorf("%s: 回调没有说明原因", tc.name)
+			}
+		default:
+			t.Errorf("%s: 应触发恢复回调", tc.name)
+		}
+	}
+
+	// 睡眠事件（0x0004）不是恢复：不应触发
+	powerResumeMu.Lock()
+	powerResumeLast = time.Time{}
+	powerResumeMu.Unlock()
+	if r := wndProc(hwnd, wmPowerBroadcast, 0x0004, nil); r != 1 {
+		t.Errorf("WM_POWERBROADCAST 应返回 1，实际 %d", r)
+	}
+	if len(hits) != 0 {
+		t.Error("睡眠事件不应触发恢复回调")
+	}
+
+	// 同一轮恢复的多个事件只跑一遍
+	powerResumeMu.Lock()
+	powerResumeLast = time.Time{}
+	powerResumeMu.Unlock()
+	wndProc(hwnd, wmPowerBroadcast, pbtAPMResumeAutomatic, nil)
+	wndProc(hwnd, wmPowerBroadcast, pbtAPMResumeSuspend, nil)
+	if len(hits) != 1 {
+		t.Errorf("同一轮恢复只应触发一次，实际 %d 次", len(hits))
+	}
+}
+
 func drain(ch chan struct{}) {
 	for {
 		select {

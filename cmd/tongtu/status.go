@@ -47,6 +47,14 @@ var statusCmd = &cobra.Command{
 func printStatus(st *app.Status) {
 	fmt.Printf("状态:     %s\n", statusWord(st))
 	fmt.Printf("代理监听: %s\n", st.Listen)
+	fmt.Printf("健康度:   %s", healthWord(st.Health))
+	if st.Health.Reason != "" {
+		fmt.Printf("（%s）", st.Health.Reason)
+	}
+	if st.Health.HealCount > 0 || st.Health.RecoverCount > 0 {
+		fmt.Printf(" · 自愈 %d 次 · 网络恢复 %d 次", st.Health.HealCount, st.Health.RecoverCount)
+	}
+	fmt.Println()
 	sysTag := onOff(st.SystemProxy)
 	if st.ProxyNote != "" {
 		sysTag += "（" + st.ProxyNote + "）"
@@ -97,6 +105,24 @@ func statusWord(st *app.Status) string {
 		return "运行中 (" + formatUptime(st.UptimeSec) + ")"
 	}
 	return "已停止"
+}
+
+// healthWord 把健康度状态词翻译成用户能看懂的中文。
+func healthWord(h app.Health) string {
+	switch h.State {
+	case app.HealthOK:
+		return "正常"
+	case app.HealthDegraded:
+		return "降级"
+	case app.HealthHealing:
+		return "恢复中"
+	case app.HealthPaused:
+		return "已暂停"
+	case app.HealthStopped:
+		return "已停止"
+	default:
+		return "未知"
+	}
 }
 
 func formatUptime(sec int64) string {

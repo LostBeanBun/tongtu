@@ -359,6 +359,26 @@ func (p *Proxy) forgetGood(host string) {
 	delete(p.good, host)
 }
 
+// ResetNetwork 丢弃与旧网络绑定的状态：优选 IP 缓存与空闲连接。
+//
+// 触发时机是睡眠恢复、换 Wi-Fi / 插网线、VPN 开关等——旧网络选出的边缘 IP 与新网络
+// 往往不再可达，继续走「优选」反而比重新解析更慢。正在传输的连接不受影响；
+// 下一次请求会重新做 DoH 解析与候选竞速。并发安全、幂等。
+func (p *Proxy) ResetNetwork() {
+	p.goodMu.Lock()
+	p.good = make(map[string]goodEntry)
+	p.goodMu.Unlock()
+
+	p.tr.CloseIdleConnections()
+
+	p.mitmMu.RLock()
+	mtr := p.mtr
+	p.mitmMu.RUnlock()
+	if mtr != nil {
+		mtr.CloseIdleConnections()
+	}
+}
+
 // ListenLocal443 绑定 127.0.0.1:443：hosts 模式下让不走系统代理的程序
 // （如 Steam 客户端）直连本地完成 MITM。绑定失败返回错误（调用方降级为真实 IP）。
 //
@@ -420,6 +440,13 @@ func (p *Proxy) LocalIPv6Up() bool {
 	p.localMu.Lock()
 	defer p.localMu.Unlock()
 	return p.ln443v6 != nil
+}
+
+// Local443Up 报告 127.0.0.1:443 的本地监听是否仍在（健康检查据此发现监听丢失）。
+func (p *Proxy) Local443Up() bool {
+	p.localMu.Lock()
+	defer p.localMu.Unlock()
+	return p.ln443 != nil
 }
 
 // CloseLocal 关闭本地直连监听。

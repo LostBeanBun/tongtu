@@ -366,6 +366,24 @@ func (r *Resolver) Health() []Health {
 	return out
 }
 
+// Reset 丢弃与旧网络绑定的解析状态：DNS 缓存、端点故障顺序与故障标记、远程 hosts 缓存。
+//
+// 睡眠恢复 / 换网之后，旧缓存里的 IP 很可能已经不可达，端点故障也可能只是「当时没网」，
+// 不该继续把它们排在队尾。调用后下一次查询会按配置顺序重新探测所有端点。
+// 并发安全、幂等；不修改配置本身。
+func (r *Resolver) Reset() {
+	r.mu.Lock()
+	r.cache = make(map[string]cacheEntry)
+	r.order = append([]string(nil), r.cfg.Endpoints...)
+	r.state = make(map[string]endpointState)
+	r.mu.Unlock()
+
+	if r.remote != nil {
+		r.remote.invalidate()
+	}
+	r.client.CloseIdleConnections()
+}
+
 // query 执行一次 DoH 查询，返回 IPv4 地址与建议缓存时长。
 func (r *Resolver) query(ctx context.Context, endpoint, host string) ([]net.IP, time.Duration, error) {
 	u := endpoint + "?name=" + url.QueryEscape(host) + "&type=A"

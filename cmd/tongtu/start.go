@@ -155,6 +155,16 @@ var startCmd = &cobra.Command{
 			}
 		})
 
+		// 睡眠/休眠恢复：窗口消息只负责投递，真正的清缓存 / 重写 hosts / 预热
+		// 在后台做（RecoverNetwork 自带串行化与防抖）。换网由 app 里的网络指纹轮询兜底。
+		setPowerResumeHandler(func(reason string) {
+			go func() {
+				if err := a.RecoverNetwork(reason); err != nil {
+					log.Warn("睡眠恢复未完全成功", "err", err)
+				}
+			}()
+		})
+
 		cs := control.New(cfg.Control, a, log)
 		cs.OnShutdown = signalQuit
 		// 自绘界面没有控件树：把几何快照挂到 /ui/layout 上，真机脚本按 ID 点按钮。
@@ -473,6 +483,12 @@ func windowStatusOf(a *app.App, cfg *config.Config) windowStatus {
 	case level == stateOff:
 		state = "已停止"
 	}
+	// 健康检查发现的降级（例如所有 DoH 端点失败）不一定体现在三个开关上，
+	// 状态词也要跟着变，不能继续显示「运行中」把问题藏起来。
+	if level == stateOK && st.Health.State == app.HealthDegraded {
+		level = stateDegraded
+		state = "部分生效"
+	}
 	detail := []string{
 		"服务组 " + strings.Join(st.Services, "、"),
 		fmt.Sprintf("活跃隧道 %d", st.Proxy.Active),
@@ -485,6 +501,12 @@ func windowStatusOf(a *app.App, cfg *config.Config) windowStatus {
 	if st.ProxyNote != "" {
 		// 运行期被别的程序顶掉了系统代理：明说出来，别让人以为还好好的
 		detail = append(detail, "系统代理"+st.ProxyNote)
+	}
+	if st.Health.HealCount > 0 {
+		detail = append(detail, fmt.Sprintf("自愈 %d 次", st.Health.HealCount))
+	}
+	if st.Health.State == app.HealthDegraded && st.Health.Reason != "" {
+		detail = append(detail, st.Health.Reason)
 	}
 	return windowStatus{
 		Title:  "通途 Tongtu " + Version,

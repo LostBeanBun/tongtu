@@ -38,6 +38,8 @@ func buildDiagnostics(a *app.App, cfg *config.Config) string {
 	}
 	fmt.Fprintf(&b, "监听: %s（系统代理=%v · hosts=%v · 反代=%v）\n",
 		st.Listen, st.SystemProxy, st.Hosts, st.MITM)
+	fmt.Fprintf(&b, "健康度: %s%s · 自愈 %d 次 · 网络恢复 %d 次\n",
+		healthWord(st.Health), healthReasonWord(st.Health), st.Health.HealCount, st.Health.RecoverCount)
 	if st.Running {
 		fmt.Fprintf(&b, "运行时长: %s%s\n", humanUptime(st.UptimeSec), pauseWord(st.Paused))
 	}
@@ -85,6 +87,14 @@ func pauseWord(paused bool) string {
 		return ""
 	}
 	return "（当前已暂停：对外影响已撤回）"
+}
+
+// healthReasonWord 在诊断信息里给健康度补上原因（正常时为空）。
+func healthReasonWord(h app.Health) string {
+	if h.Reason == "" {
+		return ""
+	}
+	return "（" + h.Reason + "）"
 }
 
 // runOnceWord 描述「断电自愈项」的现状：排查「掉电重启后网络没自动恢复」时先看这一行。

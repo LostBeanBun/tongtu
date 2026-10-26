@@ -36,6 +36,7 @@ type Status struct {
 	Services    []string          `json:"services"`
 	Proxy       proxy.Snapshot    `json:"proxy"`
 	DNS         []resolver.Health `json:"dns"`
+	Health      Health            `json:"health"`
 }
 
 // Options 由调用方注入 App 所需依赖。
@@ -86,6 +87,17 @@ type App struct {
 	stopped      bool
 	cancel       context.CancelFunc
 	loopCtx      context.Context
+
+	// 健康自愈与网络恢复（见 health.go）。health 受 mu 保护；
+	// recoverMu 串行化恢复动作，netFingerprint 受 netMu 保护。
+	health          Health
+	recoverMu       sync.Mutex
+	lastRecover     time.Time
+	lastDNSReset    time.Time
+	lastHostsHeal   time.Time
+	lastLocalRebind time.Time
+	netMu           sync.Mutex
+	netFingerprint  string
 }
 
 // New 创建 App（不开始监听）。
@@ -125,6 +137,7 @@ func New(opts Options) *App {
 		wantHosts:    opts.HostsMode,
 		mitmNote:     opts.MITMNote,
 		warm:         opts.Warmup,
+		health:       Health{State: HealthStopped},
 	}
 	// 无 SNI 反代：SNI 封锁域名本地解密、出站剥离 SNI（候选 IP 来自干净 DoH）
 	if opts.MITMCA != nil {
@@ -249,6 +262,10 @@ func (a *App) Start() error {
 	if a.warm {
 		go a.px.Warm(ctx, a.warmHosts(), 4)
 	}
+
+	// 健康检查与网络指纹轮询：假活自愈、睡眠/换网恢复都从这里开始。
+	a.health = Health{State: HealthOK, CheckedAt: time.Now()}
+	go a.healthLoop(ctx)
 	return nil
 }
 
@@ -300,6 +317,9 @@ func (a *App) Shutdown(ctx context.Context) error {
 	sysOn, saved, hostsOn := a.sysOn, a.sysSaved, a.hostsOn
 	a.sysOn, a.hostsOn, a.sysSaved = false, false, nil
 	a.mitmLocal443, a.mitmLocal80 = false, false
+	a.health.State = HealthStopped
+	a.health.Reason = ""
+	a.health.CheckedAt = time.Now()
 	a.mu.Unlock()
 
 	if cancel != nil {
@@ -692,7 +712,12 @@ func (a *App) DataDir() string { return config.Dir() }
 // 调用方在「关闭某个本地监听」之前必须先确认这一步成功：hosts 里还指着 127.0.0.1
 // 而监听已经关掉，那些域名就会一直连接失败（见 SetMITM 的停用路径）。
 func (a *App) applyHostsLocked(why string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	return a.applyHostsLockedTimeout(why, 2*time.Minute)
+}
+
+// applyHostsLockedTimeout 是 applyHostsLocked 的可控超时版本（健康自愈用更短的上限）。
+func (a *App) applyHostsLockedTimeout(why string, timeout time.Duration) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if _, err := a.hm.Apply(ctx); err != nil {
 		a.log.Warn("hosts 更新失败", "why", why, "err", err)
@@ -757,10 +782,19 @@ func (a *App) Status() Status {
 		Services:    append([]string(nil), a.svcIDs...),
 		Paused:      a.paused.active(),
 		DNS:         a.res.Health(),
+		Health:      a.health,
 	}
 	if a.sysOn && !st.SystemProxy {
 		// 我们确实接管过，但注册表里已经不是我们了（Clash 之类顶掉了，或用户手动关掉）
 		st.ProxyNote = "已被其他程序接管"
+	}
+	if st.Paused {
+		st.Health.State = HealthPaused
+		st.Health.Reason = ""
+	}
+	if !st.Running {
+		st.Health.State = HealthStopped
+		st.Health.Reason = ""
 	}
 	if a.ln != nil {
 		st.Listen = a.ln.Addr().String()

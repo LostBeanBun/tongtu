@@ -35,6 +35,9 @@ const (
 // Disable 在非 Windows 平台返回 ErrUnsupported。
 func Disable(saved *Values) (Outcome, error) { return NotHeld, ErrUnsupported }
 
+// Retarget 在非 Windows 平台返回 ErrUnsupported（没有系统代理可换口）。
+func Retarget(addr string) (bool, error) { return false, ErrUnsupported }
+
 // Active 始终返回 false。
 func Active() bool { return false }
 

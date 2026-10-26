@@ -173,3 +173,66 @@ func TestHealthReporting(t *testing.T) {
 		t.Error("好端点应标记为健康")
 	}
 }
+
+// TestResetClearsCacheAndRestoresOrder 换网后要丢掉旧缓存与旧故障顺序，
+// 让端点按配置顺序重新探测。
+func TestResetClearsCacheAndRestoresOrder(t *testing.T) {
+	var badHits, goodHits atomic.Int64
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		badHits.Add(1)
+		http.Error(w, "boom", http.StatusBadGateway)
+	}))
+	t.Cleanup(bad.Close)
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		goodHits.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Status": 0,
+			"Answer": []map[string]any{{
+				"name": r.URL.Query().Get("name"), "type": 1, "TTL": 120, "data": "5.6.7.8",
+			}},
+		})
+	}))
+	t.Cleanup(good.Close)
+
+	r := newTestResolver(bad.URL, good.URL)
+	ctx := context.Background()
+	if _, err := r.Lookup(ctx, "github.com"); err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if got := badHits.Load(); got != 1 {
+		t.Fatalf("首次查询应访问坏端点 1 次，实际 %d", got)
+	}
+	if order := r.snapshotOrder(); order[0] != good.URL {
+		t.Fatalf("失败端点应被降权到队尾: %v", order)
+	}
+	if _, err := r.Lookup(ctx, "github.com"); err != nil {
+		t.Fatalf("二次 Lookup: %v", err)
+	}
+	if got := goodHits.Load(); got != 1 {
+		t.Fatalf("缓存命中时不应再次请求，实际 %d 次", got)
+	}
+
+	r.Reset()
+
+	if order := r.snapshotOrder(); order[0] != bad.URL || order[1] != good.URL {
+		t.Fatalf("Reset 后端点顺序应恢复为配置顺序: %v", order)
+	}
+	for _, h := range r.Health() {
+		if h.LastError != "" {
+			t.Fatalf("Reset 后不应保留端点故障标记: %+v", h)
+		}
+	}
+	if _, ok := r.fromCache("github.com"); ok {
+		t.Fatal("Reset 后 DNS 缓存应为空")
+	}
+
+	if _, err := r.Lookup(ctx, "github.com"); err != nil {
+		t.Fatalf("Reset 后 Lookup: %v", err)
+	}
+	if got := badHits.Load(); got != 2 {
+		t.Fatalf("Reset 后应重新探测坏端点（实际 %d 次）", got)
+	}
+	if got := goodHits.Load(); got != 2 {
+		t.Fatalf("Reset 后应重新请求好端点（实际 %d 次）", got)
+	}
+}

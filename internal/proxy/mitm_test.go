@@ -483,6 +483,25 @@ func TestEnableMITMClearsGoodCache(t *testing.T) {
 	}
 }
 
+// TestResetNetworkClearsGoodCache 换网/睡眠恢复后旧优选 IP 不再可信，必须整体作废。
+func TestResetNetworkClearsGoodCache(t *testing.T) {
+	p, _ := newMITMTestProxy(t, "steamcommunity.com")
+	p.rememberGood("steamcommunity.com", net.IPv4(203, 0, 113, 9))
+	p.rememberGood("raw.githubusercontent.com", net.IPv4(203, 0, 113, 10))
+
+	p.ResetNetwork()
+
+	for _, host := range []string{"steamcommunity.com", "raw.githubusercontent.com"} {
+		if _, ok := p.goodIP(host); ok {
+			t.Fatalf("ResetNetwork 后 %s 不应再命中优选缓存", host)
+		}
+	}
+	p.ResetNetwork() // 幂等
+	if p.Local443Up() {
+		t.Fatal("测试没有启动本地 :443，不应报告监听就绪")
+	}
+}
+
 // TestMITMDisablesHTTP2 客户端与上游都不得协商 HTTP/2：反代按 HTTP/1.1 逐请求转发。
 func TestMITMDisablesHTTP2(t *testing.T) {
 	var upstreamProto atomic.Value

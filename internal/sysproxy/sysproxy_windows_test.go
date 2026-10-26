@@ -159,6 +159,58 @@ func liveLoopbackAddr(t *testing.T) string {
 	return ln.Addr().String()
 }
 
+// TestRetargetPlan 代理换口时只改「仍由我们持有」的注册表值，
+// 并保留 ProxyEnable / ProxyOverride 与接管前原值。
+func TestRetargetPlan(t *testing.T) {
+	on := uint(1)
+	savedServer := "127.0.0.1:1080"
+	st := &stateFile{
+		Saved: Values{ProxyEnable: &on, ProxyServer: &savedServer},
+		Addr:  "127.0.0.1:19180",
+	}
+	live := &Values{
+		ProxyEnable:   &on,
+		ProxyServer:   ptr("127.0.0.1:19180"),
+		ProxyOverride: ptr("localhost;<local>"),
+	}
+
+	next, changed := retargetPlan(st, live, "127.0.0.1:19181")
+	if !changed || next == nil {
+		t.Fatal("仍由我们持有时应生成换口计划")
+	}
+	if next.ProxyServer == nil || *next.ProxyServer != "127.0.0.1:19181" {
+		t.Fatalf("ProxyServer 未更新: %+v", next.ProxyServer)
+	}
+	if next.ProxyEnable == nil || *next.ProxyEnable != 1 {
+		t.Fatal("ProxyEnable 不应被改掉")
+	}
+	if next.ProxyOverride == nil || *next.ProxyOverride != "localhost;<local>" {
+		t.Fatal("ProxyOverride 不应被改掉")
+	}
+	if *st.Saved.ProxyServer != savedServer {
+		t.Fatal("接管前原值不应被换口改写")
+	}
+
+	if _, changed := retargetPlan(st, live, "127.0.0.1:19180"); changed {
+		t.Error("地址没变时不应生成换口计划")
+	}
+
+	theirs := &Values{ProxyEnable: &on, ProxyServer: ptr("127.0.0.1:7890")}
+	if _, changed := retargetPlan(st, theirs, "127.0.0.1:19181"); changed {
+		t.Error("系统代理已被其他程序接管时不应改注册表")
+	}
+
+	if _, changed := retargetPlan(nil, live, "127.0.0.1:19181"); changed {
+		t.Error("没有状态文件时不应改注册表")
+	}
+	if _, changed := retargetPlan(st, nil, "127.0.0.1:19181"); changed {
+		t.Error("读不到当前注册表值时不应改注册表")
+	}
+	if _, changed := retargetPlan(st, live, ""); changed {
+		t.Error("空地址不应生成换口计划")
+	}
+}
+
 // TestHeldIn 只有「代理开着且地址就是接管地址」才算仍由通途持有。
 func TestHeldIn(t *testing.T) {
 	on, off := uint(1), uint(0)

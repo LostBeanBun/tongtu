@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -37,6 +38,10 @@ type stateFile struct {
 }
 
 var wininet = windows.NewLazySystemDLL("wininet.dll")
+
+// opMu 串行化 Enable / Disable / Retarget / Held：健康自愈可能在退出流程读取或改写
+// 同一份注册表与状态文件，交错执行会留下「注册表指向新端口、状态文件还是旧端口」的半成品。
+var opMu sync.Mutex
 
 func broadcast() {
 	// INTERNET_OPTION_SETTINGS_CHANGED / INTERNET_OPTION_REFRESH
@@ -145,6 +150,8 @@ func writeState(path string, sf stateFile) error {
 
 // Enable 将系统代理指向 addr，保存原值（同时落盘以便崩溃后恢复）。
 func Enable(addr string) (*Values, error) {
+	opMu.Lock()
+	defer opMu.Unlock()
 	prev, err := readValues()
 	if err != nil {
 		return nil, err
@@ -198,6 +205,8 @@ var ErrStateCorrupt = errors.New("系统代理状态文件已损坏")
 // 若中途有别的程序接管了系统代理（Clash / v2rayN 之类），或用户手动关掉了它，这里就**不还原**，
 // 否则会把对方的设置覆盖回我们接管前的旧值。返回 NotHeld 报告这种情况，调用方据此提示用户。
 func Disable(saved *Values) (Outcome, error) {
+	opMu.Lock()
+	defer opMu.Unlock()
 	st, serr := readState(StatePath())
 	if saved == nil {
 		switch {
@@ -298,9 +307,64 @@ func readState(path string) (*stateFile, error) {
 	return &st, nil
 }
 
+// Retarget 在代理监听地址变化时，把系统代理从旧地址改到 addr。
+//
+// 只在「系统代理仍由本实例持有」时动手：被别的程序接管后这里什么都不做（返回 false），
+// 继续遵守「不抢也不覆盖」的承诺。状态文件里的 Addr 同步更新，接管前的原值保持不变。
+func Retarget(addr string) (bool, error) {
+	opMu.Lock()
+	defer opMu.Unlock()
+	if addr == "" {
+		return false, nil
+	}
+	st, err := readState(StatePath())
+	if err != nil {
+		// 没有状态文件 = 这轮接管不是我们建立的，不改注册表。
+		return false, nil
+	}
+	live, err := readValues()
+	if err != nil {
+		return false, err
+	}
+	next, changed := retargetPlan(st, live, addr)
+	if !changed {
+		return false, nil
+	}
+
+	oldAddr := st.Addr
+	st.Addr = addr
+	if err := writeState(StatePath(), *st); err != nil {
+		return false, fmt.Errorf("更新代理状态文件失败: %w", err)
+	}
+	if err := apply(next); err != nil {
+		// 回滚状态文件与注册表，别留下「状态文件指向新端口、注册表还是旧端口」的半成品。
+		st.Addr = oldAddr
+		_ = writeState(StatePath(), *st)
+		_ = apply(live)
+		return false, fmt.Errorf("更新系统代理地址失败: %w", err)
+	}
+	return true, nil
+}
+
+// retargetPlan 计算换口后要写入的注册表值（纯函数，便于单测）。
+// 返回 nil, false 表示「不该动」：没有状态、已不归我们持有，或地址本来就没变。
+func retargetPlan(st *stateFile, live *Values, addr string) (*Values, bool) {
+	if st == nil || live == nil || addr == "" || st.Addr == addr {
+		return nil, false
+	}
+	if !heldIn(live, st.Addr) {
+		return nil, false
+	}
+	next := *live
+	next.ProxyServer = ptr(addr)
+	return &next, true
+}
+
 // Held 报告系统代理是否仍由 addr 持有：注册表里代理是开着的，且地址就是 addr。
 // 读注册表失败时返回错误（调用方应把它当作「无法判断」，而不是「已被接管」）。
 func Held(addr string) (bool, error) {
+	opMu.Lock()
+	defer opMu.Unlock()
 	v, err := readValues()
 	if err != nil {
 		return false, err

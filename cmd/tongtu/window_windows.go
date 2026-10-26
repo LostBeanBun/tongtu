@@ -48,6 +48,7 @@ const (
 	wmQueryEndSession = 0x0011
 	wmEraseBkgnd      = 0x0014
 	wmEndSession      = 0x0016
+	wmPowerBroadcast  = 0x0218
 	wmSize            = 0x0005
 	wmGetMinMaxInfo   = 0x0024
 	wmSetFont         = 0x0030
@@ -123,6 +124,13 @@ const (
 	// 标题栏明暗（DWMWA_USE_IMMERSIVE_DARK_MODE，新属性号与旧属性号都试一遍）
 	dwmwaUseImmersiveDarkMode    = 20
 	dwmwaUseImmersiveDarkModeOld = 19
+)
+
+// WM_POWERBROADCAST 的电源事件（wParam）。
+const (
+	pbtAPMResumeCritical  = 0x0006 // 从严重休眠恢复
+	pbtAPMResumeSuspend   = 0x0007 // 用户触发从睡眠恢复
+	pbtAPMResumeAutomatic = 0x0012 // 自动从睡眠恢复
 )
 
 // windowMaxBytes 限制日志文本长度：超出后只保留尾部，避免长期运行无限增长。
@@ -1711,6 +1719,16 @@ func wndProc(hwnd windows.Handle, msg uint32, wparam uintptr, lparam unsafe.Poin
 		}
 		return 0
 
+	case wmPowerBroadcast:
+		// 睡眠/休眠恢复：网络接口往往还没完全就绪，交给 app 做防抖恢复
+		// （清 DNS/优选缓存、重写 hosts、重新预热）。消息处理必须尽快返回，
+		// 因此回调里只投递事件，不在这里做网络操作。
+		switch wparam {
+		case pbtAPMResumeAutomatic, pbtAPMResumeSuspend, pbtAPMResumeCritical:
+			runPowerResume()
+		}
+		return 1
+
 	case wmGetMinMaxInfo:
 		if lparam != nil {
 			mmi := (*minMaxInfoT)(lparam)
@@ -2145,4 +2163,35 @@ func runSessionEnd() {
 	sessionEndLast = time.Now()
 	sessionEndMu.Unlock()
 	fn()
+}
+
+// —— 睡眠 / 休眠恢复 ——
+
+var (
+	powerResumeMu   sync.Mutex
+	powerResumeFn   func(string)
+	powerResumeLast time.Time
+)
+
+// setPowerResumeHandler 注册「系统从睡眠/休眠恢复」时的回调。
+//
+// 窗口线程收到 WM_POWERBROADCAST 的恢复事件时调用它。真正的网络恢复要清缓存、
+// 重写 hosts、重新预热，可能耗时，因此回调只负责投递（见 start.go）。
+func setPowerResumeHandler(fn func(string)) {
+	powerResumeMu.Lock()
+	powerResumeFn = fn
+	powerResumeMu.Unlock()
+}
+
+// runPowerResume 触发一次睡眠恢复（同一轮恢复的多个事件只跑一遍）。
+func runPowerResume() {
+	powerResumeMu.Lock()
+	fn := powerResumeFn
+	if fn == nil || time.Since(powerResumeLast) < 2*time.Second {
+		powerResumeMu.Unlock()
+		return
+	}
+	powerResumeLast = time.Now()
+	powerResumeMu.Unlock()
+	fn("系统从睡眠恢复")
 }

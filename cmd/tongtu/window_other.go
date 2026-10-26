@@ -31,5 +31,8 @@ func setWindowStatus(windowStatus) {}
 // setSessionEndHandler 非 Windows 平台没有窗口消息，注册后不会被调用。
 func setSessionEndHandler(func()) {}
 
+// setPowerResumeHandler 非 Windows 平台没有窗口消息，注册后不会被调用。
+func setPowerResumeHandler(func(string)) {}
+
 // setDPIAware 非 Windows 平台不需要声明 DPI 感知，空实现。
 func setDPIAware() {}
