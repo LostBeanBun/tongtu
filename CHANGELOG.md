@@ -73,6 +73,10 @@
   ./internal/sysproxy ./cmd/tongtu -count=30` 无 flake。
 - MITM 测试全部使用本地 TLS upstream 与假解析器，CI 的 Windows 完整测试与 Linux `-race`
   覆盖本机无法运行的部分（本机无 gcc / WSL）。
+- CI 实跑全绿（run `40257927262`，提交 `1d3b56d`）：格式与静态检查、Windows 完整测试、
+  Linux `go test -race` 均通过。过程中修掉一个只在 Windows CI 暴露的测试竞态：
+  `healthLoop` 的首次健康检查可能先于用例断言完成自愈，前置条件改为接受
+  「端口已释放」或「后台已完成自愈」两种路径。
 
 ## [0.5.0] - 2026-10-23
 
