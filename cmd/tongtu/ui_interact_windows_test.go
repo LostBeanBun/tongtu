@@ -576,20 +576,32 @@ func TestHoverAndLeave(t *testing.T) {
 	lw.hoverID = ""
 	lw.mu.Unlock()
 
-	sendRegionMouse(t, uiIDMITM, wmMouseMove, 0)
-	if lw.hoverID != uiIDMITM {
-		t.Errorf("悬停在反代胶囊上时 hoverID 应为 %q，实际 %q", uiIDMITM, lw.hoverID)
-	}
+	// 合成 WM_MOUSEMOVE 不移动真实光标：系统可能补一条迟到的 WM_MOUSELEAVE，
+	// 窗口也可能在 show 之后才收到最终的尺寸 / DPI 调整。因此每次都重新取几何并
+	// 重复发送，直到悬停稳定命中——不假设一次就生效（Windows runner 上偶发失败）。
+	waitFor(t, "悬停命中反代胶囊", func() bool {
+		sendRegionMouse(t, uiIDMITM, wmMouseMove, 0)
+		lw.mu.Lock()
+		got := lw.hoverID
+		lw.mu.Unlock()
+		return got == uiIDMITM
+	})
 	// 移到空白处：悬停高亮与提示都要收掉
-	var cr rectT
-	procGetClientRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&cr)))
-	sendMouse(t, hwnd, wmMouseMove, 0, cr.Right/2, cr.Bottom-30)
-	if lw.hoverID != "" {
-		t.Errorf("移到空白处应清掉悬停，实际 %q", lw.hoverID)
-	}
+	waitFor(t, "移到空白处清掉悬停", func() bool {
+		var cr rectT
+		procGetClientRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&cr)))
+		sendMouse(t, hwnd, wmMouseMove, 0, cr.Right/2, cr.Bottom-30)
+		lw.mu.Lock()
+		got := lw.hoverID
+		lw.mu.Unlock()
+		return got == ""
+	})
 	procSendMessageW.Call(uintptr(hwnd), wmMouseLeave, 0, 0)
-	if lw.hoverID != "" {
-		t.Errorf("鼠标离开后应清掉悬停，实际 %q", lw.hoverID)
+	lw.mu.Lock()
+	left := lw.hoverID
+	lw.mu.Unlock()
+	if left != "" {
+		t.Errorf("鼠标离开后应清掉悬停，实际 %q", left)
 	}
 }
 
