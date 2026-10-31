@@ -78,7 +78,7 @@ const uiFilterTip = "过滤日志：输入关键字（不区分大小写），�
 const uiSelfTestTip = "自检：逐个测试加速域名的解析、直连与经代理访问，确认加速是否真的生效（约 10 秒）"
 const uiLogTip = "日志：打开日志文件 / 复制诊断信息 / 清空窗口日志"
 const uiTodoTip = "待办：还有没配置好的事情（安装证书、以管理员重启、开机自启…），点开可一键处理"
-const uiPauseTip = "暂停：一键还原系统代理与 hosts、关掉反代（进程继续运行，随时可以点「恢复」）"
+const uiPauseTip = "暂停：选一个暂停时长（15 分钟 / 30 分钟 / 1 小时 / 2 小时，或一直停到手动恢复）；进程继续运行，随时可点「恢复」"
 const uiResumeTip = "恢复：把暂停前开着的加速项原样打开"
 
 // computeUILayout 计算一帧的几何。

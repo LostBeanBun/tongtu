@@ -23,20 +23,25 @@ import (
 
 // Status 是状态查询的返回体。
 type Status struct {
-	Running     bool              `json:"running"`
-	Listen      string            `json:"listen"`
-	UptimeSec   int64             `json:"uptime_sec"`
-	SystemProxy bool              `json:"system_proxy"`         // 系统代理「实际生效中」（仍由本实例持有）
-	ProxyNote   string            `json:"proxy_note,omitempty"` // 系统代理没生效的原因（如被别的程序接管）
-	Hosts       bool              `json:"hosts"`
-	MITM        bool              `json:"mitm"`                // 无 SNI 反代是否启用
-	MITMNote    string            `json:"mitm_note,omitempty"` // 反代未启用的原因（启用时为空）
-	MITMLocal   bool              `json:"mitm_local"`          // hosts 直连用本地 :443 是否就绪
-	Paused      bool              `json:"paused"`              // 是否处于「一键暂停」（进程仍在，对外影响已撤回）
-	Services    []string          `json:"services"`
-	Proxy       proxy.Snapshot    `json:"proxy"`
-	DNS         []resolver.Health `json:"dns"`
-	Health      Health            `json:"health"`
+	Running     bool   `json:"running"`
+	Listen      string `json:"listen"`
+	UptimeSec   int64  `json:"uptime_sec"`
+	SystemProxy bool   `json:"system_proxy"`         // 系统代理「实际生效中」（仍由本实例持有）
+	ProxyNote   string `json:"proxy_note,omitempty"` // 系统代理没生效的原因（如被别的程序接管）
+	Hosts       bool   `json:"hosts"`
+	MITM        bool   `json:"mitm"`                // 无 SNI 反代是否启用
+	MITMNote    string `json:"mitm_note,omitempty"` // 反代未启用的原因（启用时为空）
+	MITMLocal   bool   `json:"mitm_local"`          // hosts 直连用本地 :443 是否就绪
+	Paused      bool   `json:"paused"`              // 是否处于「一键暂停」（进程仍在，对外影响已撤回）
+	// PauseUntil 是定时暂停的到期时间（Unix 秒；0 = 未定时，只能手动恢复）。
+	// PauseRemainSec 是距自动恢复的秒数（未定时或已过期时为 0）。
+	// 两个字段都只在 Paused 为真时有意义：界面据此显示「还剩几分钟」。
+	PauseUntil     int64             `json:"pause_until,omitempty"`
+	PauseRemainSec int64             `json:"pause_remain_sec,omitempty"`
+	Services       []string          `json:"services"`
+	Proxy          proxy.Snapshot    `json:"proxy"`
+	DNS            []resolver.Health `json:"dns"`
+	Health         Health            `json:"health"`
 }
 
 // Options 由调用方注入 App 所需依赖。
@@ -74,6 +79,11 @@ type App struct {
 	// paused 记录被「一键暂停」撤掉的项（nil = 当前没有暂停）。
 	// 与 Shutdown 的区别：暂停只撤掉对外影响，进程与本地监听继续运行，随时可以恢复。
 	paused *pauseState
+	// pauseUntil 是定时暂停的到期时间（零值 = 未定时）；pauseGen 是定时器代号：
+	// 每次暂停 / 恢复都抬一，挂着的旧定时器醒来发现代号对不上就直接退出，
+	// 这样「暂停 30 分钟」之后又手动恢复、再暂停 10 分钟，不会被前一个定时器误恢复。
+	pauseUntil time.Time
+	pauseGen   int64
 
 	mu           sync.Mutex
 	ln           net.Listener
@@ -320,6 +330,10 @@ func (a *App) Shutdown(ctx context.Context) error {
 	a.health.State = HealthStopped
 	a.health.Reason = ""
 	a.health.CheckedAt = time.Now()
+	// 退出是终态：把挂着的「定时暂停」一并作废，别让它在进程退出后还试图恢复。
+	a.pauseGen++
+	a.pauseUntil = time.Time{}
+	a.paused = nil
 	a.mu.Unlock()
 
 	if cancel != nil {
@@ -443,6 +457,10 @@ func (a *App) unpauseLocked(sys, hosts, mitm bool) {
 	}
 	if !a.paused.active() {
 		a.paused = nil
+		// 暂停项被用户逐个手动打开到「没有暂停项」时，定时器也该一起作废：
+		// 否则它到点会再「恢复」一次，把用户随后手动关掉的开关重新打开。
+		a.pauseGen++
+		a.pauseUntil = time.Time{}
 	}
 }
 
@@ -580,9 +598,19 @@ func (p *pauseState) active() bool { return p != nil && (p.sys || p.hosts || p.m
 func (a *App) StopAll() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.stopAllLocked()
+}
+
+// stopAllLocked 是 StopAll 的实现（需持有 a.mu）。
+//
+// 任何一次暂停都先作废旧定时器：暂停不指定时长时，用户要的是「一直停到我点恢复」，
+// 不能让上一轮遗留的 30 分钟定时器在半路把它打开。
+func (a *App) stopAllLocked() error {
 	if a.ln == nil || a.stopped {
 		return fmt.Errorf("服务未启动")
 	}
+	a.pauseGen++
+	a.pauseUntil = time.Time{}
 	p := &pauseState{
 		sys:   a.sysOn && a.sysProxyHeld(),
 		hosts: a.hostsOn,
@@ -633,6 +661,16 @@ func (a *App) Paused() bool {
 func (a *App) Resume() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.resumeLocked("手动恢复")
+}
+
+// resumeLocked 是 Resume 的实现（需持有 a.mu）。
+//
+// 先作废旧定时器再干活：手动恢复之后，那个「30 分钟后自动恢复」不该再醒来一次
+// （它醒来时代号已经对不上，见 autoResume）。trigger 只用于日志，说明这次恢复是谁触发的。
+func (a *App) resumeLocked(trigger string) error {
+	a.pauseGen++
+	a.pauseUntil = time.Time{}
 	if a.ln == nil || a.stopped {
 		return fmt.Errorf("服务未启动")
 	}
@@ -674,7 +712,7 @@ func (a *App) Resume() error {
 		}
 	}
 	a.paused = nil
-	a.log.Info("已恢复加速")
+	a.log.Info("已恢复加速", "trigger", trigger)
 	return errors.Join(errs...)
 }
 
@@ -791,6 +829,13 @@ func (a *App) Status() Status {
 	if st.Paused {
 		st.Health.State = HealthPaused
 		st.Health.Reason = ""
+		if !a.pauseUntil.IsZero() {
+			st.PauseUntil = a.pauseUntil.Unix()
+			// 向下取整并夹到 0：界面显示「还剩 1 分钟」时不该因为少 200ms 而变成 0。
+			if remain := int64(time.Until(a.pauseUntil).Seconds()); remain > 0 {
+				st.PauseRemainSec = remain
+			}
+		}
 	}
 	if !st.Running {
 		st.Health.State = HealthStopped

@@ -46,6 +46,11 @@ var statusCmd = &cobra.Command{
 
 func printStatus(st *app.Status) {
 	fmt.Printf("状态:     %s\n", statusWord(st))
+	if st.Paused && st.PauseRemainSec > 0 {
+		// 定时暂停：把「什么时候自己会开回来」说清楚，脚本与人都能看懂。
+		fmt.Printf("自动恢复: %s后（%s）\n",
+			pauseRemainText(st.PauseRemainSec), time.Unix(st.PauseUntil, 0).Format("15:04"))
+	}
 	fmt.Printf("代理监听: %s\n", st.Listen)
 	fmt.Printf("健康度:   %s", healthWord(st.Health))
 	if st.Health.Reason != "" {

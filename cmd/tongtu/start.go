@@ -508,6 +508,11 @@ func windowStatusOf(a *app.App, cfg *config.Config) windowStatus {
 	if st.Health.State == app.HealthDegraded && st.Health.Reason != "" {
 		detail = append(detail, st.Health.Reason)
 	}
+	// 定时暂停：把「还剩多久」放在状态条上。窗口隐藏时用户也能从托盘提示里看到，
+	// 不会出现「明明说好 30 分钟，怎么自己开了」的疑惑。
+	if st.Paused && st.PauseRemainSec > 0 {
+		detail = append(detail, "暂停中，"+pauseRemainText(st.PauseRemainSec)+"后自动恢复")
+	}
 	return windowStatus{
 		Title:  "通途 Tongtu " + Version,
 		State:  state,
@@ -624,6 +629,13 @@ func wireWindowActions(a *app.App, cfg *config.Config, quit func(), restartEleva
 					return err
 				}
 				todos.refresh(a, cfg) // 暂停后待办会变（例如「夺回系统代理」不再需要）
+				return nil
+			},
+			PauseFor: func(d time.Duration) error {
+				if err := a.PauseFor(d); err != nil {
+					return err
+				}
+				todos.refresh(a, cfg)
 				return nil
 			},
 			Resume: func() error {

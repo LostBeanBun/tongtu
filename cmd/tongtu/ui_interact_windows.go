@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 	"unsafe"
@@ -497,11 +498,18 @@ func (w *logWindow) invokeAction(hwnd windows.Handle, id string) {
 		}
 		w.toast("已复制代理地址 http://"+addr, styleOK)
 	case uiIDPause:
-		if act.StopAll == nil || act.Resume == nil {
+		if act.Resume == nil || (act.StopAll == nil && act.PauseFor == nil) {
 			w.toast("当前实例无法暂停加速", styleWarn)
 			return
 		}
-		w.togglePause(act)
+		if w.statusSnapshot().Paused {
+			// 已经暂停：这一个按钮就是「恢复」，不再多问一层。
+			w.resumePause(act)
+			return
+		}
+		// 没暂停：先问停多久。暂停从「一次点击」变成「选一个时长」，
+		// 因为 0.7.0 起它可以定时自动恢复，时长是这次操作的一部分。
+		w.showPauseMenu(hwnd, act)
 	case uiIDConfig:
 		if act.OpenConfig == nil {
 			w.toast("当前实例无法打开配置文件", styleWarn)
@@ -582,13 +590,75 @@ func (w *logWindow) toggleMode(act windowActions, id string) {
 	}()
 }
 
-// togglePause 一键暂停 / 恢复全部加速。
+// pauseChoice 是「暂停」菜单里的一项：时长 + 显示文案。
+type pauseChoice struct {
+	ID    string
+	Label string
+	D     time.Duration
+}
+
+// pauseChoices 是暂停时长选项，顺序即菜单顺序。
+//
+// 最后一项是「一直停到手动恢复」：0.6.0 的暂停就是它，只是现在要从菜单里选一次。
+// 不把时长做成输入框：常用值就这几个，选择比输入快，也不用校验用户输入的奇怪数值。
+var pauseChoices = []pauseChoice{
+	{ID: "pause:15m", Label: "暂停 15 分钟", D: 15 * time.Minute},
+	{ID: "pause:30m", Label: "暂停 30 分钟", D: 30 * time.Minute},
+	{ID: "pause:1h", Label: "暂停 1 小时", D: time.Hour},
+	{ID: "pause:2h", Label: "暂停 2 小时", D: 2 * time.Hour},
+	{ID: "pause:0", Label: "暂停，直到手动恢复", D: 0},
+}
+
+// pauseChoiceByID 按菜单项 id 找回时长（找不到时 ok=false）。
+func pauseChoiceByID(id string) (pauseChoice, bool) {
+	for _, c := range pauseChoices {
+		if c.ID == id {
+			return c, true
+		}
+	}
+	return pauseChoice{}, false
+}
+
+// pauseMenuItems 把选项转成弹出菜单项（纯函数，便于单测）。
+func pauseMenuItems() []uiMenuItem {
+	out := make([]uiMenuItem, 0, len(pauseChoices))
+	for _, c := range pauseChoices {
+		out = append(out, uiMenuItem{ID: c.ID, Label: c.Label})
+	}
+	return out
+}
+
+// humanPause 把时长写成菜单/提示里用的中文（15 分钟 / 1 小时）。
+func humanPause(d time.Duration) string {
+	if d <= 0 {
+		return "手动恢复"
+	}
+	if d%time.Hour == 0 {
+		return strconv.Itoa(int(d/time.Hour)) + " 小时"
+	}
+	return strconv.Itoa(int(d/time.Minute)) + " 分钟"
+}
+
+// showPauseMenu 在「暂停」按钮下弹出时长菜单，选中后在后台执行暂停。
+func (w *logWindow) showPauseMenu(hwnd windows.Handle, act windowActions) {
+	picked, ok := w.popupMenu(hwnd, uiIDPause, pauseMenuItems())
+	if !ok {
+		return
+	}
+	w.pauseFor(act, picked.ID)
+}
+
+// pauseFor 按选中的时长暂停全部加速。
 //
 // 和 toggleMode 一样放到后台：暂停要还原系统代理、退出 hosts 接管，可能要几秒；
 // 在窗口线程里做会让窗口在这几秒里完全不响应。暂停期间重复点击只提示，不再派发。
-func (w *logWindow) togglePause(act windowActions) {
+func (w *logWindow) pauseFor(act windowActions, id string) {
+	choice, ok := pauseChoiceByID(id)
+	if !ok {
+		w.toast("无法识别的暂停时长", styleWarn)
+		return
+	}
 	w.mu.Lock()
-	paused := w.status.Paused
 	if w.pauseBusy {
 		w.mu.Unlock()
 		w.toast("正在切换，请稍候…", styleMuted)
@@ -597,11 +667,7 @@ func (w *logWindow) togglePause(act windowActions) {
 	w.pauseBusy = true
 	w.mu.Unlock()
 
-	if paused {
-		w.toast("正在恢复加速…", styleMuted)
-	} else {
-		w.toast("正在暂停加速…", styleMuted)
-	}
+	w.toast("正在暂停加速…", styleMuted)
 	go func() {
 		defer func() {
 			w.mu.Lock()
@@ -609,20 +675,51 @@ func (w *logWindow) togglePause(act windowActions) {
 			w.mu.Unlock()
 		}()
 		var err error
-		if paused {
-			err = act.Resume()
-		} else {
+		switch {
+		case act.PauseFor != nil:
+			err = act.PauseFor(choice.D)
+		case act.StopAll != nil:
+			// 没有定时能力的实例（例如旧装配路径）至少能暂停。
 			err = act.StopAll()
 		}
 		if err != nil {
 			w.report(uiIDPause, err)
 			return
 		}
-		if paused {
-			w.toast("已恢复加速", styleOK)
+		if choice.D > 0 {
+			w.toast("已暂停，将在 "+humanPause(choice.D)+"后自动恢复", styleOK)
 		} else {
 			w.toast("已暂停加速：系统代理与 hosts 已还原，点「恢复」可再打开", styleOK)
 		}
+		if act.Refresh != nil {
+			act.Refresh()
+		}
+	}()
+}
+
+// resumePause 恢复「一键暂停」撤掉的项（暂停状态下的同一个按钮）。
+func (w *logWindow) resumePause(act windowActions) {
+	w.mu.Lock()
+	if w.pauseBusy {
+		w.mu.Unlock()
+		w.toast("正在切换，请稍候…", styleMuted)
+		return
+	}
+	w.pauseBusy = true
+	w.mu.Unlock()
+
+	w.toast("正在恢复加速…", styleMuted)
+	go func() {
+		defer func() {
+			w.mu.Lock()
+			w.pauseBusy = false
+			w.mu.Unlock()
+		}()
+		if err := act.Resume(); err != nil {
+			w.report(uiIDPause, err)
+			return
+		}
+		w.toast("已恢复加速", styleOK)
 		if act.Refresh != nil {
 			act.Refresh()
 		}

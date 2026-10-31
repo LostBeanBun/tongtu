@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"time"
 
 	"tongtu/internal/selfcheck"
 )
@@ -87,6 +88,9 @@ type windowActions struct {
 
 	// StopAll 一键暂停：还原系统代理与 hosts、关掉反代，但进程继续运行。
 	StopAll func() error
+	// PauseFor 定时暂停：d <= 0 表示一直暂停到手动恢复（与 StopAll 等价）。
+	// 窗口里点「暂停」选时长走这里，到期由 app 层自动恢复（窗口隐藏时也照样恢复）。
+	PauseFor func(d time.Duration) error
 	// Resume 把「一键暂停」撤掉的项原样恢复。
 	Resume func() error
 	// ProxyAddr 返回本地代理地址（如 127.0.0.1:19180），用于「复制代理地址」。

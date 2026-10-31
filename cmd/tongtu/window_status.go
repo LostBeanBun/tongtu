@@ -38,7 +38,6 @@ func statusLevel(running bool, modes ...modeWish) windowStateLevel {
 }
 
 // humanUptime 把运行秒数写成「人话」：3 天 4 小时 / 1 小时 23 分 / 5 分钟 / 12 秒。
-//
 // 只保留一两个量级：状态条第二行放不下更多，也没人需要「3 天 4 小时 7 分 12 秒」这种精度。
 func humanUptime(sec int64) string {
 	if sec < 0 {
@@ -61,6 +60,27 @@ func humanUptime(sec int64) string {
 			return fmt.Sprintf("%d 天", d)
 		}
 		return fmt.Sprintf("%d 天 %d 小时", d, h)
+	}
+}
+
+// pauseRemainText 把「距自动恢复还有多少秒」写成状态条上的短语。
+//
+// 不足一分钟写「不到 1 分钟」而不是「0 分钟」：后者看着像定时器坏了。
+// 一小时内精确到分钟，再长就只保留小时（状态条第二行宽度有限）。
+func pauseRemainText(sec int64) string {
+	switch {
+	case sec < 60:
+		return "不到 1 分钟"
+	case sec < 3600:
+		return fmt.Sprintf("%d 分钟", sec/60)
+	case sec < 86400:
+		h, m := sec/3600, (sec%3600)/60
+		if m == 0 {
+			return fmt.Sprintf("%d 小时", h)
+		}
+		return fmt.Sprintf("%d 小时 %d 分", h, m)
+	default:
+		return fmt.Sprintf("%d 天", sec/86400)
 	}
 }
 

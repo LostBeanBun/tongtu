@@ -108,6 +108,29 @@ func TestWindowStatusOfDegraded(t *testing.T) {
 	}
 }
 
+// TestPauseRemainText 定时暂停的剩余时间文案：不足一分钟不说「0 分钟」。
+func TestPauseRemainText(t *testing.T) {
+	cases := []struct {
+		sec  int64
+		want string
+	}{
+		{-1, "不到 1 分钟"},
+		{0, "不到 1 分钟"},
+		{30, "不到 1 分钟"},
+		{60, "1 分钟"},
+		{59 * 60, "59 分钟"},
+		{3600, "1 小时"},
+		{3660, "1 小时 1 分"},
+		{2 * 3600, "2 小时"},
+		{86400, "1 天"},
+	}
+	for _, c := range cases {
+		if got := pauseRemainText(c.sec); got != c.want {
+			t.Errorf("pauseRemainText(%d) = %q，期望 %q", c.sec, got, c.want)
+		}
+	}
+}
+
 // TestHumanUptime 运行时长要写成人话，且只保留一两个量级（状态条一行放不下更多）。
 func TestHumanUptime(t *testing.T) {
 	cases := []struct {

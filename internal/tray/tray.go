@@ -66,6 +66,8 @@ func Exit() {
 // menu 汇总全部菜单项，便于在单一 goroutine 中统一读写。
 type menu struct {
 	pause    *systray.MenuItem
+	pauseAt  *systray.MenuItem
+	timed    []pausePreset
 	sys      *systray.MenuItem
 	hosts    *systray.MenuItem
 	mitm     *systray.MenuItem
@@ -82,6 +84,12 @@ type menu struct {
 	quit     *systray.MenuItem
 }
 
+// pausePreset 是「暂停定时」子菜单里的一项：菜单项 + 对应时长。
+type pausePreset struct {
+	item *systray.MenuItem
+	d    time.Duration
+}
+
 func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() error, onRestartElevated func(), onCheckUpdate func()) {
 	systray.SetIcon(icon.ICO)
 	systray.SetTitle("通途")
@@ -94,14 +102,32 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 	// 「暂停 / 恢复」放在最上面：一键撤掉全部对外影响，再点一次原样回来。
 	// 它和下面的三个开关是两种粒度：开关调单项，这里是「全都关掉 / 全都开回来」。
 	pause := systray.AddMenuItem("暂停全部加速", "还原系统代理与 hosts、关掉无 SNI 反代；进程继续运行，再点一次原样恢复")
+	// 「暂停定时」是子菜单：暂停这件事多了一个「停多久」的维度，摊平成四个菜单项会把
+	// 主菜单撑长；子菜单只在需要时展开。
+	pauseAt := systray.AddMenuItem("暂停定时", "暂停一段时间后自动恢复（也可随时点「恢复全部加速」提前恢复）")
 	systray.AddSeparator()
 
 	m := &menu{
-		pause: pause,
+		pause:   pause,
+		pauseAt: pauseAt,
 		// —— 加速模式 ——
 		sys:   systray.AddMenuItemCheckbox("系统代理模式", "接管浏览器与系统流量（无需管理员）", false),
 		hosts: systray.AddMenuItemCheckbox("Hosts 模式", "覆盖 hosts 解析，供 Steam 客户端使用（需管理员）", false),
 		mitm:  systray.AddMenuItemCheckbox("无 SNI 反代", "本地解密被封域名，出站剥离 SNI（需先安装根证书）", false),
+	}
+	for _, p := range []struct {
+		label string
+		d     time.Duration
+	}{
+		{"暂停 15 分钟", 15 * time.Minute},
+		{"暂停 30 分钟", 30 * time.Minute},
+		{"暂停 1 小时", time.Hour},
+		{"暂停 2 小时", 2 * time.Hour},
+	} {
+		m.timed = append(m.timed, pausePreset{
+			item: pauseAt.AddSubMenuItem(p.label, "到点自动恢复；也可以随时点「恢复全部加速」提前恢复"),
+			d:    p.d,
+		})
 	}
 	systray.AddSeparator()
 
@@ -192,7 +218,29 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 		}
 	}
 
-	go clickLoop(a, m, done, onQuit, onWindow, onRestartElevated, onCheckUpdate, syncReq, syncState, refreshAuto, fail)
+	// pauseReq 把「暂停定时」子菜单的点击转交给 clickLoop（唯一操作菜单的 goroutine）。
+	pauseReq := make(chan time.Duration, len(m.timed))
+	go clickLoop(a, m, done, onQuit, onWindow, onRestartElevated, onCheckUpdate, syncReq, syncState, refreshAuto, fail, pauseReq)
+
+	// 「暂停定时」子菜单的每一项都只做一件事：把时长投递给 clickLoop。
+	// 子菜单项的点击通道各是一个 channel，没法直接放进同一个 select，
+	// 因此这里为每项起一个转发 goroutine（进程退出时随 done 一起结束）。
+	for _, p := range m.timed {
+		p := p
+		go func() {
+			for {
+				select {
+				case <-done:
+					return
+				case <-p.item.ClickedCh:
+					select {
+					case pauseReq <- p.d:
+					default: // 上一拍还没处理完：丢掉这次点击，不排队堆积
+					}
+				}
+			}
+		}()
+	}
 
 	// 周期同步勾选状态（反映控制 API 的变更与启动失败的实际情况）
 	go func() {
@@ -211,7 +259,8 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 
 // clickLoop 是唯一读写菜单项的 goroutine。
 func clickLoop(a *app.App, m *menu, done chan struct{}, onQuit func(), onWindow func() error,
-	onRestartElevated func(), onCheckUpdate func(), syncReq chan struct{}, syncState, refreshAuto func(), fail func(string)) {
+	onRestartElevated func(), onCheckUpdate func(), syncReq chan struct{}, syncState, refreshAuto func(), fail func(string),
+	pauseReq <-chan time.Duration) {
 	// 没有「显示/隐藏窗口」菜单项时 windowCh 为 nil，对应分支永不触发。
 	var windowCh chan struct{}
 	if m.window != nil {
@@ -236,6 +285,13 @@ func clickLoop(a *app.App, m *menu, done chan struct{}, onQuit func(), onWindow 
 					fail("恢复加速失败：\n" + err.Error())
 				}
 			} else if err := a.StopAll(); err != nil {
+				fail("暂停加速失败：\n" + err.Error())
+			}
+			syncState()
+
+		case d := <-pauseReq:
+			// 定时暂停：已经暂停时再选一次时长只改到期时间，不会重复还原系统设置。
+			if err := a.PauseFor(d); err != nil {
 				fail("暂停加速失败：\n" + err.Error())
 			}
 			syncState()
@@ -417,6 +473,10 @@ func tooltipText(st app.Status) string {
 	case st.Running:
 		state = "运行中"
 	}
+	if st.Paused && st.PauseRemainSec > 0 {
+		// 定时暂停：把「还有多久自动恢复」写清楚，否则用户会以为它自己偷偷开了。
+		state += "（" + pauseRemainText(st.PauseRemainSec) + "后自动恢复）"
+	}
 	if st.Running && st.UptimeSec > 0 {
 		// 托盘提示没有宽度压力，把「跑了多久」放在状态词后面：排查「是不是刚重启过」很有用。
 		state += "（已运行 " + humanUptime(st.UptimeSec) + "）"
@@ -424,6 +484,24 @@ func tooltipText(st app.Status) string {
 	return fmt.Sprintf("通途 Tongtu · %s · 系统代理%s · Hosts%s · 反代%s · ↓%s ↑%s",
 		state, mark(st.SystemProxy), mark(st.Hosts), mark(st.MITM),
 		shortBytes(st.Proxy.BytesIn), shortBytes(st.Proxy.BytesOut))
+}
+
+// pauseRemainText 把剩余秒数写成「12 分钟 / 1 小时 5 分」（与窗口状态条同一套文案）。
+func pauseRemainText(sec int64) string {
+	switch {
+	case sec < 60:
+		return "不到 1 分钟"
+	case sec < 3600:
+		return fmt.Sprintf("%d 分钟", sec/60)
+	case sec < 86400:
+		h, m := sec/3600, (sec%3600)/60
+		if m == 0 {
+			return fmt.Sprintf("%d 小时", h)
+		}
+		return fmt.Sprintf("%d 小时 %d 分", h, m)
+	default:
+		return fmt.Sprintf("%d 天", sec/86400)
+	}
 }
 
 // humanUptime 把运行秒数写成「人话」（与窗口状态条同一套文案，见 cmd/tongtu/window_status.go）。

@@ -108,7 +108,10 @@ func (f *fakeActions) actions() windowActions {
 			return nil
 		},
 		StopAll: func() error { return f.recordPause("stop") },
-		Resume:  func() error { return f.recordPause("resume") },
+		PauseFor: func(d time.Duration) error {
+			return f.recordPause("for:" + d.String())
+		},
+		Resume: func() error { return f.recordPause("resume") },
 		ProxyAddr: func() string {
 			f.mu.Lock()
 			defer f.mu.Unlock()
@@ -817,7 +820,11 @@ func waitToast(t *testing.T, what, want string) {
 	}
 }
 
-// TestPauseButtonStopsAndResumes 点「暂停」走 StopAll，状态变成已暂停后同一个按钮走 Resume。
+// TestPauseButtonStopsAndResumes 选「暂停，直到手动恢复」走 StopAll，状态变成已暂停后
+// 同一个按钮走 Resume。
+//
+// 暂停按钮现在先弹时长菜单，而弹出菜单是模态的（TrackPopupMenu 会一直阻塞到用户选择），
+// 单测里没法「点菜单项」，因此这里直接调用菜单选中之后的那一步 pauseFor。
 func TestPauseButtonStopsAndResumes(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
@@ -831,10 +838,10 @@ func TestPauseButtonStopsAndResumes(t *testing.T) {
 		return !lw.status.Paused
 	})
 
-	clickRegion(t, uiIDPause)
+	lw.pauseFor(currentWindowActions(), "pause:0")
 	waitFor(t, "暂停被调用", func() bool { return len(f.pauses()) == 1 })
-	if got := f.pauses()[0]; got != "stop" {
-		t.Fatalf("应调用 StopAll，实际 %q", got)
+	if got := f.pauses()[0]; got != "for:0s" {
+		t.Fatalf("应调用 PauseFor(0)（一直暂停），实际 %q", got)
 	}
 	waitToast(t, "暂停后的反馈", "已暂停加速")
 	waitFor(t, "回读状态", func() bool { return f.refreshes() > 0 })
@@ -867,16 +874,17 @@ func TestPauseButtonIgnoresRepeatClicks(t *testing.T) {
 		return !lw.status.Paused
 	})
 
-	clickRegion(t, uiIDPause)
+	act := currentWindowActions()
+	lw.pauseFor(act, "pause:30m")
 	waitFor(t, "暂停被调用", func() bool { return len(f.pauses()) == 1 })
-	clickRegion(t, uiIDPause)
+	lw.pauseFor(act, "pause:30m")
 	waitFor(t, "重复点击的提示", func() bool { return strings.Contains(toastText(), "请稍候") })
 	if n := len(f.pauses()); n != 1 {
 		t.Fatalf("暂停进行中不该再次派发，实际 %d 次", n)
 	}
 
 	close(f.pauseGate)
-	waitFor(t, "暂停收尾", func() bool { return strings.Contains(toastText(), "已暂停加速") })
+	waitFor(t, "暂停收尾", func() bool { return strings.Contains(toastText(), "30 分钟后自动恢复") })
 }
 
 // TestPauseFailureReported 暂停失败要把原因写出来（并允许重试），而不是静默留在后台。
@@ -893,7 +901,7 @@ func TestPauseFailureReported(t *testing.T) {
 		return !lw.status.Paused
 	})
 
-	clickRegion(t, uiIDPause)
+	lw.pauseFor(currentWindowActions(), "pause:15m")
 	waitFor(t, "失败反馈", func() bool { return strings.Contains(toastText(), "hosts 被别的程序改写了") })
 	// 失败后不应该卡在「切换中」
 	waitFor(t, "允许重试", func() bool {
