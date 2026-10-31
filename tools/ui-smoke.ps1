@@ -7,8 +7,9 @@
 #     - 「暂停」按钮旁边的「待办」被误点，弹出菜单卡住后续点击。
 #   所以这里按用户的真实操作走一遍：
 #
-#     定位窗口 → 按控件 ID 取「暂停」按钮矩形 → 点它 → 断言系统代理 / hosts / 断电自愈项都已撤回
-#     → 再点「恢复」→ 断言全部回来 → 日志区右键「复制代理地址」→ 校验剪贴板
+#     定位窗口 → 按控件 ID 取「暂停」按钮矩形 → 点它并在时长菜单里选「暂停 15 分钟」
+#     → 断言系统代理 / hosts / 断电自愈项都已撤回 → 再点「恢复」→ 断言全部回来
+#     → 日志区右键「复制代理地址」→ 校验剪贴板
 #     → 改配置等热生效 → 点 × 只隐藏（进程仍在跑）→ 收尾还原。
 #
 # 用法：
@@ -293,11 +294,18 @@ Write-Host ("      「{0}」按钮：客户区 ({1},{2})-({3},{4})，点击点 (
 if ($btn.label -ne "暂停") { $script:failures.Add("运行中时暂停按钮标签是 '$($btn.label)'，期望「暂停」") }
 
 # —— 4. 暂停：系统状态 + 断电自愈项都要撤回 ——
-Write-Host "[4/9] 点击「暂停」…" -ForegroundColor Gray
+Write-Host "[4/9] 点击「暂停」并选「暂停 15 分钟」…" -ForegroundColor Gray
 [UiSmokeNative]::Force($hwnd)
 Start-Sleep -Milliseconds 300
 [UiSmokeNative]::Click(($org.X + $cx), ($org.Y + $cy))
+# 「暂停」现在先弹时长菜单（15 分钟 / 30 分钟 / 1 小时 / 2 小时 / 直到手动恢复）：
+# 菜单刚弹出时没有选中项，按一次 ↓ 选第一项，回车确认。
+Start-Sleep -Milliseconds 400
+[UiSmokeNative]::Key(0x28) # VK_DOWN
+[UiSmokeNative]::Key(0x0D) # VK_RETURN
 $paused = Wait-Status { param($s) $s.paused -eq $true } 15
+$stPaused = Get-Status
+$timedPause = ($stPaused.pause_until -gt 0) -and ($stPaused.pause_remain_sec -gt 0)
 # 撤销接管后要等巡检（1.5s 一轮）把断电自愈项也撤掉——不能只睡固定时长，否则慢一点就误报。
 $disarmed = Wait-Until { (Get-RunOnceValue) -eq "" } 6
 # 再等窗口把这一帧画完（按钮标签翻成「恢复」）才截图：
@@ -310,6 +318,7 @@ $enablePaused = Get-ProxyEnable
 $hostsPaused = Test-HostsHasManagedBlock
 
 if (-not $paused) { $script:failures.Add("点了「暂停」但状态没有变成 paused") }
+if (-not $timedPause) { $script:failures.Add("选「暂停 15 分钟」后没有定时：pause_until=$($stPaused.pause_until) pause_remain_sec=$($stPaused.pause_remain_sec)") }
 if ($beforeProxy -and $enablePaused -ne 0) { $script:failures.Add("暂停后系统代理没有撤回：ProxyEnable=$enablePaused") }
 if ($beforeHosts -and $hostsPaused) { $script:failures.Add("暂停后 hosts 托管块没有移除") }
 if (-not $disarmed) { $script:failures.Add("暂停后断电自愈项没有撤掉：'$runOncePaused'") }
@@ -395,6 +404,7 @@ Write-Host "[9/9] 结果" -ForegroundColor Gray
 Write-Host ""
 $rows = @(
     @{ Name = "暂停生效";       Ok = $paused;                 Detail = "paused=$($null -ne $paused -and $paused)" },
+    @{ Name = "暂停定时生效";   Ok = $timedPause;             Detail = "剩余 $($stPaused.pause_remain_sec) 秒" },
     @{ Name = "暂停撤销接管";   Ok = ((-not $beforeProxy -or $enablePaused -eq 0) -and (-not $beforeHosts -or -not $hostsPaused)); Detail = "ProxyEnable=$enablePaused hosts 托管块=$hostsPaused" },
     @{ Name = "暂停撤销自愈项"; Ok = ($runOncePaused -eq "");  Detail = $(if ($runOncePaused) { $runOncePaused } else { "已撤掉" }) },
     @{ Name = "恢复生效";       Ok = $resumed;                Detail = "system_proxy=$($st.system_proxy) hosts=$($st.hosts)" },
