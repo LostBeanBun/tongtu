@@ -335,7 +335,10 @@ func (l uiLayout) hit(x, y int32) (uiRegion, bool) {
 // 底色只表达交互（悬停 / 按下 / 选中），常态不铺底；状态仍由胶囊里的状态点承担
 // （开=绿、关=灰），文字只用文字色阶——沿用「一个颜色只干一件事」的规则，
 // 交互底色因此永远压不到状态点下面，对比度不受影响。
-func drawRegion(hdc uintptr, theme uiTheme, font uintptr, r uiRegion, dpi uint32, on, hover, press bool) {
+//
+// dim 表示「当前不可用」（例如站点面板的「添加」按钮在输入框为空时）：只把文字
+// 降到弱化色阶，不给悬停底色——看起来不能点的东西不该在鼠标移上去时发亮。
+func drawRegion(hdc uintptr, theme uiTheme, font uintptr, r uiRegion, dpi uint32, on, hover, press, dim bool) {
 	if hdc == 0 || font == 0 || r.Rect.Right <= r.Rect.Left || r.Rect.Bottom <= r.Rect.Top {
 		return
 	}
@@ -346,7 +349,7 @@ func drawRegion(hdc uintptr, theme uiTheme, font uintptr, r uiRegion, dpi uint32
 		radius = scaleDPI(uiGhostRadiusDIP, dpi)
 	}
 
-	active := hover || press
+	active := !dim && (hover || press)
 	// 只在这一刻铺底：鼠标悬停/按下，或（幽灵按钮）当前处于选中态
 	if active || (r.Kind == uiGhost && on) {
 		oldBrush, _, _ := procSelectObject.Call(hdc, theme.hoverBrush)
@@ -375,6 +378,9 @@ func drawRegion(hdc uintptr, theme uiTheme, font uintptr, r uiRegion, dpi uint32
 	color := theme.muted // 关闭 / 常态：二级文字（落在窗口底上仍有 ≥4.5:1）
 	if on || active {
 		color = theme.text
+	}
+	if dim {
+		color = theme.faint // 不可用：三级文字（仍是可读的弱化色，不是隐藏）
 	}
 	procSetTextColor.Call(hdc, uintptr(color))
 	drawTextLine(hdc, r.Label, x, cy, r.Rect.Right-pad-x, dtLeft)

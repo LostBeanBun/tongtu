@@ -1551,10 +1551,17 @@ func (w *logWindow) paintClient(hdc uintptr, client rectT) {
 		// 客户区始终铺一层主题底色：自绘内容必须落在不透明像素上，颜色才可控、文字才清晰
 		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&client)), brush)
 	}
-	l := w.ensureLayout()
+	w.paintContent(hdc, w.ensureLayout())
+}
+
+// paintContent 按固定顺序画一帧的全部自绘内容：卡片底 → 面板行反馈 → 状态条与控件。
+//
+// 顺序是语义的一部分：站点行的整行悬停底色必须铺在「反代」胶囊与「删除」按钮之前，
+// 否则会把它们盖住；而状态条文字在卡片之上，任何面板内容都不会压到它。
+func (w *logWindow) paintContent(hdc uintptr, l uiLayout) {
 	w.paintCard(hdc, l)
-	w.paintHeader(hdc, l)
 	w.paintPanel(hdc, l)
+	w.paintHeader(hdc, l)
 }
 
 // paintCard 画日志卡片本体：圆角底色 + 一圈 1 像素发丝线描边 + 工具条下的分隔线。
@@ -1653,6 +1660,8 @@ func (w *logWindow) paintHeader(hdc uintptr, l uiLayout) {
 
 	// 自绘控件：开关胶囊 + 动作按钮 + 只看警告（绘制顺序即 Regions 顺序）
 	procSelectObject.Call(hdc, font)
+	// 站点面板的「添加」在输入框为空时只是「不可用」：弱化显示，点了仍会说明原因。
+	addDim := sitesOpen && w.siteInputText() == ""
 	for _, r := range l.Regions {
 		// 站点面板每行的「反代」胶囊自带状态（几何层已经算好）；其余胶囊看状态条。
 		on := r.On
@@ -1666,7 +1675,8 @@ func (w *logWindow) paintHeader(hdc uintptr, l uiLayout) {
 		case r.Kind == uiChip && !strings.HasPrefix(r.ID, uiSiteMITMPrefix):
 			on = status.onOf(r.ID)
 		}
-		drawRegion(hdc, theme, font, r, dpi, on, w.hoverID == r.ID, w.pressID == r.ID)
+		drawRegion(hdc, theme, font, r, dpi, on, w.hoverID == r.ID, w.pressID == r.ID,
+			r.ID == uiIDSiteAdd && addDim)
 	}
 
 	// 第二行：轻量提示优先（那是刚发生的事），否则显示详情
@@ -1692,24 +1702,52 @@ func (w *logWindow) paintHeader(hdc uintptr, l uiLayout) {
 	}
 }
 
-// paintPanel 画「自定义站点」面板的文字部分：每行的域名、空状态提示与底部说明。
+// paintPanel 画「自定义站点」面板的背景与文字：行悬停底色、行间分隔线、
+// 每行的域名、空状态提示与底部说明。
 //
-// 行内的「反代」胶囊与「删除」按钮属于自绘控件，已经在 paintHeader 的 Regions 循环里
-// 画过了；这里只画它们左边那一段域名文字，避免两处重复画同一个像素。
+// 行内的「反代」胶囊与「删除」按钮属于自绘控件，由 paintHeader 的 Regions 循环绘制；
+// 这里只画它们左边那一段域名文字，避免两处重复画同一个像素。
 func (w *logWindow) paintPanel(hdc uintptr, l uiLayout) {
 	panel := w.panelSnapshot()
 	if !panel.Open || hdc == 0 {
 		return
 	}
 	w.mu.Lock()
-	theme, font := w.theme, w.font
+	theme, font, dpi, hoverID := w.theme, w.font, w.dpi, w.hoverID
 	w.mu.Unlock()
 	if font == 0 {
 		return
 	}
 	procSetBkMode.Call(hdc, bkTransparent)
-	procSelectObject.Call(hdc, font)
 
+	// 行反馈：鼠标停在这一行的「反代」或「删除」上时，整行铺一层交互底色——
+	// 让人看出这两个控件属于同一行，而不是悬空在文字右边。底色在胶囊与按钮之前画
+	// （见 paintContent 的顺序），因此不会盖住它们自己的悬停态。
+	if theme.hoverBrush != 0 {
+		for _, row := range l.SiteRows {
+			if hoverID == uiSiteDelID(row.Pattern) || hoverID == uiSiteMITMID(row.Pattern) {
+				procFillRect.Call(hdc, uintptr(unsafe.Pointer(&row.Rect)), theme.hoverBrush)
+			}
+		}
+	}
+
+	// 行间发丝线：把列表读成「一条一条」。它常驻但很轻，与悬停底色分工明确——
+	// 线说明结构，底色说明鼠标在哪。
+	if theme.hairlineBrush != 0 {
+		for i := 0; i+1 < len(l.SiteRows); i++ {
+			y := (l.SiteRows[i].Rect.Bottom + l.SiteRows[i+1].Rect.Top) / 2
+			line := rectT{Left: l.SiteRows[i].Rect.Left, Top: y, Right: l.SiteRows[i].Rect.Right, Bottom: y + 1}
+			procFillRect.Call(hdc, uintptr(unsafe.Pointer(&line)), theme.hairlineBrush)
+		}
+		// 底部说明讲的是「写法规则」，不属于列表：在它上方也画一条，把两段分开。
+		// （y 落在列表与说明之间的留白里；窗口极矮时留白不足就跳过，避免压到文字。）
+		if y := l.SiteHint.Top - scaleDPI(3, dpi); y > l.SiteList.Top {
+			line := rectT{Left: l.SiteList.Left, Top: y, Right: l.SiteList.Right, Bottom: y + 1}
+			procFillRect.Call(hdc, uintptr(unsafe.Pointer(&line)), theme.hairlineBrush)
+		}
+	}
+
+	procSelectObject.Call(hdc, font)
 	if len(l.SiteRows) == 0 {
 		// 空列表不能只留一片空白：把「下一步做什么」直接写在卡片里。
 		procSetTextColor.Call(hdc, uintptr(theme.muted))
@@ -1908,6 +1946,12 @@ func wndProc(hwnd windows.Handle, msg uint32, wparam uintptr, lparam unsafe.Poin
 		// 过滤框内容变化（EN_CHANGE）：重置防抖定时器，停手后再整体重画
 		if child := uint32(wparam >> 16); child == enChange && uintptr(lparam) == uintptr(lw.filterHandle()) {
 			lw.onFilterChanged(hwnd)
+			return 0
+		}
+		// 站点输入框内容变化（EN_CHANGE）：只影响「添加」按钮的可用外观，
+		// 输入框宽度不随内容变，因此重画即可，不必重排几何。
+		if child := uint32(wparam >> 16); child == enChange && uintptr(lparam) == uintptr(lw.siteEditHandle()) {
+			procInvalidateRect.Call(uintptr(hwnd), 0, 0)
 			return 0
 		}
 

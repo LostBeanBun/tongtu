@@ -238,6 +238,150 @@ func colorRefToRGB(c uint32) uint32 {
 	return (c&0xFF0000)>>16 | (c & 0x00FF00) | (c&0x0000FF)<<16
 }
 
+// countColorIn 数一块矩形里有多少像素正好是 rgb（GDI 不做抗锯齿，实心区域是精确色）。
+func countColorIn(m *memDC, rgb uint32, r rectT) int {
+	n := 0
+	for y := r.Top; y < r.Bottom; y++ {
+		for x := r.Left; x < r.Right; x++ {
+			if m.pixel(x, y) == rgb {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// TestDrawRegionDim 「添加」按钮在输入框为空时只是「不可用」：文字降到三级色阶，
+// 即使鼠标悬停也不铺交互底色——看起来不能点的东西不该在鼠标移上去时发亮。
+func TestDrawRegionDim(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	lw.mu.Lock()
+	dpi, font, th := lw.dpi, lw.font, lw.themeDarkSet
+	lw.mu.Unlock()
+	if font == 0 {
+		t.Fatal("正文字体不可用")
+	}
+
+	w, h := scaleDPI(120, dpi), scaleDPI(28, dpi)
+	r := uiRegion{ID: uiIDSiteAdd, Label: "添加", Kind: uiGhost,
+		Rect: rectT{Left: 0, Top: 0, Right: w, Bottom: h}}
+	hoverRGB, faintRGB := colorRefToRGB(th.hover), colorRefToRGB(th.faint)
+
+	m := newMemDC(w, h)
+	if m == nil {
+		t.Fatal("无法创建内存 DC")
+	}
+	defer m.close()
+	drawRegion(m.dc, th, font, r, dpi, false, true, false, true)
+	if got := countColorIn(m, hoverRGB, r.Rect); got != 0 {
+		t.Errorf("禁用态不该铺悬停底色，实际 %d 像素", got)
+	}
+	if got := countColorIn(m, faintRGB, r.Rect); got == 0 {
+		t.Error("禁用态的文字应降到三级色阶（faint），实际没有该颜色像素")
+	}
+
+	m2 := newMemDC(w, h)
+	if m2 == nil {
+		t.Fatal("无法创建内存 DC")
+	}
+	defer m2.close()
+	drawRegion(m2.dc, th, font, r, dpi, false, true, false, false)
+	if got := countColorIn(m2, hoverRGB, r.Rect); got < int(w*h)/2 {
+		t.Errorf("可用态的悬停底色应铺满按钮，实际只有 %d 像素", got)
+	}
+}
+
+// TestSitePanelRowFeedback 站点行要读成「一条一条」：悬停时整行铺底色，
+// 行间与底部说明上方各有一条发丝线；且行底色不能盖住胶囊的状态点
+// （绘制顺序：卡片 → 面板 → 状态条与控件）。
+func TestSitePanelRowFeedback(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	sites := []uiSite{{Pattern: "a.example.com", MITM: true}, {Pattern: "b.example.com"}}
+
+	lw.mu.Lock()
+	dpi, th := lw.dpi, lw.themeDarkSet
+	savedTheme, savedStatus := lw.theme, lw.status
+	savedHover, savedPress := lw.hoverID, lw.pressID
+	savedOpen, savedSites := lw.sitesOpen, lw.sites
+	lw.theme, lw.status = th, windowStatus{}
+	lw.hoverID, lw.pressID = uiSiteDelID(sites[0].Pattern), ""
+	lw.sitesOpen, lw.sites = true, sites
+	lw.mu.Unlock()
+	defer func() {
+		lw.mu.Lock()
+		lw.theme, lw.status = savedTheme, savedStatus
+		lw.hoverID, lw.pressID = savedHover, savedPress
+		lw.sitesOpen, lw.sites = savedOpen, savedSites
+		lw.mu.Unlock()
+	}()
+
+	w, h := scaleDPI(560, dpi), scaleDPI(360, dpi)
+	l := computeUILayout(w, h, dpi, windowStatus{},
+		uiPanelState{Open: true, Sites: sites}, lw.measureText, lw.measureTitle)
+	if len(l.SiteRows) != 2 {
+		t.Fatalf("应有 2 行站点，实际 %+v", l.SiteRows)
+	}
+
+	m := newMemDC(w, h)
+	if m == nil {
+		t.Fatal("无法创建内存 DC")
+	}
+	defer m.close()
+	lw.paintContent(m.dc, l)
+
+	hoverRGB := colorRefToRGB(th.hover)
+	row1, row2 := l.SiteRows[0].Rect, l.SiteRows[1].Rect
+	if got := countColorIn(m, hoverRGB, row1); got < int((row1.Right-row1.Left)*3) {
+		t.Errorf("悬停行的整行底色没画出来：只有 %d 像素", got)
+	}
+	if got := countColorIn(m, hoverRGB, row2); got != 0 {
+		t.Errorf("未悬停的行不该有交互底色：实际 %d 像素", got)
+	}
+	// 状态点必须还在：面板先画行底色、状态条后画胶囊，顺序反了就会盖掉它。
+	if got := countColorIn(m, colorRefToRGB(th.ok), row1); got < 20 {
+		t.Errorf("行底色盖住了「反代」胶囊的状态点：绿色像素只有 %d 个", got)
+	}
+
+	hairRGB := colorRefToRGB(th.hairline)
+	sep := (row1.Bottom + row2.Top) / 2
+	sepRect := rectT{Left: row1.Left, Top: sep, Right: row1.Right, Bottom: sep + 1}
+	if got, want := countColorIn(m, hairRGB, sepRect), int(row1.Right-row1.Left)-2; got < want {
+		t.Errorf("行间发丝线不完整：y=%d 只有 %d/%d 像素", sep, got, want)
+	}
+	hintY := l.SiteHint.Top - scaleDPI(3, dpi)
+	hintRect := rectT{Left: l.SiteList.Left, Top: hintY, Right: l.SiteList.Right, Bottom: hintY + 1}
+	if got, want := countColorIn(m, hairRGB, hintRect), int(l.SiteList.Right-l.SiteList.Left)-2; got < want {
+		t.Errorf("列表与底部说明之间的发丝线不完整：y=%d 只有 %d/%d 像素", hintY, got, want)
+	}
+
+	// 「添加」按钮的禁用态由绘制时读输入框决定：输入为空 → 文字降到 faint，
+	// 且即使鼠标停在上面也不铺底色（点了仍会给一句提示，见交互层测试）。
+	add, ok := regionByID(l, uiIDSiteAdd)
+	if !ok {
+		t.Fatalf("面板里应有「添加」按钮：%+v", l.Regions)
+	}
+	lw.setSiteInputText("")
+	lw.mu.Lock()
+	lw.hoverID = uiIDSiteAdd
+	lw.mu.Unlock()
+	m2 := newMemDC(w, h)
+	if m2 == nil {
+		t.Fatal("无法创建内存 DC")
+	}
+	defer m2.close()
+	lw.paintContent(m2.dc, l)
+	if got := countColorIn(m2, hoverRGB, add.Rect); got != 0 {
+		t.Errorf("空输入时「添加」不该铺悬停底色，实际 %d 像素", got)
+	}
+	if got := countColorIn(m2, colorRefToRGB(th.faint), add.Rect); got == 0 {
+		t.Error("空输入时「添加」的文字应降到三级色阶（faint）")
+	}
+}
+
 // TestStatusWordColorFollowsHealth 状态词的颜色必须跟着健康度走：
 // 正常绿、降级橙、未运行用次要灰——这是「颜色表意」的关键一环。
 func TestStatusWordColorFollowsHealth(t *testing.T) {
