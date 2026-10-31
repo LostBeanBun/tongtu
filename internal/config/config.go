@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -348,6 +349,38 @@ func (c *Config) MITMPatterns() []string {
 	out = append(out, c.MITM.Domains...)
 	out = append(out, c.Custom.MITMDomains...)
 	return dedupePatterns(out)
+}
+
+// NormalizePattern 规范化用户输入的一个域名，供界面「添加自定义站点」使用。
+//
+// 比配置文件宽松一点：允许直接粘贴浏览器地址（https://example.com/path），
+// 自动去掉协议、路径、查询串与端口。从地址栏复制是最自然的操作，让用户自己
+// 手工删掉这些部分只会带来「为什么加不进去」的困惑；而存进配置的仍然是干净的
+// 主机名，后续匹配逻辑不必再考虑这些形态。
+func NormalizePattern(raw string) (string, error) {
+	p := strings.TrimSpace(raw)
+	if p == "" {
+		return "", fmt.Errorf("请输入域名，例如 my.site.com")
+	}
+	if i := strings.Index(p, "://"); i >= 0 {
+		p = p[i+3:]
+	}
+	if i := strings.IndexAny(p, "/?#"); i >= 0 {
+		p = p[:i]
+	}
+	// 带端口的写法（example.com:8443）只保留主机名：代理按域名分流，端口不参与匹配。
+	if host, _, err := net.SplitHostPort(p); err == nil {
+		p = host
+	}
+	p = strings.TrimSuffix(p, ".")
+	out, err := normalizePatterns("自定义站点", []string{p})
+	if err != nil {
+		return "", err
+	}
+	if len(out) == 0 {
+		return "", fmt.Errorf("请输入域名，例如 my.site.com")
+	}
+	return out[0], nil
 }
 
 // normalizePatterns 去空白、转小写、去重，并拒绝明显不是域名的写法。

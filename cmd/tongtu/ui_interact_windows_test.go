@@ -14,6 +14,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"tongtu/internal/config"
 	"tongtu/internal/selfcheck"
 )
 
@@ -46,6 +47,19 @@ type fakeActions struct {
 	pauseCalls   []string      // 依次记录 "stop" / "resume"
 	pauseErr     error
 	proxyAddr    string
+
+	// 自定义站点：站点增删与反代切换也都跑在后台 goroutine 上。
+	siteGate    chan struct{} // 非 nil 时站点操作会等它被关闭
+	sites       []uiSite
+	siteAdds    []string
+	siteRemoves []string
+	siteMITMs   []fakeSiteMITM
+	siteErr     error
+}
+
+type fakeSiteMITM struct {
+	Pattern string
+	On      bool
 }
 
 type fakeToggle struct {
@@ -117,7 +131,78 @@ func (f *fakeActions) actions() windowActions {
 			defer f.mu.Unlock()
 			return f.proxyAddr
 		},
+		Sites: func() []uiSite {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			return append([]uiSite(nil), f.sites...)
+		},
+		AddSite: func(raw string) (string, error) {
+			f.mu.Lock()
+			f.siteAdds = append(f.siteAdds, raw)
+			gate, err := f.siteGate, f.siteErr
+			f.mu.Unlock()
+			if gate != nil {
+				<-gate
+			}
+			if err != nil {
+				return "", err
+			}
+			// 用与 app 层相同的规范化，让界面测试看到真实行为（粘贴完整网址也能加）。
+			p, err := config.NormalizePattern(raw)
+			if err != nil {
+				return "", err
+			}
+			f.mu.Lock()
+			f.sites = append(f.sites, uiSite{Pattern: p})
+			f.mu.Unlock()
+			return p, nil
+		},
+		RemoveSite: func(pattern string) error {
+			f.mu.Lock()
+			f.siteRemoves = append(f.siteRemoves, pattern)
+			gate, err := f.siteGate, f.siteErr
+			if err == nil {
+				kept := f.sites[:0]
+				for _, s := range f.sites {
+					if !strings.EqualFold(s.Pattern, pattern) {
+						kept = append(kept, s)
+					}
+				}
+				f.sites = kept
+			}
+			f.mu.Unlock()
+			if gate != nil {
+				<-gate
+			}
+			return err
+		},
+		SetSiteMITM: func(pattern string, on bool) error {
+			f.mu.Lock()
+			f.siteMITMs = append(f.siteMITMs, fakeSiteMITM{Pattern: pattern, On: on})
+			gate, err := f.siteGate, f.siteErr
+			if err == nil {
+				for i := range f.sites {
+					if strings.EqualFold(f.sites[i].Pattern, pattern) {
+						f.sites[i].MITM = on
+					}
+				}
+			}
+			f.mu.Unlock()
+			if gate != nil {
+				<-gate
+			}
+			return err
+		},
 	}
+}
+
+// siteCalls 返回站点动作的记录（加锁拷贝）。
+func (f *fakeActions) siteCalls() (adds, removes []string, mitms []fakeSiteMITM) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.siteAdds...),
+		append([]string(nil), f.siteRemoves...),
+		append([]fakeSiteMITM(nil), f.siteMITMs...)
 }
 
 // recordPause 记录一次暂停 / 恢复，并在需要时卡住（模拟耗时的接管 / 还原）。
@@ -188,6 +273,16 @@ func useFakeActions(t *testing.T, f *fakeActions) {
 			defer lw.mu.Unlock()
 			return !lw.selfTesting
 		})
+		// 站点增删同样在后台跑；面板状态是全局的，必须还原，否则会影响后面的用例。
+		waitFor(t, "站点操作收尾", func() bool {
+			lw.mu.Lock()
+			defer lw.mu.Unlock()
+			return !lw.sitesBusy
+		})
+		lw.mu.Lock()
+		lw.sitesOpen, lw.sites = false, nil
+		lw.mu.Unlock()
+		lw.layout()
 	})
 }
 
@@ -928,8 +1023,249 @@ func TestCopyProxyAddrWithoutAddress(t *testing.T) {
 	}
 }
 
-// TestContextMenuTargetsLogEdit 右键菜单只应在日志控件上弹出。
-//
+// —— 自定义站点面板 ——
+
+// TestSitesPanelToggle 「站点」按钮打开 / 关闭卡片区的面板，打开时列出已有站点。
+func TestSitesPanelToggle(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, false, false)
+	f := &fakeActions{sites: []uiSite{{Pattern: "huggingface.co", MITM: true}}}
+	useFakeActions(t, f)
+	lw.mu.Lock()
+	lw.sitesOpen, lw.sites = false, nil
+	lw.mu.Unlock()
+
+	clickRegion(t, uiIDSites)
+	waitFor(t, "面板打开并拉到列表", func() bool {
+		p := lw.panelSnapshot()
+		return p.Open && len(p.Sites) == 1
+	})
+	if got := lw.panelSnapshot().Sites; len(got) != 1 || got[0].Pattern != "huggingface.co" || !got[0].MITM {
+		t.Fatalf("面板应列出已有站点，实际 %+v", got)
+	}
+	// 打开后：输入框有几何、日志控件让位
+	if _, ok := lw.regionAtID(uiIDSiteAdd); !ok {
+		t.Error("面板里应有「添加」按钮")
+	}
+	if _, ok := lw.regionAtID(uiSiteDelID("huggingface.co")); !ok {
+		t.Error("面板里应有该站点的「删除」")
+	}
+	if _, ok := lw.regionAtID(uiSiteMITMID("huggingface.co")); !ok {
+		t.Error("面板里应有该站点的「反代」")
+	}
+
+	// 再点一次：回到日志
+	clickRegion(t, uiIDSites)
+	waitFor(t, "面板关闭", func() bool { return !lw.panelSnapshot().Open })
+	if _, ok := lw.regionAtID(uiIDSiteAdd); ok {
+		t.Error("关闭后不该还有「添加」按钮")
+	}
+}
+
+// TestSitesAddFromInput 输入域名 → 点「添加」→ 后台添加 → 面板刷新且输入框清空。
+func TestSitesAddFromInput(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, false, false)
+	f := &fakeActions{}
+	useFakeActions(t, f)
+	lw.mu.Lock()
+	lw.sitesOpen, lw.sites = false, nil
+	lw.mu.Unlock()
+
+	clickRegion(t, uiIDSites)
+	waitFor(t, "面板打开", func() bool { return lw.panelSnapshot().Open })
+	if lw.siteEditHandle() == 0 {
+		t.Skip("站点输入框未创建")
+	}
+	lw.setSiteInputText("https://My.Site.com/path")
+
+	clickRegion(t, uiIDSiteAdd)
+	waitFor(t, "发起添加", func() bool {
+		adds, _, _ := f.siteCalls()
+		return len(adds) == 1
+	})
+	if adds, _, _ := f.siteCalls(); adds[0] != "https://My.Site.com/path" {
+		t.Errorf("应把原始输入交给 app 层规范化，实际 %q", adds[0])
+	}
+	waitToast(t, "添加成功的反馈", "已添加 my.site.com")
+	waitFor(t, "面板出现新行", func() bool {
+		sites := lw.panelSnapshot().Sites
+		return len(sites) == 1 && sites[0].Pattern == "my.site.com"
+	})
+	if _, ok := lw.regionAtID(uiSiteDelID("my.site.com")); !ok {
+		t.Error("新加的站点应出现在面板里")
+	}
+	waitFor(t, "输入框被清空", func() bool { return lw.siteInputText() == "" })
+}
+
+// TestSitesAddEmptyInputWarns 输入框为空时不派发添加，只给一句提示。
+func TestSitesAddEmptyInputWarns(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, false, false)
+	f := &fakeActions{}
+	useFakeActions(t, f)
+	lw.mu.Lock()
+	lw.sitesOpen, lw.sites = true, nil
+	lw.mu.Unlock()
+	lw.setSiteInputText("")
+
+	clickRegion(t, uiIDSiteAdd)
+	if adds, _, _ := f.siteCalls(); len(adds) != 0 {
+		t.Errorf("空输入不该发起添加，实际 %v", adds)
+	}
+	if got := toastText(); !strings.Contains(got, "请先输入域名") {
+		t.Errorf("应提示先输入域名，实际 %q", got)
+	}
+}
+
+// TestSitesDuplicateAddWarns 已经在列表里的域名再添加：直接提示，不派发。
+func TestSitesDuplicateAddWarns(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, false, false)
+	f := &fakeActions{sites: []uiSite{{Pattern: "my.site.com"}}}
+	useFakeActions(t, f)
+	lw.mu.Lock()
+	lw.sitesOpen, lw.sites = true, []uiSite{{Pattern: "my.site.com"}}
+	lw.mu.Unlock()
+	lw.setSiteInputText("MY.SITE.COM")
+
+	clickRegion(t, uiIDSiteAdd)
+	if adds, _, _ := f.siteCalls(); len(adds) != 0 {
+		t.Errorf("重复添加不该派发，实际 %v", adds)
+	}
+	if got := toastText(); !strings.Contains(got, "已经在自定义站点里") {
+		t.Errorf("应提示已存在，实际 %q", got)
+	}
+}
+
+// TestSitesRemoveRow 行内「删除」：后台删除并刷新面板。
+func TestSitesRemoveRow(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, false, false)
+	f := &fakeActions{sites: []uiSite{{Pattern: "my.site.com"}}}
+	useFakeActions(t, f)
+	lw.mu.Lock()
+	lw.sitesOpen, lw.sites = true, []uiSite{{Pattern: "my.site.com"}}
+	lw.mu.Unlock()
+	lw.layout()
+
+	clickRegion(t, uiSiteDelID("my.site.com"))
+	waitFor(t, "发起删除", func() bool {
+		_, removes, _ := f.siteCalls()
+		return len(removes) == 1
+	})
+	if _, removes, _ := f.siteCalls(); removes[0] != "my.site.com" {
+		t.Errorf("应删除该域名，实际 %q", removes[0])
+	}
+	waitFor(t, "面板里不再有该行", func() bool { return len(lw.panelSnapshot().Sites) == 0 })
+	waitToast(t, "删除后的反馈", "已删除 my.site.com")
+}
+
+// TestSitesToggleMITM 行内「反代」胶囊：点一下把当前状态取反后派发。
+func TestSitesToggleMITM(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, false, false)
+	f := &fakeActions{sites: []uiSite{{Pattern: "my.site.com", MITM: false}}}
+	useFakeActions(t, f)
+	lw.mu.Lock()
+	lw.sitesOpen, lw.sites = true, []uiSite{{Pattern: "my.site.com", MITM: false}}
+	lw.mu.Unlock()
+	lw.layout()
+
+	clickRegion(t, uiSiteMITMID("my.site.com"))
+	waitFor(t, "发起反代切换", func() bool {
+		_, _, mitms := f.siteCalls()
+		return len(mitms) == 1
+	})
+	if _, _, mitms := f.siteCalls(); mitms[0].Pattern != "my.site.com" || !mitms[0].On {
+		t.Fatalf("关着的反代应被打开，实际 %+v", mitms[0])
+	}
+	waitFor(t, "胶囊变成开", func() bool {
+		r, ok := lw.regionAtID(uiSiteMITMID("my.site.com"))
+		return ok && r.On
+	})
+
+	// 再点一次：开着的应被关掉
+	clickRegion(t, uiSiteMITMID("my.site.com"))
+	waitFor(t, "发起第二次切换", func() bool {
+		_, _, mitms := f.siteCalls()
+		return len(mitms) == 2
+	})
+	if _, _, mitms := f.siteCalls(); mitms[1].On {
+		t.Errorf("开着的反代应被关闭，实际 %+v", mitms[1])
+	}
+}
+
+// TestSitesPanelIgnoresRepeatClicks 站点操作进行中重复点击只提示，不再派发。
+func TestSitesPanelIgnoresRepeatClicks(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, false, false)
+	f := &fakeActions{sites: []uiSite{{Pattern: "my.site.com"}}, siteGate: make(chan struct{})}
+	useFakeActions(t, f)
+	lw.mu.Lock()
+	lw.sitesOpen, lw.sites = true, []uiSite{{Pattern: "my.site.com"}}
+	lw.mu.Unlock()
+	lw.layout()
+	lw.setSiteInputText("other.site.com")
+
+	clickRegion(t, uiIDSiteAdd)
+	waitFor(t, "发起添加", func() bool {
+		adds, _, _ := f.siteCalls()
+		return len(adds) == 1
+	})
+	clickRegion(t, uiIDSiteAdd)
+	if got := toastText(); !strings.Contains(got, "请稍候") {
+		t.Errorf("进行中重复点击应提示稍候，实际 %q", got)
+	}
+	if adds, _, _ := f.siteCalls(); len(adds) != 1 {
+		t.Errorf("进行中不该再次派发，实际 %d 次", len(adds))
+	}
+
+	close(f.siteGate)
+	waitFor(t, "站点操作收尾", func() bool {
+		lw.mu.Lock()
+		defer lw.mu.Unlock()
+		return !lw.sitesBusy
+	})
+}
+
+// TestSitesFailureReported 添加失败要把原因说出来，并允许重试。
+func TestSitesFailureReported(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, false, false)
+	f := &fakeActions{siteErr: errors.New("不是合法的域名")}
+	useFakeActions(t, f)
+	lw.mu.Lock()
+	lw.sitesOpen, lw.sites = true, nil
+	lw.mu.Unlock()
+	lw.setSiteInputText("bad host")
+
+	clickRegion(t, uiIDSiteAdd)
+	waitFor(t, "失败反馈", func() bool { return strings.Contains(toastText(), "不是合法的域名") })
+	waitFor(t, "允许重试", func() bool {
+		lw.mu.Lock()
+		defer lw.mu.Unlock()
+		return !lw.sitesBusy
+	})
+}
+
+// TestContextMenuTargetsLogEdit 右键菜单只应在日志控件上弹出。//
 // 回归保护：WM_CONTEXTMENU 的子窗口句柄在 wParam、坐标在 lParam，
 // 早先误把 lParam 当子窗口句柄比较，菜单永远弹不出来。
 func TestContextMenuTargetsLogEdit(t *testing.T) {

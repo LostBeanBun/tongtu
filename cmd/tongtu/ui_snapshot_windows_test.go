@@ -23,7 +23,7 @@ func TestUILayoutSnapshot(t *testing.T) {
 	}
 
 	st := layoutStatus()
-	l := computeUILayout(855, 481, 96, st, fixedMeasure, fixedMeasure)
+	l := computeUILayout(855, 481, 96, st, uiPanelState{}, fixedMeasure, fixedMeasure)
 	recordUILayout(l, 855, 481, st)
 
 	snap, ok := uiLayoutSnapshot().(uiSnapshot)
@@ -62,7 +62,7 @@ func TestUILayoutSnapshot(t *testing.T) {
 	// 暂停后重新布局：同一个 ID 的标签必须变成「恢复」，其余区域不得为负宽度。
 	st.Paused = true
 	st.Items = nil
-	l2 := computeUILayout(855, 481, 96, st, fixedMeasure, fixedMeasure)
+	l2 := computeUILayout(855, 481, 96, st, uiPanelState{}, fixedMeasure, fixedMeasure)
 	recordUILayout(l2, 855, 481, st)
 	snap2 := uiLayoutSnapshot().(uiSnapshot)
 	if !snap2.Paused {
@@ -79,5 +79,39 @@ func TestUILayoutSnapshot(t *testing.T) {
 		if r.Right < r.Left || r.Bottom < r.Top {
 			t.Errorf("区域矩形为负: %+v", r)
 		}
+	}
+}
+
+// TestUILayoutSnapshotSitesPanel 面板打开时快照要标出来（日志控件已隐藏），并带上站点列表：
+// 真机脚本据此判断当前该点哪一套控件，而不是照着旧快照点隐藏的日志区。
+func TestUILayoutSnapshotSitesPanel(t *testing.T) {
+	uiSnapMu.Lock()
+	old := uiSnap
+	uiSnapMu.Unlock()
+	t.Cleanup(func() {
+		uiSnapMu.Lock()
+		uiSnap = old
+		uiSnapMu.Unlock()
+	})
+
+	st := layoutStatus()
+	panel := uiPanelState{Open: true, Sites: []uiSite{{Pattern: "a.com", MITM: true}, {Pattern: "b.com"}}}
+	l := computeUILayout(855, 481, 96, st, panel, fixedMeasure, fixedMeasure)
+	recordUILayout(l, 855, 481, st)
+
+	snap := uiLayoutSnapshot().(uiSnapshot)
+	if !snap.SitesOpen {
+		t.Error("面板打开时快照应标记 sites_open")
+	}
+	if len(snap.Sites) != 2 || snap.Sites[0] != "a.com" || snap.Sites[1] != "b.com" {
+		t.Errorf("快照里的站点列表不对：%v", snap.Sites)
+	}
+
+	// 回到日志模式：标记消失，站点列表清空
+	l2 := computeUILayout(855, 481, 96, st, uiPanelState{}, fixedMeasure, fixedMeasure)
+	recordUILayout(l2, 855, 481, st)
+	snap2 := uiLayoutSnapshot().(uiSnapshot)
+	if snap2.SitesOpen || len(snap2.Sites) != 0 {
+		t.Errorf("日志模式下不该标记面板：%+v", snap2)
 	}
 }

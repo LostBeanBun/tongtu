@@ -18,7 +18,6 @@ import (
 )
 
 var (
-	procPostMessageW  = user32.NewProc("PostMessageW")
 	procIsWindow      = user32.NewProc("IsWindow")
 	procGetWindowRect = user32.NewProc("GetWindowRect")
 
@@ -115,7 +114,7 @@ func headerLayoutFor(t *testing.T, w, h int32) uiLayout {
 	lw.mu.Lock()
 	dpi, st := lw.dpi, lw.status
 	lw.mu.Unlock()
-	return computeUILayout(w, h, dpi, st, lw.measureText, lw.measureTitle)
+	return computeUILayout(w, h, dpi, st, uiPanelState{}, lw.measureText, lw.measureTitle)
 }
 
 // TestStatusBarPaints 状态条是自绘的：配色分工必须真的落到像素上。

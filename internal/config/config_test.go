@@ -346,3 +346,34 @@ func TestCustomPatternsRejected(t *testing.T) {
 		}
 	}
 }
+
+// TestNormalizePattern 界面「添加站点」的输入处理：粘贴完整网址也能用，
+// 存进去的仍然是干净的主机名；真正不合法的写法照样报错。
+func TestNormalizePattern(t *testing.T) {
+	ok := map[string]string{
+		"my.site.com":                      "my.site.com",
+		"  My.Site.COM  ":                  "my.site.com",
+		"https://my.site.com":              "my.site.com",
+		"https://my.site.com/path?q=1#top": "my.site.com",
+		"http://my.site.com:8080/a/b":      "my.site.com",
+		"my.site.com:8443":                 "my.site.com",
+		"my.site.com.":                     "my.site.com",
+		"*.Example.com":                    "*.example.com",
+	}
+	for in, want := range ok {
+		got, err := NormalizePattern(in)
+		if err != nil {
+			t.Errorf("%q：不该报错，实际 %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("%q：应规范化为 %q，实际 %q", in, want, got)
+		}
+	}
+
+	for _, in := range []string{"", "   ", "https://", "my.*.site.com", "a b.com", "example.com:80:90"} {
+		if got, err := NormalizePattern(in); err == nil {
+			t.Errorf("%q：应报错，实际得到 %q", in, got)
+		}
+	}
+}

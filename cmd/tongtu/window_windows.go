@@ -65,6 +65,9 @@ const (
 	wmVScroll         = 0x0115
 	sbBottom          = 7 // WM_VSCROLL 的 SB_BOTTOM
 
+	// WM_APP 段：只在本进程内使用的消息（后台线程 → 窗口线程）。
+	wmAppSitesChanged = 0x8000 + 1 // 自定义站点集合已变：刷新面板
+
 	emGetSel              = 0x00B0
 	emSetSel              = 0x00B1
 	emGetLineCount        = 0x00BA
@@ -114,8 +117,10 @@ const (
 
 	// DrawText 与背景模式
 	dtLeft        = 0x0000
+	dtCenter      = 0x0001
 	dtRight       = 0x0002
 	dtVCenter     = 0x0004
+	dtWordBreak   = 0x0010
 	dtSingleLine  = 0x0020
 	dtNoPrefix    = 0x0800
 	dtEndEllipsis = 0x8000
@@ -231,8 +236,11 @@ const (
 	uiDotDIP       = 4   // 胶囊里状态点的半径
 	uiFilterDIP    = 170 // 过滤输入框的宽度上限
 	uiFilterMinDIP = 80  // 过滤输入框窄于这个宽度就不显示（窗口太窄时）
-	uiMinWDIP      = 620 // 窗口最小宽度
-	uiMinHDIP      = 320 // 窗口最小高度
+	// 站点面板：输入框窄于这个宽度时优先保住输入框宽度（「添加」按钮仍然保留）。
+	uiSiteInputMinDIP = 160
+	uiSiteHintDIP     = 18  // 面板底部说明行的高度
+	uiMinWDIP         = 620 // 窗口最小宽度
+	uiMinHDIP         = 320 // 窗口最小高度
 
 	uiPadDIP         = 12 // 客户区四周留白
 	uiCardPadDIP     = 8  // 日志卡片的内边距（内容相对卡片内缩的距离）
@@ -264,6 +272,7 @@ var (
 	procTranslateMessage              = user32.NewProc("TranslateMessage")
 	procDispatchMessageW              = user32.NewProc("DispatchMessageW")
 	procSendMessageW                  = user32.NewProc("SendMessageW")
+	procPostMessageW                  = user32.NewProc("PostMessageW")
 	procIsWindowVisible               = user32.NewProc("IsWindowVisible")
 	procGetClientRect                 = user32.NewProc("GetClientRect")
 	procMoveWindow                    = user32.NewProc("MoveWindow")
@@ -272,6 +281,7 @@ var (
 	procLoadCursorW                   = user32.NewProc("LoadCursorW")
 	procSetWindowTextW                = user32.NewProc("SetWindowTextW")
 	procSetForegroundWindow           = user32.NewProc("SetForegroundWindow")
+	procSetFocus                      = user32.NewProc("SetFocus")
 	procSetProcessDpiAwarenessContext = user32.NewProc("SetProcessDpiAwarenessContext")
 	procSetProcessDPIAware            = user32.NewProc("SetProcessDPIAware")
 	procGetDpiForWindow               = user32.NewProc("GetDpiForWindow")
@@ -647,6 +657,7 @@ type logWindow struct {
 	hwnd      windows.Handle
 	edit      windows.Handle // 日志控件
 	filter    windows.Handle // 过滤输入框
+	siteEdit  windows.Handle // 自定义站点面板的域名输入框
 	tooltip   windows.Handle // 悬浮提示
 	icon      windows.Handle // 标题前的小图标
 	uiLayout  uiLayout       // 当前几何（绘制与命中共用同一份）
@@ -655,6 +666,12 @@ type logWindow struct {
 	layoutKey string
 	onlyWarn  bool    // 「只看警告」是否开启
 	toastMsg  uiToast // 当前轻量反馈（零值 = 没有）
+	// sitesOpen 表示卡片区正显示「自定义站点」面板（false = 日志）。
+	// sites 是面板里的行；两者一起参与几何计算（见 panelSnapshot）。
+	sitesOpen bool
+	sites     []uiSite
+	// sitesBusy 表示站点增删正在后台执行（改配置 + 重建规则可能要拉一次 hosts）。
+	sitesBusy bool
 	// selfTesting 表示自检正在后台跑：按钮保持选中态，重复点击只提示「正在进行」。
 	selfTesting bool
 	// pendingMode 是正在后台切换的开关 id（空 = 没有）。
@@ -1104,9 +1121,25 @@ func (w *logWindow) create() (windows.Handle, windows.Handle, error) {
 		procSendMessageW.Call(uintptr(filter), emSetCueBanner, ecbTrue, uintptr(unsafe.Pointer(cue)))
 	}
 
+	// 站点面板的域名输入框：与过滤框同一种单行 EDIT，只是只在面板打开时显示。
+	siteEdit, _, callErr := procCreateWindowExW.Call(
+		0,
+		uintptr(unsafe.Pointer(plainEditClass)),
+		0,
+		wsChild|esLeft|esAutoHScroll,
+		0, 0, 10, 10,
+		hwnd, 0, hInst, 0,
+	)
+	if siteEdit == 0 {
+		return 0, 0, fmt.Errorf("创建站点输入框失败: %v", callErr)
+	}
+	if cue := utf16Ptr("输入域名，例如 huggingface.co"); cue != nil {
+		procSendMessageW.Call(uintptr(siteEdit), emSetCueBanner, ecbTrue, uintptr(unsafe.Pointer(cue)))
+	}
+
 	w.mu.Lock()
 	w.theme, w.themeDarkSet, w.themeLightSet, w.dpi = theme, darkSet, lightSet, dpi
-	w.filter, w.icon = windows.Handle(filter), smallIcon
+	w.filter, w.siteEdit, w.icon = windows.Handle(filter), windows.Handle(siteEdit), smallIcon
 	w.mu.Unlock()
 
 	// 常规窗口样式：只把标题栏的明暗交给系统（跟随系统深浅色设置）。
@@ -1255,11 +1288,28 @@ func createUIFont(pt, weight int32, dpi uint32) uintptr {
 // ui_layout_windows.go），这里只负责把过滤框与日志控件挪到算好的位置。
 func (w *logWindow) layout() {
 	hwnd := w.handle()
-	edit, filter := w.editHandle(), w.filterHandle()
+	edit, filter, siteEdit := w.editHandle(), w.filterHandle(), w.siteEditHandle()
 	if hwnd == 0 || edit == 0 {
 		return
 	}
 	l := w.ensureLayout()
+	if w.panelSnapshot().Open {
+		// 站点面板：日志与过滤框让位，输入框按几何摆好。
+		procShowWindow.Call(uintptr(edit), swHide)
+		if filter != 0 {
+			procShowWindow.Call(uintptr(filter), swHide)
+		}
+		if siteEdit != 0 && l.SiteInput.Right > l.SiteInput.Left {
+			moveWindow(siteEdit, l.SiteInput)
+			procShowWindow.Call(uintptr(siteEdit), swShow)
+		} else if siteEdit != 0 {
+			procShowWindow.Call(uintptr(siteEdit), swHide)
+		}
+		return
+	}
+	if siteEdit != 0 {
+		procShowWindow.Call(uintptr(siteEdit), swHide)
+	}
 	if l.Edit.Right <= l.Edit.Left || l.Edit.Bottom <= l.Edit.Top {
 		return
 	}
@@ -1267,6 +1317,7 @@ func (w *logWindow) layout() {
 	// 因此先记下用户的阅读位置，缩放后再补回来。
 	atBottom, first := editAtBottom(edit), editFirstVisibleLine(edit)
 	moveWindow(edit, l.Edit)
+	procShowWindow.Call(uintptr(edit), swShow)
 	if filter != 0 {
 		if l.Filter.Right > l.Filter.Left {
 			moveWindow(filter, l.Filter)
@@ -1276,6 +1327,20 @@ func (w *logWindow) layout() {
 		}
 	}
 	preserveEditView(edit, atBottom, first)
+}
+
+// siteEditHandle 返回站点面板的输入框句柄。
+func (w *logWindow) siteEditHandle() windows.Handle {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.siteEdit
+}
+
+// panelSnapshot 取站点面板的当前状态（打开与否 + 列表）。
+func (w *logWindow) panelSnapshot() uiPanelState {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return uiPanelState{Open: w.sitesOpen, Sites: append([]uiSite(nil), w.sites...)}
 }
 
 // ensureLayout 返回当前几何；客户区尺寸、DPI 或状态项一变就重算。
@@ -1294,13 +1359,15 @@ func (w *logWindow) ensureLayout() uiLayout {
 	// 几何依赖：客户区尺寸 + DPI + 状态项的标签 + 标题与状态词（它们的宽度决定第一行怎么分）。
 	// 任何一项变了就重算——否则会拿旧几何画新内容（例如标题被当成空串而不画）。
 	st := w.statusSnapshot()
+	panel := w.panelSnapshot()
 	key := strconv.FormatUint(uint64(dpi), 10) + "|" + st.Title + "|" + st.State + "|" +
 		itemFingerprint(modeItems(st.Items)) + "|" + strconv.Itoa(st.TodoN) + "|" +
-		strconv.FormatBool(st.Paused) // 暂停 / 恢复的标签不同，几何（按钮宽度）随之变
+		strconv.FormatBool(st.Paused) + // 暂停 / 恢复的标签不同，几何（按钮宽度）随之变
+		"|" + panelFingerprint(panel) // 站点面板：打开与否、有哪些行都影响几何
 	if okW == r.Right && okH == r.Bottom && okKey == key && cur.Regions != nil {
 		return cur
 	}
-	l := computeUILayout(r.Right, r.Bottom, dpi, st, w.measureText, w.measureTitle)
+	l := computeUILayout(r.Right, r.Bottom, dpi, st, panel, w.measureText, w.measureTitle)
 	w.mu.Lock()
 	w.uiLayout, w.layoutW, w.layoutH, w.layoutKey = l, r.Right, r.Bottom, key
 	w.mu.Unlock()
@@ -1317,6 +1384,27 @@ func itemFingerprint(items []windowStatusItem) string {
 		b.WriteByte(':')
 		b.WriteString(it.Label)
 		b.WriteByte('|')
+	}
+	return b.String()
+}
+
+// panelFingerprint 把站点面板状态拼成短串（打开与否 + 每一行的域名与反代开关）。
+// 行数变化会改变几何，因此必须进 ensureLayout 的缓存键。
+func panelFingerprint(p uiPanelState) string {
+	var b strings.Builder
+	if p.Open {
+		b.WriteByte('1')
+	} else {
+		b.WriteByte('0')
+	}
+	for _, s := range p.Sites {
+		b.WriteByte('|')
+		b.WriteString(s.Pattern)
+		if s.MITM {
+			b.WriteByte('1')
+		} else {
+			b.WriteByte('0')
+		}
 	}
 	return b.String()
 }
@@ -1466,6 +1554,7 @@ func (w *logWindow) paintClient(hdc uintptr, client rectT) {
 	l := w.ensureLayout()
 	w.paintCard(hdc, l)
 	w.paintHeader(hdc, l)
+	w.paintPanel(hdc, l)
 }
 
 // paintCard 画日志卡片本体：圆角底色 + 一圈 1 像素发丝线描边 + 工具条下的分隔线。
@@ -1499,10 +1588,12 @@ func (w *logWindow) paintCard(hdc uintptr, l uiLayout) {
 		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&sep)), theme.hairlineBrush)
 	}
 
-	// 过滤框的 1 像素描边：只靠底色差不够「像输入框」，加一圈发丝线把边界定出来
-	// （画在子控件矩形之外，因此不会被它自己遮住）
-	if f := l.Filter; f.Right > f.Left {
-		drawRectOutline(hdc, rectT{Left: f.Left - 1, Top: f.Top - 1, Right: f.Right + 1, Bottom: f.Bottom + 1}, theme.hairlineBrush)
+	// 输入框的 1 像素描边：只靠底色差不够「像输入框」，加一圈发丝线把边界定出来
+	// （画在子控件矩形之外，因此不会被它自己遮住）。日志模式与站点面板各有一个输入框。
+	for _, f := range []rectT{l.Filter, l.SiteInput} {
+		if f.Right > f.Left {
+			drawRectOutline(hdc, rectT{Left: f.Left - 1, Top: f.Top - 1, Right: f.Right + 1, Bottom: f.Bottom + 1}, theme.hairlineBrush)
+		}
 	}
 }
 
@@ -1532,7 +1623,7 @@ func (w *logWindow) paintHeader(hdc uintptr, l uiLayout) {
 	theme, dpi := w.theme, w.dpi
 	font, titleFont := w.font, w.fontTitle
 	status, icon := w.status, w.icon
-	onlyWarn, selfTesting := w.onlyWarn, w.selfTesting
+	onlyWarn, selfTesting, sitesOpen := w.onlyWarn, w.selfTesting, w.sitesOpen
 	w.mu.Unlock()
 	toast := w.activeToast() // 已过期/被清掉的提示按「没有」处理
 
@@ -1563,14 +1654,17 @@ func (w *logWindow) paintHeader(hdc uintptr, l uiLayout) {
 	// 自绘控件：开关胶囊 + 动作按钮 + 只看警告（绘制顺序即 Regions 顺序）
 	procSelectObject.Call(hdc, font)
 	for _, r := range l.Regions {
-		on := false
+		// 站点面板每行的「反代」胶囊自带状态（几何层已经算好）；其余胶囊看状态条。
+		on := r.On
 		switch {
-		case r.Kind == uiChip:
-			on = status.onOf(r.ID)
 		case r.ID == uiIDOnlyWarn:
 			on = onlyWarn
 		case r.ID == uiIDSelfTest:
 			on = selfTesting // 自检进行中：让按钮保持「按下」的样子
+		case r.ID == uiIDSites:
+			on = sitesOpen // 面板打开时按钮保持选中态（再点一次回到日志）
+		case r.Kind == uiChip && !strings.HasPrefix(r.ID, uiSiteMITMPrefix):
+			on = status.onOf(r.ID)
 		}
 		drawRegion(hdc, theme, font, r, dpi, on, w.hoverID == r.ID, w.pressID == r.ID)
 	}
@@ -1596,6 +1690,56 @@ func (w *logWindow) paintHeader(hdc uintptr, l uiLayout) {
 			procFillRect.Call(hdc, uintptr(unsafe.Pointer(&line)), theme.hairlineBrush)
 		}
 	}
+}
+
+// paintPanel 画「自定义站点」面板的文字部分：每行的域名、空状态提示与底部说明。
+//
+// 行内的「反代」胶囊与「删除」按钮属于自绘控件，已经在 paintHeader 的 Regions 循环里
+// 画过了；这里只画它们左边那一段域名文字，避免两处重复画同一个像素。
+func (w *logWindow) paintPanel(hdc uintptr, l uiLayout) {
+	panel := w.panelSnapshot()
+	if !panel.Open || hdc == 0 {
+		return
+	}
+	w.mu.Lock()
+	theme, font := w.theme, w.font
+	w.mu.Unlock()
+	if font == 0 {
+		return
+	}
+	procSetBkMode.Call(hdc, bkTransparent)
+	procSelectObject.Call(hdc, font)
+
+	if len(l.SiteRows) == 0 {
+		// 空列表不能只留一片空白：把「下一步做什么」直接写在卡片里。
+		procSetTextColor.Call(hdc, uintptr(theme.muted))
+		drawTextBlock(hdc, uiSitesEmptyHint, l.SiteList)
+	}
+	for _, row := range l.SiteRows {
+		procSetTextColor.Call(hdc, uintptr(theme.text))
+		cy := (row.Rect.Top + row.Rect.Bottom) / 2
+		drawTextLine(hdc, row.Pattern, row.Rect.Left, cy, row.TextRight-row.Rect.Left, dtLeft)
+	}
+
+	// 底部说明：写法边界（通配 / 粘贴网址）与「立即生效」。
+	procSetTextColor.Call(hdc, uintptr(theme.faint))
+	drawTextInRect(hdc, uiSitesHint, l.SiteHint, dtLeft)
+}
+
+// drawTextBlock 在一个矩形里画多行文字（垂直居中、按宽度换行）。
+// 与 drawTextInRect 的区别：允许换行，用于空状态提示这种两三行的说明。
+func drawTextBlock(hdc uintptr, text string, r rectT) {
+	if hdc == 0 || text == "" || r.Right <= r.Left || r.Bottom <= r.Top {
+		return
+	}
+	p := utf16Ptr(text)
+	if p == nil {
+		return
+	}
+	rc := r
+	procDrawTextW.Call(hdc, uintptr(unsafe.Pointer(p)), ^uintptr(0),
+		uintptr(unsafe.Pointer(&rc)),
+		dtCenter|dtVCenter|dtWordBreak|dtNoPrefix)
 }
 
 // drawTextInRect 在一个矩形里画一行文字（垂直居中、超长省略），返回实际绘制宽度。
@@ -1767,6 +1911,12 @@ func wndProc(hwnd windows.Handle, msg uint32, wparam uintptr, lparam unsafe.Poin
 			return 0
 		}
 
+	case wmAppSitesChanged:
+		// 后台线程完成了站点增删：控件与几何只能在窗口线程上动，这里统一刷新面板。
+		// wparam=1 表示这次要清空输入框（添加成功），删除 / 切换反代时保留用户输入。
+		lw.onSitesChanged(wparam != 0)
+		return 0
+
 	case wmTimer:
 		lw.onTimer(hwnd, wparam)
 		return 0
@@ -1813,15 +1963,15 @@ func wndProc(hwnd windows.Handle, msg uint32, wparam uintptr, lparam unsafe.Poin
 // 返回 0 会让子控件用空画刷绘制，因此不认识的控件交回默认处理。
 func (w *logWindow) ctlColor(hwnd windows.Handle, msg uint32, hdc, child uintptr) uintptr {
 	w.mu.Lock()
-	theme, edit, filter := w.theme, w.edit, w.filter
+	theme, edit, filter, siteEdit := w.theme, w.edit, w.filter, w.siteEdit
 	w.mu.Unlock()
 
-	if hdc == 0 || (child != uintptr(edit) && child != uintptr(filter)) {
+	if hdc == 0 || (child != uintptr(edit) && child != uintptr(filter) && child != uintptr(siteEdit)) {
 		ret, _, _ := procDefWindowProcW.Call(uintptr(hwnd), uintptr(msg), hdc, child)
 		return ret
 	}
-	if child == uintptr(filter) {
-		// 过滤框压在卡片底上：比卡片底再深/浅一档，看得出是输入框
+	if child == uintptr(filter) || child == uintptr(siteEdit) {
+		// 输入框压在卡片底上：比卡片底再深/浅一档，看得出是输入框
 		procSetTextColor.Call(hdc, uintptr(theme.text))
 		procSetBkColor.Call(hdc, uintptr(theme.input))
 		return theme.inputBrush

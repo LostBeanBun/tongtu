@@ -649,6 +649,35 @@ func wireWindowActions(a *app.App, cfg *config.Config, quit func(), restartEleva
 				}
 				return ""
 			},
+			Sites: func() []uiSite {
+				list := a.CustomSites()
+				out := make([]uiSite, 0, len(list))
+				for _, s := range list {
+					out = append(out, uiSite{Pattern: s.Pattern, MITM: s.MITM})
+				}
+				return out
+			},
+			AddSite: func(raw string) (string, error) {
+				p, err := a.AddCustomSite(raw)
+				if err == nil {
+					todos.refresh(a, cfg)
+				}
+				return p, err
+			},
+			RemoveSite: func(pattern string) error {
+				err := a.RemoveCustomSite(pattern)
+				if err == nil {
+					todos.refresh(a, cfg)
+				}
+				return err
+			},
+			SetSiteMITM: func(pattern string, on bool) error {
+				err := a.SetCustomSiteMITM(pattern, on)
+				if err == nil {
+					todos.refresh(a, cfg)
+				}
+				return err
+			},
 		}
 	})
 }

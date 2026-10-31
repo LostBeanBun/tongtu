@@ -89,7 +89,7 @@ func TestTodoButtonAppearsWithCount(t *testing.T) {
 func TestTodoButtonIsLeftmost(t *testing.T) {
 	st := layoutStatus()
 	st.TodoN = 1
-	l := computeUILayout(800, 500, 96, st, fixedMeasure, fixedMeasure)
+	l := computeUILayout(800, 500, 96, st, uiPanelState{}, fixedMeasure, fixedMeasure)
 	left, right := int32(1<<30), int32(-1)
 	var leftID, rightID string
 	for _, r := range l.Regions {

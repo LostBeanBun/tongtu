@@ -510,6 +510,10 @@ func (w *logWindow) invokeAction(hwnd windows.Handle, id string) {
 		// 没暂停：先问停多久。暂停从「一次点击」变成「选一个时长」，
 		// 因为 0.7.0 起它可以定时自动恢复，时长是这次操作的一部分。
 		w.showPauseMenu(hwnd, act)
+	case uiIDSites:
+		w.toggleSitesPanel(hwnd)
+	case uiIDSiteAdd:
+		w.addSiteFromInput()
 	case uiIDConfig:
 		if act.OpenConfig == nil {
 			w.toast("当前实例无法打开配置文件", styleWarn)
@@ -521,6 +525,20 @@ func (w *logWindow) invokeAction(hwnd windows.Handle, id string) {
 	case uiIDQuit:
 		if act.Quit != nil {
 			act.Quit()
+		}
+	default:
+		// 站点面板每一行的两个动作：删除 / 反代开关。
+		if pattern, ok := uiSiteFromID(id, uiSiteDelPrefix); ok {
+			w.removeSite(pattern)
+			return
+		}
+		if pattern, ok := uiSiteFromID(id, uiSiteMITMPrefix); ok {
+			on := true
+			if r, ok := w.regionAtID(id); ok {
+				on = !r.On // 点一下就是「切换」：当前是开就关，当前是关就开
+			}
+			w.toggleSiteMITM(pattern, on)
+			return
 		}
 	}
 }
@@ -720,6 +738,220 @@ func (w *logWindow) resumePause(act windowActions) {
 			return
 		}
 		w.toast("已恢复加速", styleOK)
+		if act.Refresh != nil {
+			act.Refresh()
+		}
+	}()
+}
+
+// —— 自定义站点面板 ——
+
+// siteInputText 读取站点输入框里的内容。
+func (w *logWindow) siteInputText() string {
+	w.mu.Lock()
+	edit := w.siteEdit
+	w.mu.Unlock()
+	return windowText(edit)
+}
+
+// setSiteInputText 写入站点输入框（只在窗口线程调用）。
+//
+// 不用 setEditText：那是给日志控件用的（会把换行转成 CRLF 并滚到末尾），
+// 单行输入框只需要最朴素的 WM_SETTEXT。
+func (w *logWindow) setSiteInputText(s string) {
+	w.mu.Lock()
+	edit := w.siteEdit
+	w.mu.Unlock()
+	if edit != 0 {
+		setWindowText(edit, s)
+	}
+}
+
+// windowText 读取一个子控件的文本（控件不存在时返回空串）。
+func windowText(h windows.Handle) string {
+	if h == 0 {
+		return ""
+	}
+	buf := make([]uint16, 512)
+	n, _, _ := procGetWindowTextW.Call(uintptr(h), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	if n == 0 {
+		return ""
+	}
+	return strings.TrimSpace(windows.UTF16ToString(buf[:n]))
+}
+
+// toggleSitesPanel 打开 / 关闭卡片区的自定义站点面板（第二行的「站点」按钮）。
+//
+// 打开时顺带把焦点给输入框：用户点这个按钮就是想加/删站点，让他再点一次输入框
+// 纯属多余。列表在后台读取——app 层可能正持锁重写 hosts（切开关 / 暂停之后），
+// 窗口线程不能为了几行文字去等它。
+func (w *logWindow) toggleSitesPanel(hwnd windows.Handle) {
+	act := currentWindowActions()
+	if act.Sites == nil || act.AddSite == nil {
+		w.toast("当前实例无法管理自定义站点", styleWarn)
+		return
+	}
+	open := !w.panelSnapshot().Open
+	w.mu.Lock()
+	w.sitesOpen = open
+	w.mu.Unlock()
+
+	w.layout()
+	if open {
+		if edit := w.siteEditHandle(); edit != 0 {
+			procSetFocus.Call(uintptr(edit))
+		}
+		go w.applySites(hwnd, act, false)
+	}
+	if hwnd != 0 {
+		procInvalidateRect.Call(uintptr(hwnd), 0, 0)
+	}
+}
+
+// applySites 在后台读取最新站点列表、写回窗口状态，再请窗口线程重排（绘制 / 命中）。
+//
+// 列表只能在这里读：它要走 app 的锁，可能正在写 hosts。窗口线程拿到数据后只做
+// 纯界面的事（onSitesChanged）。
+func (w *logWindow) applySites(hwnd windows.Handle, act windowActions, clearInput bool) {
+	var sites []uiSite
+	if act.Sites != nil {
+		sites = act.Sites()
+	}
+	w.mu.Lock()
+	w.sites = sites
+	w.mu.Unlock()
+	if hwnd == 0 {
+		return
+	}
+	var wp uintptr
+	if clearInput {
+		wp = 1
+	}
+	procPostMessageW.Call(uintptr(hwnd), wmAppSitesChanged, wp, 0)
+}
+
+// onSitesChanged 在窗口线程刷新面板（后台增删完成后由 wmAppSitesChanged 触发）。
+// 数据已经由 applySites 写好了，这里只动控件与几何。
+func (w *logWindow) onSitesChanged(clearInput bool) {
+	if clearInput {
+		w.setSiteInputText("")
+	}
+	w.layout()
+	if h := w.handle(); h != 0 {
+		procInvalidateRect.Call(uintptr(h), 0, 0)
+	}
+}
+
+// siteBusyBegin 尝试进入「正在处理」状态；已经在处理时返回 false。
+//
+// 增删要改配置并重建规则（hosts 开着时还会拉一次远程列表），可能耗时几秒；
+// 期间重复点击只提示，不排队——排队的第二个操作多半是误触。
+func (w *logWindow) siteBusyBegin() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.sitesBusy {
+		return false
+	}
+	w.sitesBusy = true
+	return true
+}
+
+func (w *logWindow) siteBusyEnd() {
+	w.mu.Lock()
+	w.sitesBusy = false
+	w.mu.Unlock()
+}
+
+// addSiteFromInput 把输入框里的域名加进自定义站点（「添加」按钮）。
+func (w *logWindow) addSiteFromInput() {
+	act := currentWindowActions()
+	if act.AddSite == nil {
+		w.toast("当前实例无法添加自定义站点", styleWarn)
+		return
+	}
+	raw := w.siteInputText()
+	if raw == "" {
+		w.toast("请先输入域名，例如 huggingface.co", styleWarn)
+		return
+	}
+	// 完全相同的域名直接提示，不派发（省一次写配置与一次无意义的告警日志）。
+	for _, s := range w.panelSnapshot().Sites {
+		if strings.EqualFold(s.Pattern, raw) {
+			w.toast(s.Pattern+" 已经在自定义站点里", styleMuted)
+			return
+		}
+	}
+	if !w.siteBusyBegin() {
+		w.toast("正在处理，请稍候…", styleMuted)
+		return
+	}
+	hwnd := w.handle()
+	w.toast("正在添加 "+raw+"…", styleMuted)
+	go func() {
+		defer w.siteBusyEnd()
+		pattern, err := act.AddSite(raw)
+		if err != nil {
+			w.report(uiIDSiteAdd, err)
+			return
+		}
+		w.toast("已添加 "+pattern+"，立即生效", styleOK)
+		w.applySites(hwnd, act, true)
+		if act.Refresh != nil {
+			act.Refresh()
+		}
+	}()
+}
+
+// removeSite 删除一个自定义站点（行内的「删除」按钮）。
+func (w *logWindow) removeSite(pattern string) {
+	act := currentWindowActions()
+	if act.RemoveSite == nil {
+		w.toast("当前实例无法删除自定义站点", styleWarn)
+		return
+	}
+	if !w.siteBusyBegin() {
+		w.toast("正在处理，请稍候…", styleMuted)
+		return
+	}
+	hwnd := w.handle()
+	go func() {
+		defer w.siteBusyEnd()
+		if err := act.RemoveSite(pattern); err != nil {
+			w.report(uiIDSites, err)
+			return
+		}
+		w.toast("已删除 "+pattern, styleOK)
+		w.applySites(hwnd, act, false)
+		if act.Refresh != nil {
+			act.Refresh()
+		}
+	}()
+}
+
+// toggleSiteMITM 切换某个站点是否走无 SNI 反代（行内的「反代」胶囊）。
+func (w *logWindow) toggleSiteMITM(pattern string, on bool) {
+	act := currentWindowActions()
+	if act.SetSiteMITM == nil {
+		w.toast("当前实例无法修改反代设置", styleWarn)
+		return
+	}
+	if !w.siteBusyBegin() {
+		w.toast("正在处理，请稍候…", styleMuted)
+		return
+	}
+	hwnd := w.handle()
+	go func() {
+		defer w.siteBusyEnd()
+		if err := act.SetSiteMITM(pattern, on); err != nil {
+			w.report(uiIDSites, err)
+			return
+		}
+		word := "已关闭反代"
+		if on {
+			word = "已打开反代"
+		}
+		w.toast(pattern+" "+word, styleOK)
+		w.applySites(hwnd, act, false)
 		if act.Refresh != nil {
 			act.Refresh()
 		}

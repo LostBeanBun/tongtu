@@ -33,6 +33,11 @@ type uiSnapshot struct {
 	ClientH int32              `json:"client_h"`
 	Paused  bool               `json:"paused"`
 	Regions []uiRegionSnapshot `json:"regions"`
+
+	// 自定义站点面板：打开时日志控件让位，脚本得知道当前在哪个视图，
+	// 否则会照着旧快照去点已经隐藏的日志控件。
+	SitesOpen bool     `json:"sites_open"`
+	Sites     []string `json:"sites,omitempty"`
 }
 
 var (
@@ -50,6 +55,13 @@ func recordUILayout(l uiLayout, clientW, clientH int32, st windowStatus) {
 		})
 	}
 	snap := &uiSnapshot{DPI: l.DPI, ClientW: clientW, ClientH: clientH, Paused: st.Paused, Regions: regions}
+	// 面板打开时才有站点输入框几何（日志模式下 SiteInput 是零值）。
+	if l.SiteInput.Right > l.SiteInput.Left {
+		snap.SitesOpen = true
+		for _, row := range l.SiteRows {
+			snap.Sites = append(snap.Sites, row.Pattern)
+		}
+	}
 	uiSnapMu.Lock()
 	uiSnap = snap
 	uiSnapMu.Unlock()

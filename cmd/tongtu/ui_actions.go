@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"tongtu/internal/selfcheck"
@@ -31,6 +32,12 @@ const (
 	uiIDCopyProxy = "copyproxy" // 复制本地代理地址（日志区右键菜单里的一项）
 	uiIDQuit      = "quit"      // 退出程序
 	uiIDOnlyWarn  = "onlywarn"  // 只看警告
+	uiIDSites     = "sites"     // 自定义站点面板（打开 / 回到日志）
+	uiIDSiteAdd   = "siteadd"   // 自定义站点面板里的「添加」
+
+	// 自定义站点面板里每一行的动作 id 前缀（后缀是域名本身）。
+	uiSiteDelPrefix  = "sitedel:"
+	uiSiteMITMPrefix = "sitemitm:"
 
 	// 待办项的动作 id（由「待办」菜单触发）。
 	uiIDTodoCert = "todocert" // 安装本地根证书
@@ -51,6 +58,32 @@ type uiService struct {
 type uiTodoItem struct {
 	ID    string
 	Label string
+}
+
+// uiSite 是「自定义站点」面板里的一行。
+//
+// MITM 表示这个域名是否同时走无 SNI 反代：面板里每一行都有一个可点的「反代」胶囊，
+// 因此打开反代不需要回配置文件改 custom.mitm_domains。
+type uiSite struct {
+	Pattern string
+	MITM    bool
+}
+
+// uiSiteDelID / uiSiteMITMID 把域名编进行号：面板每行两个动作（删除 / 反代开关）。
+// 用域名做后缀而不是行下标：列表顺序变了也不会点到别的站点上。
+func uiSiteDelID(pattern string) string  { return uiSiteDelPrefix + pattern }
+func uiSiteMITMID(pattern string) string { return uiSiteMITMPrefix + pattern }
+
+// uiSiteFromID 从行内动作 id 还原域名（不是这类 id 时 ok=false）。
+func uiSiteFromID(id, prefix string) (string, bool) {
+	if !strings.HasPrefix(id, prefix) {
+		return "", false
+	}
+	p := strings.TrimPrefix(id, prefix)
+	if p == "" {
+		return "", false
+	}
+	return p, true
 }
 
 // windowActions 是窗口界面需要的外部动作快照。
@@ -95,6 +128,15 @@ type windowActions struct {
 	Resume func() error
 	// ProxyAddr 返回本地代理地址（如 127.0.0.1:19180），用于「复制代理地址」。
 	ProxyAddr func() string
+
+	// —— 自定义站点（窗口「站点」面板）——
+	// Sites 返回当前全部自定义站点；AddSite 校验并添加一个（返回规范化后的域名）；
+	// RemoveSite 删除一个；SetSiteMITM 切换某个站点是否走无 SNI 反代。
+	// 全部由 app 层负责写回配置并让规则立即生效（见 internal/app/custom.go）。
+	Sites       func() []uiSite
+	AddSite     func(raw string) (string, error)
+	RemoveSite  func(pattern string) error
+	SetSiteMITM func(pattern string, on bool) error
 }
 
 var windowActionsHook func() windowActions
