@@ -67,6 +67,16 @@
   快照；绘制层覆盖禁用态、整行反馈、状态点不被行底色盖住、分隔线完整。
 - 本地通过：`gofmt`、`go vet ./...`、staticcheck、`go test ./... -count=1`、
   `GOOS=linux go build ./...`。`-race` 与 Linux 测试由 CI 覆盖（本机无 gcc / WSL）。
+- CI 实跑全绿（run `41165746676`，提交 `acc09ab`）：格式与静态检查、Windows 完整测试、
+  Linux `go test -race` 均通过。过程中修掉一个只在 Windows runner 暴露的测试竞态：
+  `TestHoverAndLeave` 用 `SendMessage` 合成 `WM_MOUSEMOVE` 不会移动真实光标，系统可能补一条
+  迟到的 `WM_MOUSELEAVE`，窗口也可能在 `show` 之后才收到最终尺寸调整，导致 `hoverID`
+  偶发为空；用例改为每次重新取几何、重复发送并等待命中，读写 `hoverID` 时加锁。
+- Release 实跑成功（run `41165749667`，tag `v0.7.0` → `acc09ab`）：质量门、构建、exe 版本自检、
+  打包与发布全部通过。`releases/latest` 已指向 v0.7.0；`tongtu-0.7.0-windows-x64.exe`
+  （10,096,640 字节）SHA-256 为
+  `cb560e203e21e90f42e7530cdaa7e4506b4473e67d71749a9277716f569cb6ca`，
+  与 Release 附件 `SHA256SUMS.txt` 及资产 digest 一致；下载后 `tongtu version` 输出 `tongtu 0.7.0`。
 
 ## [0.6.0] - 2026-10-26
 
