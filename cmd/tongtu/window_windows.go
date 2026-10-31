@@ -50,6 +50,9 @@ const (
 	wmEndSession      = 0x0016
 	wmPowerBroadcast  = 0x0218
 	wmSize            = 0x0005
+	wmSetFocus        = 0x0007
+	wmKillFocus       = 0x0008
+	wmKeyDown         = 0x0100
 	wmGetMinMaxInfo   = 0x0024
 	wmSetFont         = 0x0030
 	wmGetFont         = 0x0031
@@ -67,6 +70,9 @@ const (
 
 	// WM_APP 段：只在本进程内使用的消息（后台线程 → 窗口线程）。
 	wmAppSitesChanged = 0x8000 + 1 // 自定义站点集合已变：刷新面板
+	wmAppTab          = 0x8000 + 2 // 子控件把 Tab 交回窗口：wparam 低两位 = Shift / 来自站点输入框
+	wmAppEscape       = 0x8000 + 3 // 子控件把 Esc 交回窗口：焦点回到窗口
+	wmAppSiteEnter    = 0x8000 + 4 // 站点输入框里按回车 = 点「添加」
 
 	emGetSel              = 0x00B0
 	emSetSel              = 0x00B1
@@ -282,6 +288,8 @@ var (
 	procSetWindowTextW                = user32.NewProc("SetWindowTextW")
 	procSetForegroundWindow           = user32.NewProc("SetForegroundWindow")
 	procSetFocus                      = user32.NewProc("SetFocus")
+	procGetKeyState                   = user32.NewProc("GetKeyState")
+	procGetParent                     = user32.NewProc("GetParent")
 	procSetProcessDpiAwarenessContext = user32.NewProc("SetProcessDpiAwarenessContext")
 	procSetProcessDPIAware            = user32.NewProc("SetProcessDPIAware")
 	procGetDpiForWindow               = user32.NewProc("GetDpiForWindow")
@@ -449,7 +457,9 @@ type uiTheme struct {
 	inputBrush    uintptr // input
 	hairlineBrush uintptr // hairline（分隔线用 FillRect）
 	hairlinePen   uintptr // hairline（描边用 RoundRect）
+	textPen       uintptr // text（键盘焦点环用：中性高对比，不占用语义色）
 	nullPen       uintptr // 无描边（胶囊填充用）
+	nullBrush     uintptr // 无填充（焦点环描边用）
 }
 
 func rgb(r, g, b uint8) uint32 {
@@ -665,6 +675,7 @@ type logWindow struct {
 	layoutH   int32
 	layoutKey string
 	onlyWarn  bool    // 「只看警告」是否开启
+	emptyHint bool    // 日志控件里当前只有「暂无日志」提示（第一条真实日志来了要整体重画）
 	toastMsg  uiToast // 当前轻量反馈（零值 = 没有）
 	// sitesOpen 表示卡片区正显示「自定义站点」面板（false = 日志）。
 	// sites 是面板里的行；两者一起参与几何计算（见 panelSnapshot）。
@@ -690,13 +701,17 @@ type logWindow struct {
 	wantMax       bool
 	err           error
 
-	// 仅窗口线程访问：悬停/按下状态与整帧双缓冲用的 GDI 对象
+	// 仅窗口线程访问：悬停/按下/键盘焦点状态与整帧双缓冲用的 GDI 对象
 	hoverID string
 	pressID string
-	memDC   uintptr
-	memBmp  uintptr
-	memW    int32
-	memH    int32
+	// focusID 是持有键盘焦点的自绘控件（空 = 焦点不在自绘控件上，例如在输入框里）。
+	// keyFocus 表示窗口本身是否有键盘焦点：失焦时不画焦点环，但记住位置，回来时还在原处。
+	focusID  string
+	keyFocus bool
+	memDC    uintptr
+	memBmp   uintptr
+	memW     int32
+	memH     int32
 }
 
 // uiToast 是一条轻量反馈：显示在状态条第二行，几秒后自动消失。
@@ -770,7 +785,7 @@ func (w *logWindow) addLines(lines []logLine) {
 		copy(rest, w.lines[cut:])
 		w.lines = rest
 	}
-	edit, theme := w.edit, w.theme
+	edit, theme, emptyHint := w.edit, w.theme, w.emptyHint
 	w.mu.Unlock()
 
 	if edit == 0 {
@@ -781,8 +796,10 @@ func (w *logWindow) addLines(lines []logLine) {
 		w.scheduleFilter()
 		return
 	}
-	if cut > 0 {
-		w.renderAll() // 裁剪过：整体重画，样式才不会错位
+	if cut > 0 || emptyHint {
+		// 裁剪过（样式会错位）或当前显示的是「暂无日志」提示：都要整体重画。
+		// 后者不整体重画的话，提示行会留在第一条真实日志上面。
+		w.renderAll()
 		return
 	}
 	appendLines(edit, theme, lines)
@@ -798,9 +815,17 @@ func (w *logWindow) renderAll() {
 }
 
 // renderLines 用给定的行整体重画日志控件（过滤后的子集也走这里）。
+//
+// 没有任何行时补一行空状态提示：否则清空日志 / 刚打开窗口时日志区就是一块空白，
+// 用户分不清「没有日志」和「界面没画出来」。
 func (w *logWindow) renderLines(lines []logLine) {
+	empty := len(lines) == 0
+	if empty {
+		lines = []logLine{{Spans: []logSpan{{Style: styleMuted, Text: uiEmptyHint}}}}
+	}
 	w.mu.Lock()
 	edit, theme := w.edit, w.theme
+	w.emptyHint = empty
 	w.mu.Unlock()
 	if edit == 0 || theme.cardBrush == 0 {
 		return
@@ -1137,6 +1162,11 @@ func (w *logWindow) create() (windows.Handle, windows.Handle, error) {
 		procSendMessageW.Call(uintptr(siteEdit), emSetCueBanner, ecbTrue, uintptr(unsafe.Pointer(cue)))
 	}
 
+	// 键盘：让 Tab / Esc 能从真控件回到窗口的焦点顺序（见 editSubclassProc）
+	installEditSubclass(windows.Handle(edit), subclassLogEdit)
+	installEditSubclass(windows.Handle(filter), subclassFilter)
+	installEditSubclass(windows.Handle(siteEdit), subclassSiteInput)
+
 	w.mu.Lock()
 	w.theme, w.themeDarkSet, w.themeLightSet, w.dpi = theme, darkSet, lightSet, dpi
 	w.filter, w.siteEdit, w.icon = windows.Handle(filter), windows.Handle(siteEdit), smallIcon
@@ -1152,6 +1182,66 @@ func (w *logWindow) create() (windows.Handle, windows.Handle, error) {
 	w.createTooltip(windows.Handle(hwnd))
 
 	return windows.Handle(hwnd), windows.Handle(edit), nil
+}
+
+// —— 子控件的键盘接管 ——
+//
+// 日志区、过滤框、站点输入框都是真控件：焦点在它们身上时，Tab / Esc 默认不会回到
+// 父窗口，键盘用户会困在输入框里。这里用 SetWindowSubclass 把这三个键转成窗口消息
+// （wmAppTab / wmAppEscape / wmAppSiteEnter），父窗口再按自己的焦点顺序处理。
+// 拿不到 comctl32 的 SetWindowSubclass 时静默退化：鼠标操作与其余键盘行为不受影响。
+
+const (
+	subclassLogEdit   = 0 // 日志区：Tab 从「第一个 / 最后一个停靠点」继续
+	subclassFilter    = 1 // 过滤框
+	subclassSiteInput = 2 // 站点输入框
+)
+
+var (
+	comctl32              = windows.NewLazySystemDLL("comctl32.dll")
+	procSetWindowSubclass = comctl32.NewProc("SetWindowSubclass")
+	procDefSubclassProc   = comctl32.NewProc("DefSubclassProc")
+	subclassProcPtr       = syscall.NewCallback(editSubclassProc)
+
+	// subclassReady 表示至少有一个子控件成功装上了子类过程（测试据此决定是否跳过）。
+	subclassReady bool
+)
+
+// editSubclassProc 是子控件的窗口过程：只接管键盘，其余原样交回。
+func editSubclassProc(hwnd, msg, wparam, lparam, id, ref uintptr) uintptr {
+	if msg == wmKeyDown {
+		parent, _, _ := procGetParent.Call(hwnd)
+		switch wparam {
+		case vkTab:
+			// 低两位：1 = Shift+Tab，其余位放「从哪个控件来」（见 subclass* 常量）
+			flags := ref << 1
+			if keyShiftDown() {
+				flags |= 1
+			}
+			procSendMessageW.Call(parent, wmAppTab, flags, 0)
+			return 0
+		case vkEscape:
+			procSendMessageW.Call(parent, wmAppEscape, 0, 0)
+			return 0
+		case vkReturn:
+			if ref == subclassSiteInput {
+				procSendMessageW.Call(parent, wmAppSiteEnter, 0, 0)
+				return 0
+			}
+		}
+	}
+	ret, _, _ := procDefSubclassProc.Call(hwnd, msg, wparam, lparam)
+	return ret
+}
+
+// installEditSubclass 给子控件装子类过程（失败就算了：Tab 会退化成原来的行为）。
+func installEditSubclass(h windows.Handle, role uintptr) {
+	if h == 0 || procSetWindowSubclass.Find() != nil {
+		return
+	}
+	if r, _, _ := procSetWindowSubclass.Call(uintptr(h), subclassProcPtr, 1, role); r != 0 {
+		subclassReady = true
+	}
 }
 
 // applyEditTheme 让日志卡片的滚动条跟随深浅色（uxtheme 的两套现成类名）。
@@ -1184,8 +1274,10 @@ func buildBrushes(t uiTheme) uiTheme {
 	t.inputBrush = newSolidBrush(t.input)
 	t.hairlineBrush = newSolidBrush(t.hairline)
 	t.hairlinePen = newPen(t.hairline)
-	// NULL_PEN：胶囊/按钮只要填充不要描边（RoundRect 必须选入一支笔）
+	t.textPen = newPen(t.text)
+	// NULL_PEN / NULL_BRUSH：胶囊只要填充、焦点环只要描边（RoundRect 必须各选入一支）
 	t.nullPen, _, _ = procGetStockObject.Call(nullPenId)
+	t.nullBrush, _, _ = procGetStockObject.Call(nullBrushId)
 	return t
 }
 
@@ -1368,6 +1460,11 @@ func (w *logWindow) ensureLayout() uiLayout {
 		return cur
 	}
 	l := computeUILayout(r.Right, r.Bottom, dpi, st, panel, w.measureText, w.measureTitle)
+	// 焦点所在的控件可能已经不在这一帧里（例如站点面板被关掉）：清掉，避免按回车
+	// 去激活一个已经看不见的按钮。
+	if id := w.focusIDValue(); id != "" && !l.hasRegion(id) {
+		w.setFocusID("")
+	}
 	w.mu.Lock()
 	w.uiLayout, w.layoutW, w.layoutH, w.layoutKey = l, r.Right, r.Bottom, key
 	w.mu.Unlock()
@@ -1631,6 +1728,7 @@ func (w *logWindow) paintHeader(hdc uintptr, l uiLayout) {
 	font, titleFont := w.font, w.fontTitle
 	status, icon := w.status, w.icon
 	onlyWarn, selfTesting, sitesOpen := w.onlyWarn, w.selfTesting, w.sitesOpen
+	focusID, keyFocus := w.focusID, w.keyFocus
 	w.mu.Unlock()
 	toast := w.activeToast() // 已过期/被清掉的提示按「没有」处理
 
@@ -1676,7 +1774,7 @@ func (w *logWindow) paintHeader(hdc uintptr, l uiLayout) {
 			on = status.onOf(r.ID)
 		}
 		drawRegion(hdc, theme, font, r, dpi, on, w.hoverID == r.ID, w.pressID == r.ID,
-			r.ID == uiIDSiteAdd && addDim)
+			r.ID == uiIDSiteAdd && addDim, keyFocus && focusID == r.ID)
 	}
 
 	// 第二行：轻量提示优先（那是刚发生的事），否则显示详情
@@ -1863,6 +1961,20 @@ func wndProc(hwnd windows.Handle, msg uint32, wparam uintptr, lparam unsafe.Poin
 		lw.layout()
 		return 0
 
+	case wmSetFocus:
+		lw.onFocusChanged(hwnd, true)
+		return 0
+
+	case wmKillFocus:
+		lw.onFocusChanged(hwnd, false)
+		return 0
+
+	case wmKeyDown:
+		// Tab 循环焦点、回车 / 空格激活、Esc 退出：自绘控件的键盘可达性都在这条路上。
+		if lw.onKeyDown(hwnd, wparam) {
+			return 0
+		}
+
 	case wmPaint:
 		lw.paint(hwnd)
 		return 0
@@ -1959,6 +2071,30 @@ func wndProc(hwnd windows.Handle, msg uint32, wparam uintptr, lparam unsafe.Poin
 		// 后台线程完成了站点增删：控件与几何只能在窗口线程上动，这里统一刷新面板。
 		// wparam=1 表示这次要清空输入框（添加成功），删除 / 切换反代时保留用户输入。
 		lw.onSitesChanged(wparam != 0)
+		return 0
+
+	case wmAppTab:
+		// 子控件把 Tab 交回窗口：wparam 低位 1 = Shift+Tab，其余位 = 来自哪个控件。
+		from := ""
+		switch wparam >> 1 {
+		case subclassFilter:
+			from = focusStopFilter
+		case subclassSiteInput:
+			from = focusStopSiteInput
+		}
+		lw.moveKeyboardFocus(hwnd, from, wparam&1 != 0)
+		return 0
+
+	case wmAppEscape:
+		// 输入框里的 Esc：焦点回到窗口（并收起焦点环），不关闭窗口。
+		lw.setFocusID("")
+		procSetFocus.Call(uintptr(hwnd))
+		procInvalidateRect.Call(uintptr(hwnd), 0, 0)
+		return 0
+
+	case wmAppSiteEnter:
+		// 站点输入框里按回车 = 点「添加」：表单的主要动作不必再摸鼠标。
+		lw.invokeAction(hwnd, uiIDSiteAdd)
 		return 0
 
 	case wmTimer:

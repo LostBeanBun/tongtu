@@ -552,8 +552,8 @@ func TestClearLogMenuEntryClearsEdit(t *testing.T) {
 	hwnd := lw.hwnd
 	lw.mu.Unlock()
 	lw.invokeAction(hwnd, uiIDClear)
-	if got := editText(t); got != "" {
-		t.Errorf("清空日志后日志控件应为空，实际 %q", got)
+	if got := strings.TrimSpace(editText(t)); got != uiEmptyHint {
+		t.Errorf("清空日志后应只剩空状态提示 %q，实际 %q", uiEmptyHint, got)
 	}
 	lw.mu.Lock()
 	n := len(lw.lines)
@@ -563,6 +563,15 @@ func TestClearLogMenuEntryClearsEdit(t *testing.T) {
 	}
 	if got := lw.activeToast().Text; got != "日志已清空" {
 		t.Errorf("清空后应给出反馈，实际 %q", got)
+	}
+
+	// 再来一条真实日志：提示必须让位，不能留在第一行上面。
+	_, _ = lw.Write([]byte("清空之后的新日志\n"))
+	if got := editText(t); strings.Contains(got, uiEmptyHint) {
+		t.Errorf("新日志到达后不该还留着空状态提示：%q", got)
+	}
+	if got := editText(t); !strings.Contains(got, "清空之后的新日志") {
+		t.Errorf("新日志没有写进控件：%q", got)
 	}
 }
 
@@ -602,6 +611,207 @@ func TestHoverAndLeave(t *testing.T) {
 	lw.mu.Unlock()
 	if left != "" {
 		t.Errorf("鼠标离开后应清掉悬停，实际 %q", left)
+	}
+}
+
+// —— 键盘焦点 ——
+
+// sendKey 把一条 WM_KEYDOWN 发给指定窗口。
+func sendKey(t *testing.T, hwnd windows.Handle, vk uintptr) {
+	t.Helper()
+	procSendMessageW.Call(uintptr(hwnd), wmKeyDown, vk, 0)
+}
+
+// TestFocusStopsOrder Tab 顺序按几何走（从上到下、从左到右），两个输入框也在序列里。
+func TestFocusStopsOrder(t *testing.T) {
+	lw.mu.Lock()
+	dpi := lw.dpi
+	lw.mu.Unlock()
+	st := windowStatus{
+		Title: "通途 Tongtu " + Version, State: "运行中", Level: stateOK,
+		Items: []windowStatusItem{
+			{Label: "系统代理", Action: uiIDSys},
+			{Label: "Hosts", Action: uiIDHosts},
+			{Label: "无SNI反代", Action: uiIDMITM},
+		},
+	}
+	w, h := scaleDPI(760, dpi), scaleDPI(420, dpi)
+	l := computeUILayout(w, h, dpi, st, uiPanelState{}, lw.measureText, lw.measureTitle)
+	stops := focusStopsOf(l)
+	if len(stops) < 5 {
+		t.Fatalf("停靠点太少：%+v", stops)
+	}
+	filterAt, quitAt := -1, -1
+	for i, s := range stops {
+		switch s.ID {
+		case focusStopFilter:
+			filterAt = i
+		case uiIDQuit:
+			quitAt = i
+		}
+	}
+	if filterAt < 0 {
+		t.Fatalf("Tab 序列里应有过滤框：%+v", stops)
+	}
+	if quitAt < 0 {
+		t.Fatalf("Tab 序列里应有「退出」：%+v", stops)
+	}
+	if filterAt < quitAt {
+		t.Errorf("过滤框在卡片工具条里，应排在动作按钮之后（更靠下）：%+v", stops)
+	}
+	for i := 1; i < len(stops); i++ {
+		if stops[i].Top < stops[i-1].Top {
+			t.Errorf("Tab 顺序没有按从上到下排：%+v", stops)
+		}
+	}
+
+	// 面板打开时：站点输入框也在序列里，且排在「添加」之前。
+	lp := computeUILayout(w, h, dpi, st, uiPanelState{Open: true, Sites: []uiSite{{Pattern: "a.example.com"}}},
+		lw.measureText, lw.measureTitle)
+	panelStops := focusStopsOf(lp)
+	inputAt, addAt := -1, -1
+	for i, s := range panelStops {
+		switch s.ID {
+		case focusStopSiteInput:
+			inputAt = i
+		case uiIDSiteAdd:
+			addAt = i
+		}
+	}
+	if inputAt < 0 || addAt < 0 {
+		t.Fatalf("面板的 Tab 序列应含站点输入框与「添加」：%+v", panelStops)
+	}
+	if inputAt > addAt {
+		t.Errorf("站点输入框在「添加」左边，应排在前面：%+v", panelStops)
+	}
+}
+
+// TestNextFocusStop 循环与回绕：空列表、从头、从尾、from 失效。
+func TestNextFocusStop(t *testing.T) {
+	stops := []focusStop{{ID: "a", Top: 0}, {ID: "b", Top: 0}, {ID: "c", Top: 10}}
+	cases := []struct {
+		name string
+		from string
+		back bool
+		want string
+	}{
+		{"空列表", "a", false, ""},
+		{"从头开始", "", false, "a"},
+		{"从尾开始", "", true, "c"},
+		{"向后", "a", false, "b"},
+		{"向后回绕", "c", false, "a"},
+		{"向前", "c", true, "b"},
+		{"向前回绕", "a", true, "c"},
+		{"from 已失效", "gone", false, "a"},
+	}
+	for _, c := range cases {
+		in := stops
+		if c.name == "空列表" {
+			in = nil
+		}
+		if got := nextFocusStop(in, c.from, c.back); got != c.want {
+			t.Errorf("%s：得到 %q，期望 %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestKeyboardTabCyclesFocus 窗口有焦点时，Tab 在自绘控件之间循环，Esc 退出焦点。
+func TestKeyboardTabCyclesFocus(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, false, false)
+	lw.mu.Lock()
+	hwnd := lw.hwnd
+	lw.focusID, lw.keyFocus = "", true
+	lw.mu.Unlock()
+	t.Cleanup(func() {
+		lw.mu.Lock()
+		lw.focusID, lw.keyFocus = "", false
+		lw.mu.Unlock()
+	})
+
+	sendKey(t, hwnd, vkTab)
+	first := lw.focusIDValue()
+	if first == "" {
+		t.Fatal("按 Tab 后应有自绘控件拿到键盘焦点")
+	}
+	sendKey(t, hwnd, vkTab)
+	second := lw.focusIDValue()
+	if second == "" || second == first {
+		t.Errorf("再按 Tab 应移到下一个控件：%q -> %q", first, second)
+	}
+	sendKey(t, hwnd, vkEscape)
+	if got := lw.focusIDValue(); got != "" {
+		t.Errorf("Esc 后应收起焦点，实际 %q", got)
+	}
+}
+
+// TestKeyboardEnterActivatesFocus 焦点在「退出」上按回车，等于点它。
+func TestKeyboardEnterActivatesFocus(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, false, false)
+	f := &fakeActions{}
+	useFakeActions(t, f)
+	lw.mu.Lock()
+	hwnd := lw.hwnd
+	lw.focusID, lw.keyFocus = uiIDQuit, true
+	lw.mu.Unlock()
+	t.Cleanup(func() {
+		lw.mu.Lock()
+		lw.focusID, lw.keyFocus = "", false
+		lw.mu.Unlock()
+	})
+
+	sendKey(t, hwnd, vkReturn)
+	if n := f.quits(); n != 1 {
+		t.Errorf("回车应激活「退出」，实际调用 %d 次", n)
+	}
+}
+
+// TestClickRegionTakesKeyboardFocus 点过的按钮就是键盘的出发点：之后按 Tab 从它继续。
+func TestClickRegionTakesKeyboardFocus(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, false, false)
+	lw.setFocusID("")
+	t.Cleanup(func() { lw.setFocusID("") })
+
+	sendRegionMouse(t, uiIDSelfTest, wmLButtonDown, 1)
+	// 松开落在空白处：取消这次点击，不真的触发自检
+	var cr rectT
+	procGetClientRect.Call(uintptr(lw.handle()), uintptr(unsafe.Pointer(&cr)))
+	sendMouse(t, lw.handle(), wmLButtonUp, 0, cr.Right/2, cr.Bottom-30)
+
+	if got := lw.focusIDValue(); got != uiIDSelfTest {
+		t.Errorf("按下按钮后焦点应落在它上面，实际 %q", got)
+	}
+}
+
+// TestEditTabForwardsToWindow 输入框里的 Tab 要交回窗口，键盘用户不会困在输入框里。
+func TestEditTabForwardsToWindow(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	if !subclassReady {
+		t.Skip("当前环境没有可用的 SetWindowSubclass")
+	}
+	setStatusForInteraction(false, false, false)
+	lw.mu.Lock()
+	filter := lw.filter
+	lw.focusID = ""
+	lw.mu.Unlock()
+	if filter == 0 {
+		t.Skip("过滤框未创建")
+	}
+
+	// 过滤框是 Tab 序列的最后一站：再按 Tab 应回绕到第一个自绘控件。
+	sendKey(t, filter, vkTab)
+	if got := lw.focusIDValue(); got == "" {
+		t.Error("在过滤框里按 Tab 应把焦点交回自绘控件")
 	}
 }
 
@@ -1112,6 +1322,36 @@ func TestSitesAddFromInput(t *testing.T) {
 		t.Error("新加的站点应出现在面板里")
 	}
 	waitFor(t, "输入框被清空", func() bool { return lw.siteInputText() == "" })
+}
+
+// TestSitesEnterKeyAdds 站点输入框里按回车等于点「添加」：表单的主要动作不必摸鼠标。
+func TestSitesEnterKeyAdds(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	if !subclassReady {
+		t.Skip("当前环境没有可用的 SetWindowSubclass")
+	}
+	setStatusForInteraction(false, false, false)
+	f := &fakeActions{}
+	useFakeActions(t, f)
+	lw.mu.Lock()
+	lw.sitesOpen, lw.sites = false, nil
+	lw.mu.Unlock()
+
+	clickRegion(t, uiIDSites)
+	waitFor(t, "面板打开", func() bool { return lw.panelSnapshot().Open })
+	edit := lw.siteEditHandle()
+	if edit == 0 {
+		t.Skip("站点输入框未创建")
+	}
+	lw.setSiteInputText("enter.site.com")
+
+	sendKey(t, edit, vkReturn)
+	waitFor(t, "回车发起添加", func() bool {
+		adds, _, _ := f.siteCalls()
+		return len(adds) == 1 && adds[0] == "enter.site.com"
+	})
 }
 
 // TestSitesAddEmptyInputWarns 输入框为空时不派发添加，只给一句提示。

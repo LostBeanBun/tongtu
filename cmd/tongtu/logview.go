@@ -203,6 +203,13 @@ func renderSummaryText(title string, rows []summaryRow) string {
 // uiNoMatchHint 是过滤后没有命中时显示的那一行提示。
 const uiNoMatchHint = "（没有匹配的日志行 · 清空过滤框可恢复）"
 
+// uiEmptyHint 是还没有任何日志时显示的那一行提示（刚打开窗口 / 清空日志之后）。
+//
+// 和「没有匹配」分开写：一个说明「还没开始」，一个说明「被筛掉了」。日志控件是
+// 多行 RichEdit，系统不给它画 cue banner（EM_SETCUEBANNER 只支持单行 EDIT），
+// 因此空状态就走日志本身的显示层，与无命中的提示同一种做法。
+const uiEmptyHint = "（暂无日志 · 新的运行记录会显示在这里）"
+
 // filterLines 按关键字与「只看警告」过滤显示行。
 //
 // 规则：

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -55,6 +56,13 @@ const (
 	diNormal          = 0x0003          // DrawIconEx：DI_NORMAL
 
 	mfChecked = 0x0008
+
+	// 键盘（WM_KEYDOWN 的虚拟键码）
+	vkTab    = 0x09
+	vkShift  = 0x10
+	vkReturn = 0x0D
+	vkEscape = 0x1B
+	vkSpace  = 0x20
 )
 
 var tooltipsClass = utf16Ptr("tooltips_class32")
@@ -178,9 +186,15 @@ func (w *logWindow) onLButtonDown(hwnd windows.Handle, lparam uintptr) {
 	x, y := mousePoint(lparam)
 	r, ok := w.regionAt(x, y)
 	if !ok {
+		// 点在空白处：逻辑焦点回到窗口本身（与系统控件的行为一致）
+		w.setFocusID("")
 		return
 	}
 	w.pressID = r.ID
+	// 点过的按钮就是键盘的出发点：之后按 Tab 从这里继续，不用从头找。
+	// 顶层窗口点客户区本来就会激活，但显式 SetFocus 能让「点完立刻按 Tab」稳定成立。
+	w.setFocusID(r.ID)
+	procSetFocus.Call(uintptr(hwnd))
 	procSetCapture.Call(uintptr(hwnd))
 	procInvalidateRect.Call(uintptr(hwnd), 0, 0)
 }
@@ -206,6 +220,156 @@ func (w *logWindow) onLButtonUp(hwnd windows.Handle, lparam uintptr) {
 // mousePoint 从 lparam 取出鼠标客户区坐标（低 16 位 x、高 16 位 y，带符号）。
 func mousePoint(lparam uintptr) (int32, int32) {
 	return int32(int16(lparam & 0xFFFF)), int32(int16((lparam >> 16) & 0xFFFF))
+}
+
+// —— 键盘焦点 ——
+//
+// 自绘控件不是真正的窗口，系统不会给它们键盘焦点。这里维护一份「逻辑焦点」：
+// Tab / Shift+Tab 在全部可交互控件（含过滤框与站点输入框）之间循环，回车 / 空格激活，
+// Esc 退出焦点。排序按几何（从上到下、从左到右），与眼睛看到的顺序一致。
+//
+// 输入框是真控件，焦点落在它们身上时 Tab 不会自动回到父窗口；子类过程把 Tab / Esc
+// 交回窗口（见 window_windows.go 的 editSubclassProc），键盘用户因此不会被困在输入框里。
+
+const (
+	focusStopFilter    = "focus:filter"
+	focusStopSiteInput = "focus:siteinput"
+)
+
+// focusStop 是一个 Tab 停靠点：自绘区域用动作 id，输入框用上面的伪 id。
+type focusStop struct {
+	ID   string
+	Top  int32
+	Left int32
+}
+
+// focusStopsOf 把一帧里的可交互控件按「从上到下、从左到右」排成 Tab 顺序。
+// 纯函数：几何来自 uiLayout，因此可以脱离窗口单测。
+func focusStopsOf(l uiLayout) []focusStop {
+	stops := make([]focusStop, 0, len(l.Regions)+2)
+	for _, r := range l.Regions {
+		stops = append(stops, focusStop{ID: r.ID, Top: r.Rect.Top, Left: r.Rect.Left})
+	}
+	if l.Filter.Right > l.Filter.Left {
+		stops = append(stops, focusStop{ID: focusStopFilter, Top: l.Filter.Top, Left: l.Filter.Left})
+	}
+	if l.SiteInput.Right > l.SiteInput.Left {
+		stops = append(stops, focusStop{ID: focusStopSiteInput, Top: l.SiteInput.Top, Left: l.SiteInput.Left})
+	}
+	sort.SliceStable(stops, func(i, j int) bool {
+		if stops[i].Top != stops[j].Top {
+			return stops[i].Top < stops[j].Top
+		}
+		return stops[i].Left < stops[j].Left
+	})
+	return stops
+}
+
+// moveKeyboardFocus 把焦点移到 from 的下一个 / 上一个停靠点（from 为空时从头开始）。
+// from 不在当前几何里（例如刚关掉站点面板）时也从头开始，不会卡住。
+func (w *logWindow) moveKeyboardFocus(hwnd windows.Handle, from string, back bool) {
+	stops := focusStopsOf(w.ensureLayout())
+	if id := nextFocusStop(stops, from, back); id != "" {
+		w.setKeyboardFocus(hwnd, id)
+	}
+}
+
+// nextFocusStop 返回 from 的下一个 / 上一个停靠点 id；列表为空时返回空串。
+// 纯函数：循环与回绕的边界（第一个 / 最后一个 / from 不在列表里）可以单测。
+func nextFocusStop(stops []focusStop, from string, back bool) string {
+	if len(stops) == 0 {
+		return ""
+	}
+	next := 0
+	if back {
+		next = len(stops) - 1
+	}
+	for i, s := range stops {
+		if s.ID == from {
+			next = i + 1
+			if back {
+				next = i - 1
+			}
+			break
+		}
+	}
+	next = (next%len(stops) + len(stops)) % len(stops)
+	return stops[next].ID
+}
+
+// setKeyboardFocus 把焦点交给某个停靠点：输入框交给真控件，其余记录在 focusID。
+func (w *logWindow) setKeyboardFocus(hwnd windows.Handle, id string) {
+	switch id {
+	case focusStopFilter:
+		w.setFocusID("")
+		if f := w.filterHandle(); f != 0 {
+			procSetFocus.Call(uintptr(f))
+		}
+	case focusStopSiteInput:
+		w.setFocusID("")
+		if e := w.siteEditHandle(); e != 0 {
+			procSetFocus.Call(uintptr(e))
+		}
+	default:
+		w.setFocusID(id)
+		if hwnd != 0 {
+			procSetFocus.Call(uintptr(hwnd))
+		}
+	}
+	if hwnd != 0 {
+		procInvalidateRect.Call(uintptr(hwnd), 0, 0)
+	}
+}
+
+func (w *logWindow) setFocusID(id string) {
+	w.mu.Lock()
+	w.focusID = id
+	w.mu.Unlock()
+}
+
+func (w *logWindow) focusIDValue() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.focusID
+}
+
+// onFocusChanged 记录窗口是否持有键盘焦点：失焦时收掉焦点环，回来时按原位置显示。
+func (w *logWindow) onFocusChanged(hwnd windows.Handle, focused bool) {
+	w.mu.Lock()
+	if w.keyFocus == focused {
+		w.mu.Unlock()
+		return
+	}
+	w.keyFocus = focused
+	w.mu.Unlock()
+	procInvalidateRect.Call(uintptr(hwnd), 0, 0)
+}
+
+// onKeyDown 处理窗口自己的按键，返回 true 表示已消费（不再交给默认处理）。
+func (w *logWindow) onKeyDown(hwnd windows.Handle, vk uintptr) bool {
+	switch vk {
+	case vkTab:
+		w.moveKeyboardFocus(hwnd, w.focusIDValue(), keyShiftDown())
+		return true
+	case vkReturn, vkSpace:
+		if id := w.focusIDValue(); id != "" {
+			w.invokeAction(hwnd, id)
+			return true
+		}
+	case vkEscape:
+		if w.focusIDValue() != "" {
+			w.setFocusID("")
+			procInvalidateRect.Call(uintptr(hwnd), 0, 0)
+			return true
+		}
+	}
+	return false
+}
+
+// keyShiftDown 读取 Shift 的当前按下状态（WM_KEYDOWN 本身不带修饰键信息）。
+func keyShiftDown() bool {
+	r, _, _ := procGetKeyState.Call(vkShift)
+	return int16(r) < 0
 }
 
 // —— 悬浮提示 ——
@@ -417,12 +581,13 @@ func (w *logWindow) onlyWarnValue() bool {
 }
 
 // clearLog 清空窗口里的日志（日志文件与控制台不受影响）。
+// 清空后日志区回到空状态提示，而不是留一块空白。
 func (w *logWindow) clearLog() {
 	w.mu.Lock()
 	w.lines = nil
 	w.lineBytes = 0
 	w.mu.Unlock()
-	setEditText(w.editHandle(), "")
+	w.renderLines(nil)
 }
 
 // —— 动作分发 ——

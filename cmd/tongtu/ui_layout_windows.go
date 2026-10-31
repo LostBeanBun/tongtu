@@ -330,6 +330,16 @@ func (l uiLayout) hit(x, y int32) (uiRegion, bool) {
 	return uiRegion{}, false
 }
 
+// hasRegion 报告这一帧里是否还有这个 id 的自绘区域（键盘焦点是否仍然有效）。
+func (l uiLayout) hasRegion(id string) bool {
+	for _, r := range l.Regions {
+		if r.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // drawRegion 按区域类型与交互状态绘制一块自绘控件。
 //
 // 底色只表达交互（悬停 / 按下 / 选中），常态不铺底；状态仍由胶囊里的状态点承担
@@ -338,7 +348,11 @@ func (l uiLayout) hit(x, y int32) (uiRegion, bool) {
 //
 // dim 表示「当前不可用」（例如站点面板的「添加」按钮在输入框为空时）：只把文字
 // 降到弱化色阶，不给悬停底色——看起来不能点的东西不该在鼠标移上去时发亮。
-func drawRegion(hdc uintptr, theme uiTheme, font uintptr, r uiRegion, dpi uint32, on, hover, press, dim bool) {
+//
+// focus 表示这块控件当前持有键盘焦点：在控件内侧画两圈文字色的焦点环。用中性文字色
+// 而不是强调色，是因为强调色只负责标题（「一个颜色只干一件事」）；焦点表达的是
+// 「键盘现在停在哪」，与状态无关。
+func drawRegion(hdc uintptr, theme uiTheme, font uintptr, r uiRegion, dpi uint32, on, hover, press, dim, focus bool) {
 	if hdc == 0 || font == 0 || r.Rect.Right <= r.Rect.Left || r.Rect.Bottom <= r.Rect.Top {
 		return
 	}
@@ -384,6 +398,21 @@ func drawRegion(hdc uintptr, theme uiTheme, font uintptr, r uiRegion, dpi uint32
 	}
 	procSetTextColor.Call(hdc, uintptr(color))
 	drawTextLine(hdc, r.Label, x, cy, r.Rect.Right-pad-x, dtLeft)
+
+	// 键盘焦点环画在最后：两圈 1 像素，落在控件内侧，不会盖住文字（文字有内边距）。
+	if focus && theme.textPen != 0 && theme.nullBrush != 0 &&
+		r.Rect.Right-r.Rect.Left > 8 && r.Rect.Bottom-r.Rect.Top > 8 {
+		oldPen, _, _ := procSelectObject.Call(hdc, theme.textPen)
+		oldBrush, _, _ := procSelectObject.Call(hdc, theme.nullBrush)
+		for inset := int32(1); inset <= 2; inset++ {
+			procRoundRect.Call(hdc,
+				uintptr(r.Rect.Left+inset), uintptr(r.Rect.Top+inset),
+				uintptr(r.Rect.Right-inset), uintptr(r.Rect.Bottom-inset),
+				uintptr(2*radius+2), uintptr(2*radius+2))
+		}
+		procSelectObject.Call(hdc, oldBrush)
+		procSelectObject.Call(hdc, oldPen)
+	}
 }
 
 // regionAt 是给窗口用的便捷封装：先确保几何是最新的，再做命中判定。

@@ -274,7 +274,7 @@ func TestDrawRegionDim(t *testing.T) {
 		t.Fatal("无法创建内存 DC")
 	}
 	defer m.close()
-	drawRegion(m.dc, th, font, r, dpi, false, true, false, true)
+	drawRegion(m.dc, th, font, r, dpi, false, true, false, true, false)
 	if got := countColorIn(m, hoverRGB, r.Rect); got != 0 {
 		t.Errorf("禁用态不该铺悬停底色，实际 %d 像素", got)
 	}
@@ -287,9 +287,48 @@ func TestDrawRegionDim(t *testing.T) {
 		t.Fatal("无法创建内存 DC")
 	}
 	defer m2.close()
-	drawRegion(m2.dc, th, font, r, dpi, false, true, false, false)
+	drawRegion(m2.dc, th, font, r, dpi, false, true, false, false, false)
 	if got := countColorIn(m2, hoverRGB, r.Rect); got < int(w*h)/2 {
 		t.Errorf("可用态的悬停底色应铺满按钮，实际只有 %d 像素", got)
+	}
+}
+
+// TestDrawRegionFocusRing 键盘焦点环：用中性文字色画在控件内侧，不占用语义色。
+func TestDrawRegionFocusRing(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	lw.mu.Lock()
+	dpi, font, th := lw.dpi, lw.font, lw.themeDarkSet
+	lw.mu.Unlock()
+	if font == 0 {
+		t.Fatal("正文字体不可用")
+	}
+	w, h := scaleDPI(140, dpi), scaleDPI(28, dpi)
+	r := uiRegion{ID: uiIDSys, Label: "系统代理", Kind: uiChip,
+		Rect: rectT{Left: 0, Top: 0, Right: w, Bottom: h}}
+	textRGB := colorRefToRGB(th.text)
+
+	m := newMemDC(w, h)
+	if m == nil {
+		t.Fatal("无法创建内存 DC")
+	}
+	defer m.close()
+	drawRegion(m.dc, th, font, r, dpi, false, false, false, false, false)
+	if got := countColorIn(m, textRGB, r.Rect); got != 0 {
+		t.Errorf("没有焦点时不该有焦点环：文字色像素 %d", got)
+	}
+
+	m2 := newMemDC(w, h)
+	if m2 == nil {
+		t.Fatal("无法创建内存 DC")
+	}
+	defer m2.close()
+	drawRegion(m2.dc, th, font, r, dpi, false, false, false, false, true)
+	// 环落在上下两条边上（各 2 像素），左右两侧只覆盖高度的一部分。
+	top := rectT{Left: 2, Top: 1, Right: w - 2, Bottom: 3}
+	if got := countColorIn(m2, textRGB, top); got < int(w)/2 {
+		t.Errorf("焦点环没有画在顶边：文字色像素只有 %d", got)
 	}
 }
 
