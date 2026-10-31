@@ -56,6 +56,13 @@
   焦点环绘制（无焦点时不着色、有焦点时画在控件内侧）、清空日志后的空状态与新日志让位。
 - 本地通过：`gofmt`、`go vet ./...`、staticcheck、`go test ./... -count=1`、
   `GOOS=linux go build ./...`。`-race` 与 Linux 测试由 CI 覆盖（本机无 gcc / WSL）。
+- CI 实跑全绿（run `41169320239`，提交 `4b084d1`）：格式与静态检查、Linux 测试、Windows 完整测试
+  均通过。
+- Release 实跑成功（run `41170814404`，tag `v0.8.0` → `4b084d1`）：质量门、构建、exe 版本自检、
+  打包与发布全部通过。`releases/latest` 已指向 v0.8.0；`tongtu-0.8.0-windows-x64.exe`
+  （10,108,928 字节）SHA-256 为
+  `2a57214eb0242f8710df5630d770d3f5d0935e79d50f36dd5c55710e6fe4d756`，
+  与 Release 附件 `SHA256SUMS.txt` 及资产 digest 一致；下载后 `tongtu version` 输出 `tongtu 0.8.0`。
 
 ## [0.7.0] - 2026-10-31
 
