@@ -59,6 +59,14 @@
   `version: 4`、`system_proxy: true`、`hosts: false`、`mitm.enabled: false`，
   数据目录里只有 `config.yaml`，没有生成 `ca.crt` / `ca.key`。
 - `-race` 与 Linux 测试由 CI 覆盖（本机无 gcc / WSL）。
+- CI 实跑全绿（run `41272959308`，提交 `18be528`）：格式与静态检查、Linux 测试、
+  Windows 完整测试均通过。
+- Release 实跑成功（run `41272965529`，tag `v0.9.0` → `18be528`）：质量门、构建、
+  exe 版本自检、打包与发布全部通过。`releases/latest` 已指向 v0.9.0；
+  `tongtu-0.9.0-windows-x64.exe`（10,108,928 字节）SHA-256 为
+  `7e1346255cddc93e9c26dcae5cc8114c9aac5058026435c1df91d41d870ebe9e`，
+  与 Release 附件 `SHA256SUMS.txt` 及资产 digest 一致；下载后 `tongtu version` 输出
+  `tongtu 0.9.0`。
 
 ## [0.8.0] - 2026-10-31
 
