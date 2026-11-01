@@ -140,7 +140,9 @@ func TestOneShotFlagsNotPersisted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("加载规则: %v", err)
 	}
-	cfg := config.Default() // 配置里两种模式都是 true
+	cfg := config.Default()
+	// 配置里两项都开着；启动时用 --no-sysproxy / --no-hosts 临时关掉，不能写回配置。
+	cfg.SystemProxy, cfg.Hosts = true, true
 	cfg.Listen = "127.0.0.1:0"
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))

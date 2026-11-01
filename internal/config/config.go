@@ -81,13 +81,17 @@ type Config struct {
 }
 
 // Default 返回内置默认配置。
+//
+// 默认只开「系统代理模式」——它不需要管理员权限、不需要安装根证书，装好就能用；
+// Hosts 模式（要写系统 hosts、需管理员）与无 SNI 反代（要先装本地根证书）
+// 都属于「需要用户额外准备」的接管方式，默认关闭，由用户在托盘 / 窗口里按需打开。
 func Default() *Config {
 	return &Config{
 		Version:         CurrentVersion,
 		Listen:          "127.0.0.1:19180",
 		Control:         "127.0.0.1:19181",
 		SystemProxy:     true,
-		Hosts:           true,
+		Hosts:           false,
 		Services:        []string{"steam", "github"},
 		HostsRefreshMin: 10,
 		DNS: DNSConfig{
@@ -120,7 +124,9 @@ func Default() *Config {
 			},
 		},
 		MITM: MITMConfig{
-			Enabled:  true,
+			// 默认关闭：反代要先安装本地根证书，属于用户显式选择才开启的能力。
+			// 名单仍然预置好，用户打开「无 SNI 反代」后立刻可用。
+			Enabled:  false,
 			AutoCert: true,
 			// 只列实测「真 SNI 被阻断、剥离 SNI 后按 Host 头仍能正常响应」的域名。
 			//

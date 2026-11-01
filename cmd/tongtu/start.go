@@ -82,6 +82,8 @@ var startCmd = &cobra.Command{
 		}
 
 		wantSys := cfg.SystemProxy && !flagNoSysProxy
+		// 默认只接管系统代理；Hosts 与反代默认关闭，由用户在托盘 / 窗口里显式打开
+		// （会写回配置，下次启动沿用）。--no-hosts / --no-mitm 只做本次的临时减法。
 		wantHosts := cfg.Hosts && !flagNoHosts
 		// 崩溃防护第二步：**在真正接管之前**就把监护进程拉起来。
 		// 接管发生在 a.Start() 里（写状态文件 + 改注册表 / hosts），如果等启动流程走完

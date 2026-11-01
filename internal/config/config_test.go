@@ -60,9 +60,10 @@ func TestLoadUpgradesOldConfig(t *testing.T) {
 		t.Errorf("用户保留的端点被删: %v", cfg.DNS.Endpoints)
 	}
 
-	// 缺失字段使用新默认值。
-	if !cfg.SystemProxy || !cfg.MITM.Enabled || len(cfg.MITM.Domains) == 0 {
-		t.Errorf("缺失字段没有取新默认值: system_proxy=%v mitm=%+v", cfg.SystemProxy, cfg.MITM)
+	// 缺失字段使用新默认值：默认只开系统代理（Hosts 与反代要用户显式开启）。
+	if !cfg.SystemProxy || cfg.Hosts || cfg.MITM.Enabled || len(cfg.MITM.Domains) == 0 {
+		t.Errorf("缺失字段没有取新默认值: system_proxy=%v hosts=%v mitm=%+v",
+			cfg.SystemProxy, cfg.Hosts, cfg.MITM)
 	}
 	if _, err := os.Stat(path + ".v0.bak"); err != nil {
 		t.Fatalf("缺少旧配置备份: %v", err)
@@ -167,6 +168,28 @@ func TestDefaultSanity(t *testing.T) {
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("默认配置应通过校验: %v", err)
+	}
+}
+
+// TestDefaultOnlySystemProxy 默认加速方式必须是「不需要任何额外准备」的那一种：
+// 系统代理不需要管理员、不需要装根证书；Hosts 与无 SNI 反代都要用户显式开启。
+// 反代名单仍然预置好，用户打开开关后立刻可用（auto_cert 也保留，届时才会提示装证书）。
+func TestDefaultOnlySystemProxy(t *testing.T) {
+	cfg := Default()
+	if !cfg.SystemProxy {
+		t.Error("默认应开启系统代理模式（无需管理员、无需证书）")
+	}
+	if cfg.Hosts {
+		t.Error("Hosts 模式需要管理员并改写系统 hosts，默认应关闭")
+	}
+	if cfg.MITM.Enabled {
+		t.Error("无 SNI 反代需要先安装根证书，默认应关闭")
+	}
+	if len(cfg.MITM.Domains) == 0 {
+		t.Error("反代域名名单应保持预置：用户打开开关后不必再补配置")
+	}
+	if !cfg.MITM.AutoCert {
+		t.Error("用户显式打开反代时仍应提示安装根证书（auto_cert 默认开启）")
 	}
 }
 
