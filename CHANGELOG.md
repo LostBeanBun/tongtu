@@ -26,6 +26,40 @@
 | `0.x.y` | 功能成型但未定稿 | 新增功能抬 minor，修复抬 patch；配置版本号（`config.yaml` 的 `version`）变更时会先备份、再保留用户设置升级 |
 | `1.0.0` | 可发布 | 配置格式与命令行为向后兼容；破坏性变更必须抬 major 并在本文件写明迁移方法 |
 
+## [0.9.0] - 2026-11-01
+
+> 主题：**默认方式不需要任何额外准备**。新安装只接管系统代理——不需要管理员权限、不需要
+> 安装根证书；Hosts 模式与无 SNI 反代改为用户自己打开，需要时才做那些准备。
+
+### 变更
+
+- **默认只开系统代理**：`Default()` 现在是 `system_proxy: true`、`hosts: false`、
+  `mitm.enabled: false`。首次启动不会改写系统 hosts，也不会生成或安装本地根证书，
+  更不会弹「是否安装根证书」的询问框——装好 exe 双击就能用。
+- **Hosts 与反代改为显式开启**：在窗口开关或托盘菜单里打开后会立即生效并写回
+  `config.yaml`，下次启动沿用；打开反代时若缺根证书，窗口与托盘都会先问一次并支持一键安装
+  （装完继续开启），不需要用户去终端执行 `tongtu cert install`。
+- **反代名单与 `auto_cert` 仍然预置**：`mitm.domains` 的默认域名保持不变，`auto_cert: true`
+  也保留——用户打开反代的那一刻即可用，不必再补配置。
+- **旧配置不受影响**：升级只补缺失字段，用户显式写着的 `hosts: true` / `mitm.enabled: true`
+  不会被改掉；`config.yaml` 的 `version` 仍为 4，不触发额外的迁移备份。
+- **不新增正向标志**：开启是持久选择（托盘 / 窗口 / 配置），`--no-sysproxy`、`--no-hosts`、
+  `--no-mitm` 仍然只做本次启动的临时减法，不写回配置。
+- 帮助文本、README、USAGE 同步改写：默认行为、场景 A/B/C、托盘菜单默认勾选、自启说明、
+  配置样例与 FAQ（「默认会装证书 / 改 hosts 吗」）。
+
+### 验证
+
+- 新增测试 `TestDefaultOnlySystemProxy`：默认必须开系统代理、关 Hosts 与反代，同时反代名单
+  与 `auto_cert` 仍预置；`TestLoadUpgradesOldConfig` 断言旧配置缺失字段取新默认值，
+  用户显式开关不被改写；`TestOneShotFlagsNotPersisted` 显式打开 hosts 后仍验证一次性标志不落盘。
+- 本地通过：`gofmt`、`go vet ./...`、staticcheck、`go test ./... -count=1`、
+  `GOOS=linux go build ./...`、`.\build.ps1`；`dist\tongtu.exe version` 输出 `tongtu 0.9.0`。
+- 冒烟（临时 `APPDATA`，不碰本机真实配置）：`tongtu status` 生成的新配置为
+  `version: 4`、`system_proxy: true`、`hosts: false`、`mitm.enabled: false`，
+  数据目录里只有 `config.yaml`，没有生成 `ca.crt` / `ca.key`。
+- `-race` 与 Linux 测试由 CI 覆盖（本机无 gcc / WSL）。
+
 ## [0.8.0] - 2026-10-31
 
 > 主题：**窗口不摸鼠标也能走完**。这一版把自绘控件接进键盘焦点顺序（Tab / Shift+Tab /

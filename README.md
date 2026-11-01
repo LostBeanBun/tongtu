@@ -17,10 +17,11 @@
 ## 特性
 
 - **本地正向代理**：白名单域名经干净 DoH 解析后直连，避免系统 DNS 被污染。
-- **两种接管模式**
-  - *系统代理模式*：接管浏览器等走系统代理的程序，**无需管理员权限**。
-  - *Hosts 模式*：为 Steam 客户端等不走代理的程序覆盖 hosts，**需要管理员权限**。
-- **无 SNI 反代（本地 MITM）**：对 SNI 被封锁的域名在本地解密，出站拨号**剥离 SNI**，靠 `Host` 头路由。
+- **两种接管模式**（默认只开系统代理：不需要管理员、不需要装证书）
+  - *系统代理模式*（默认开启）：接管浏览器等走系统代理的程序，**无需管理员权限**。
+  - *Hosts 模式*（默认关闭，需要时自行打开）：为 Steam 客户端等不走代理的程序覆盖 hosts，**需要管理员权限**。
+- **无 SNI 反代（本地 MITM）**（默认关闭）：对 SNI 被封锁的域名在本地解密，出站拨号**剥离 SNI**，靠 `Host` 头路由；
+  打开时会提示安装本地根证书，属于用户显式选择才启用的能力。
 - **多来源优选 IP**：静态优选 + 远程优选（GitHub520）+ 多端点 DoH 并查。
 - **启动预热**：启动后在后台把反代域名的候选竞速做完，第一个真实请求直接走快路径
   （实测 `store.steampowered.com` 冷启动首次 3.4 s → 预热后 0.89 s）。
@@ -87,7 +88,7 @@ GFW 会对特定域名做 **SNI 阻断**：同一 IP 换 SNI 即被 RST。既然
 
 仅对配置 `mitm.domains` 列出的域名解密，**其余流量端到端隧道、不解密**。
 
-默认反代域名：`*.steamcommunity.com`、`store.steampowered.com`、`avatars.steamstatic.com`、
+预置的反代域名（打开「无 SNI 反代」后生效）：`*.steamcommunity.com`、`store.steampowered.com`、`avatars.steamstatic.com`、
 `raw.githubusercontent.com`、`gist.github.com`、`github.com`。
 
 > 名单是按实测结果定的，只收「真 SNI 被阻断、剥离 SNI 后按 Host 头仍能正常响应」的域名：
@@ -257,16 +258,15 @@ CI（[`ci.yml`](.github/workflows/ci.yml)）在每次 push / PR 时跑 gofmt、v
 
 ## 快速开始
 
-### 系统代理模式（推荐，无需管理员）
+### 默认：系统代理模式（推荐，无需管理员、无需证书）
 
 ```powershell
-dist\tongtu.exe start            # 默认同时尝试接管系统代理与 hosts
-# 仅接管系统代理（不动 hosts）：
-dist\tongtu.exe start --no-hosts
+dist\tongtu.exe start
 ```
 
-首次启动会提示安装本地根证书（无 SNI 反代所需，安装到**当前用户** Root 存储，无需管理员）。
-也可不反代直接跑：`--no-mitm`。
+默认**只接管系统代理**：浏览器等走系统代理的程序即可访问 GitHub、Steam 社区。
+不会改写系统 hosts，也不会提示安装根证书——这两项都需要用户自己打开（见下）。
+`--no-sysproxy` 可以临时关掉系统代理（本次启动有效，不改配置）。
 
 查看状态 / 停止：
 
@@ -275,15 +275,29 @@ dist\tongtu.exe status
 dist\tongtu.exe stop             # 还原系统代理与 hosts
 ```
 
-### Hosts 模式（需要管理员）
+### Hosts 模式（需要管理员，默认关闭）
 
-以**管理员**身份：
+Steam 客户端不走系统代理，需要覆盖 hosts。先在窗口里点一下 `Hosts`，或托盘右键 →
+「Hosts 模式」（改动会写回 `config.yaml`，下次启动沿用）；也可以直接编辑配置把 `hosts` 改成 `true`。
+然后以**管理员**身份运行：
 
 ```powershell
 dist\tongtu.exe start --no-sysproxy   # 只接管 hosts
 ```
 
 仅当以管理员运行时 hosts 才会写入；否则会打印告警并降级（系统代理模式仍可用）。
+
+### 无 SNI 反代（默认关闭，需要根证书）
+
+对 SNI 被封锁的域名（如 `store.steampowered.com`）做本地解密 + 出站剥离 SNI。
+先在窗口里点 `无SNI反代`，或托盘右键 →「无 SNI 反代」；打开时会提示安装本地根证书
+（安装到**当前用户** Root 存储，无需管理员）。也可以先手动执行：
+
+```powershell
+dist\tongtu.exe cert install
+```
+
+> 反代域名名单已经预置好，打开开关后立刻可用；不需要反代时保持关闭即可，其余流量端到端隧道、不解密。
 
 ### 验证效果
 
@@ -326,8 +340,8 @@ dist\tongtu.exe test steamcommunity.com github.com
 暂停定时              ▸
 ────────────────
 系统代理模式          [✓]
-Hosts 模式            [✓]
-无 SNI 反代            [✓]
+Hosts 模式            [ ]
+无 SNI 反代            [ ]
 ────────────────
 加速 Steam            [✓]
 加速 GitHub           [✓]
@@ -352,8 +366,11 @@ Hosts 模式            [✓]
   剩余时间写在托盘悬停提示里（`已暂停（12 分钟后自动恢复）`），也可以随时点
   「恢复全部加速」提前恢复。
 - 菜单中的勾选状态每 3 秒与运行时同步（也能反映控制 API 的改动与启动时的接管失败）。
+- **新安装默认只勾选「系统代理模式」**：它不需要管理员、不需要证书，装好就能用。
+  `Hosts 模式`（需管理员）与 `无 SNI 反代`（需根证书）需要你主动点一下才开启，
+  之后同样会写回配置；不需要时保持关闭即可。
 - **鼠标悬停在托盘图标上**就能看到实时状态与流量，不用打开窗口：
-  `通途 Tongtu · 运行中（已运行 1 小时 23 分）· 系统代理✓ · Hosts✗ · 反代✓ · ↓1.2M ↑340K`
+  `通途 Tongtu · 运行中（已运行 1 小时 23 分）· 系统代理✓ · Hosts✗ · 反代✗ · ↓1.2M ↑340K`
   （体积用紧凑写法，提示行只有一行宽）。暂停时状态词写「已暂停」。
 - 「开机自启（最高权限）」需要计划任务权限；非管理员运行时该项为灰色不可点。
 - **「以管理员身份重启」**（非管理员时可点）：先弹窗确认 → 还原系统代理与 hosts 并退出当前实例 →
@@ -378,7 +395,7 @@ Hosts 模式            [✓]
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────┐
-│  ▣  通途 Tongtu 0.8.0  运行中          ● 系统代理   ○ Hosts   ● 无SNI反代 │
+│  ▣  通途 Tongtu 0.9.0  运行中          ● 系统代理   ○ Hosts   ○ 无SNI反代 │
 │  服务组 steam、github · 活跃隧道 2 · ↓1.2 MB ↑34 KB · 已运行 1 小时 23 分 │
 │                待办 1  暂停  自检  服务组  站点  打开配置  日志  退出     │
 ├───────────────────────────────────────────────────────────────────────────┤
@@ -506,8 +523,10 @@ tongtu autostart status
 - `--hidden` 仍会创建一个**不可见的窗口**：注销 / 关机时系统通过它（`WM_QUERYENDSESSION`）
   通知通途先还原系统代理与 hosts，避免「关机时留下指向本地代理的注册表项」。
 - 两种机制互斥：开启一种会自动移除另一种，避免重复启动。
-- 若要在开机后自动为 **Steam 客户端**（需要 hosts 模式）加速，请以管理员身份执行 `tongtu autostart on --elevated`。
-- `--hidden` 模式下首次运行**不会**弹出根证书安装提示；如需无 SNI 反代，请先手动执行一次 `tongtu cert install`。
+- 若要在开机后自动为 **Steam 客户端**（需要 hosts 模式）加速，先在窗口 / 托盘里打开「Hosts 模式」，
+  再以管理员身份执行 `tongtu autostart on --elevated`。
+- `--hidden` 是**非交互启动**，不会弹出任何询问框：反代只按配置里已打开的开关执行；
+  若配置里开着反代而本机还没装根证书，反代不会启用（窗口 `待办` 里会提示安装，或手动执行一次 `tongtu cert install`）。
 
 ---
 
@@ -519,8 +538,8 @@ tongtu autostart status
 version: 4
 listen: 127.0.0.1:19180        # 本地代理监听（被占用时自动改用空闲端口）
 control: 127.0.0.1:19181       # 控制 API（仅回环；被别的程序占用时自动换口并写回本文件）
-system_proxy: true             # 启动时接管系统代理
-hosts: true                    # 启动时接管 hosts（需管理员）
+system_proxy: true             # 启动时接管系统代理（默认开启：无需管理员 / 证书）
+hosts: false                   # 启动时接管 hosts（默认关闭；需管理员，按需打开）
 services: [steam, github]      # 启用的服务组
 hosts_refresh_minutes: 10      # hosts IP 刷新周期（失败时每分钟重试）
 dns:
@@ -542,8 +561,8 @@ dns:
     www.steamcommunity.com:   [104.89.103.51, 184.30.89.225]
     help.steamcommunity.com:  [104.89.103.51, 184.30.89.225]
 mitm:
-  enabled: true
-  auto_cert: true              # 首次启动提示安装本地根证书
+  enabled: false               # 无 SNI 反代（默认关闭；需先装根证书，按需打开）
+  auto_cert: true              # 打开反代时提示安装本地根证书
   domains:                     # 需要本地解密的域名（支持 "*.example.com"）
     - '*.steamcommunity.com'
     - store.steampowered.com   # 真 SNI 直连被阻断
@@ -572,6 +591,10 @@ custom:                        # 你自己的站点（改完保存即生效，�
 > 端口、DNS 端点、日志级别这类要重建组件的字段仍需重启。
 
 > 新增的内置默认 `dns.static_hosts` 与 `mitm.domains` 会在加载时**合并**进已有配置（保留你的自定义项）。
+
+> **默认只开系统代理**（`system_proxy: true`、`hosts: false`、`mitm.enabled: false`）：
+> 新安装不需要管理员、不需要证书就能用。Hosts 与反代在托盘 / 窗口里打开后会写回这里，
+> 下次启动沿用；旧配置里已经写明的开关**不会**被升级改动。
 
 ---
 
