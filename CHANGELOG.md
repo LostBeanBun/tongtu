@@ -70,6 +70,14 @@
 - 本地通过：`gofmt`、`go vet ./...`、staticcheck、`go test ./... -count=1`、
   `GOOS=linux go build ./...`、`.\build.ps1`；`dist\tongtu.exe version` 输出 `tongtu 0.10.0`。
 - `-race` 与 Linux 测试由 CI 覆盖（本机无 gcc / WSL）。
+- CI 实跑全绿（run `41382596415`，提交 `55ec58c`）：格式与静态检查、Linux 测试、
+  Windows 完整测试均通过。
+- Release 实跑成功（run `41382742726`，tag `v0.10.0` → `55ec58c`）：质量门、构建、
+  exe 版本自检、打包与发布全部通过。`releases/latest` 已指向 v0.10.0；
+  `tongtu-0.10.0-windows-x64.exe`（10,141,184 字节）SHA-256 为
+  `4498217378542cef3d3e2c600668271943f6214f4b412406d0da08b6f44eb321`，
+  与 Release 附件 `SHA256SUMS.txt` 及资产 digest 一致；下载后 `tongtu version` 输出
+  `tongtu 0.10.0`。
 
 ## [0.9.0] - 2026-11-01
 
