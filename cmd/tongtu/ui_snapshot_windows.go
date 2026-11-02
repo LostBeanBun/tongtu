@@ -40,8 +40,12 @@ type uiSnapshot struct {
 	Sites     []string `json:"sites,omitempty"`
 
 	// 域名诊断面板：同样让日志控件让位；Host 是这次诊断的目标（未诊断时为空）。
-	ProbeOpen bool   `json:"probe_open"`
-	ProbeHost string `json:"probe_host,omitempty"`
+	// Busy / Verdict 让真机脚本能等到「诊断结束」并读出结论（toast 是瞬时的，
+	// 日志里也没有这条信息）。
+	ProbeOpen    bool   `json:"probe_open"`
+	ProbeHost    string `json:"probe_host,omitempty"`
+	ProbeBusy    bool   `json:"probe_busy"`
+	ProbeVerdict string `json:"probe_verdict,omitempty"`
 }
 
 var (
@@ -64,6 +68,8 @@ func recordUILayout(l uiLayout, clientW, clientH int32, st windowStatus) {
 		if l.PanelKind == uiPanelProbe {
 			snap.ProbeOpen = true
 			snap.ProbeHost = l.ProbeHost
+			snap.ProbeBusy = l.ProbeBusy
+			snap.ProbeVerdict = l.ProbeVerdict
 		} else {
 			snap.SitesOpen = true
 			for _, row := range l.SiteRows {

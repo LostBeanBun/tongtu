@@ -10,7 +10,9 @@
 #     定位窗口 → 按控件 ID 取「暂停」按钮矩形 → 点它并在时长菜单里选「暂停 15 分钟」
 #     → 断言系统代理 / hosts / 断电自愈项都已撤回 → 再点「恢复」→ 断言全部回来
 #     → 日志区右键「复制代理地址」→ 校验剪贴板
-#     → 改配置等热生效 → 点 × 只隐藏（进程仍在跑）→ 收尾还原。
+#     → 改配置等热生效
+#     → 打开诊断面板诊断 github.com，等快照里出现结论后关闭
+#     → 点 × 只隐藏（进程仍在跑）→ 收尾还原。
 #
 # 用法：
 #   .\tools\ui-smoke.ps1                    # 用 dist\tongtu.exe，截图放 %TEMP%\tongtu-ui
@@ -68,6 +70,10 @@ public class UiSmokeNative {
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumChildProc cb, IntPtr l);
+  public delegate bool EnumChildProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr w, string l);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
@@ -92,6 +98,22 @@ public class UiSmokeNative {
     }, IntPtr.Zero);
     return found;
   }
+  // 诊断面板打开时，可见的 EDIT 子控件就是它的域名输入框：
+  // 日志区是 RichEdit（类名不同），站点面板的输入框此时被隐藏。
+  public static IntPtr VisibleEdit(IntPtr parent) {
+    IntPtr found = IntPtr.Zero;
+    EnumChildWindows(parent, (h, l) => {
+      var sb = new StringBuilder(64); GetClassName(h, sb, 64);
+      if (string.Equals(sb.ToString(), "Edit", StringComparison.OrdinalIgnoreCase) && IsWindowVisible(h)) {
+        found = h; return false;
+      }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
+  // 直接给输入框发 WM_SETTEXT：模拟键盘逐字输入对「点得准」没有额外价值，
+  // 而中文输入法与键盘布局会让逐字输入不稳定。
+  public static void SetText(IntPtr h, string s) { SendMessage(h, 0x000C, IntPtr.Zero, s); }
   // SetForegroundWindow 对「不是当前前台进程」的调用有诸多限制；
   // 先按一下 Alt 再调用，Windows 会认为用户正在操作，前台切换才稳定。
   public static void Force(IntPtr h) {
@@ -161,6 +183,66 @@ function Test-HostsHasManagedBlock {
         Where-Object { $_ -like "*$beginMark*" } | Select-Object -First 1)
 }
 
+# 往 config.yaml 的 custom 段里加一个域名（热加载检查用）。
+#
+# 不能简单地在 "custom:" 后面插一行：应用生成的配置里已经有 domains: []，
+# 再接一行会变成重复键，YAML 直接解析失败（0.10.x 冒烟就在这里误报过）。
+# 这里按行处理，兼容空列表 / 已有内联列表 / 块状列表三种写法。
+function Add-SmokeCustomDomain([string]$text, [string]$domain) {
+    $nl = "`r`n"
+    $lines = New-Object 'System.Collections.Generic.List[string]'
+    [void]$lines.AddRange([string[]]($text -split "\r?\n"))
+
+    $customIdx = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^custom:\s*$') { $customIdx = $i; break }
+    }
+    if ($customIdx -lt 0) {
+        $lines.Insert(0, "custom:")
+        $lines.Insert(1, "  domains: ['$domain']")
+        return ($lines -join $nl)
+    }
+
+    # custom 段到下一个顶层键（或文件末尾）为止。
+    $end = $lines.Count
+    for ($j = $customIdx + 1; $j -lt $lines.Count; $j++) {
+        if ($lines[$j] -match '^\S') { $end = $j; break }
+    }
+
+    $indent = "  "
+    for ($j = $customIdx + 1; $j -lt $end; $j++) {
+        # 沿用段内已有的缩进：同一层的键必须对齐，否则 YAML 会把它算进上一个值里。
+        if ($lines[$j] -match '^(\s+)\S') { $indent = $Matches[1]; break }
+    }
+    for ($j = $customIdx + 1; $j -lt $end; $j++) {
+        if ($lines[$j] -match '^(\s+)domains:\s*(.*)$') {
+            $indent = $Matches[1]
+            $val = $Matches[2].Trim()
+            if ($val -eq "") {
+                # 块状列表：沿用已有条目的缩进（YAML 要求同一列表项对齐），
+                # 没有条目时按常见的两格缩进补。
+                $itemIndent = "$indent  "
+                for ($k = $j + 1; $k -lt $end; $k++) {
+                    if ($lines[$k] -match '^(\s+)-\s') { $itemIndent = $Matches[1]; break }
+                    if ($lines[$k] -match '^\s*\S') { break }
+                }
+                $lines.Insert($j + 1, "$itemIndent- '$domain'")
+            } elseif ($val -match '^\[(.*)\]$') {
+                $inner = $Matches[1].Trim()
+                $list = if ($inner) { "'$domain', $inner" } else { "'$domain'" }
+                $lines[$j] = "${indent}domains: [$list]"
+            } else {
+                # 不认识的写法（正常配置不会出现）：不猜测，让热加载如实报错。
+                $script:notes.Add("custom.domains 的写法无法安全追加，跳过热加载检查")
+            }
+            return ($lines -join $nl)
+        }
+    }
+    # custom 段里还没有 domains：插在第一行子项之前。
+    $lines.Insert($customIdx + 1, "${indent}domains: ['$domain']")
+    return ($lines -join $nl)
+}
+
 function Get-Status {
     # 直接用 HttpClient 且关掉代理：恢复接管后 ProxyEnable=1 指向 127.0.0.1，
     # Invoke-RestMethod 默认会读系统代理设置，可能把「查自己」的请求也塞进代理里。
@@ -225,14 +307,14 @@ Write-Host ""
 # —— 1. 让已有实例正常退出 ——
 $wasRunning = (Get-TongtuProcesses).Count -gt 0
 if ($wasRunning) {
-    Write-Host "[1/9] 检测到已有实例，先正常退出…" -ForegroundColor Yellow
+    Write-Host "[1/10] 检测到已有实例，先正常退出…" -ForegroundColor Yellow
     Start-Process -FilePath $Exe -ArgumentList 'stop' -Wait | Out-Null
     if (-not (Wait-Until { (Get-TongtuProcesses).Count -eq 0 } 15)) {
         Write-Host "结论：无法测试。已有实例没有正常退出。" -ForegroundColor Red
         exit 2
     }
 } else {
-    Write-Host "[1/9] 没有正在运行的通途实例。" -ForegroundColor Gray
+    Write-Host "[1/10] 没有正在运行的通途实例。" -ForegroundColor Gray
 }
 
 # —— 2. 快照并启动 ——
@@ -247,7 +329,7 @@ $snapServer = [string](Get-ItemProperty $regPath).ProxyServer
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 
-Write-Host "[2/9] 启动并等待界面就绪…" -ForegroundColor Gray
+Write-Host "[2/10] 启动并等待界面就绪…" -ForegroundColor Gray
 $script:proc = Start-Process -FilePath $Exe -PassThru
 $mainPid = $script:proc.Id
 $hwnd = [IntPtr]::Zero
@@ -280,7 +362,7 @@ Write-Host ("      窗口已就绪：系统代理={0} hosts={1}（托管块 {2}�
 Start-Sleep -Milliseconds 600
 Shot $hwnd (Join-Path $ShotDir "01-ready.png") | Out-Null
 
-Write-Host "[3/9] 从 /ui/layout 取「暂停」按钮矩形…" -ForegroundColor Gray
+Write-Host "[3/10] 从 /ui/layout 取「暂停」按钮矩形…" -ForegroundColor Gray
 $btn = Get-Region "pause"
 if ($null -eq $btn) {
     Write-Host "结论：未通过。控制端口没有给出窗口几何（窗口没创建 / 没画过？）" -ForegroundColor Red
@@ -294,7 +376,7 @@ Write-Host ("      「{0}」按钮：客户区 ({1},{2})-({3},{4})，点击点 (
 if ($btn.label -ne "暂停") { $script:failures.Add("运行中时暂停按钮标签是 '$($btn.label)'，期望「暂停」") }
 
 # —— 4. 暂停：系统状态 + 断电自愈项都要撤回 ——
-Write-Host "[4/9] 点击「暂停」并选「暂停 15 分钟」…" -ForegroundColor Gray
+Write-Host "[4/10] 点击「暂停」并选「暂停 15 分钟」…" -ForegroundColor Gray
 [UiSmokeNative]::Force($hwnd)
 Start-Sleep -Milliseconds 300
 [UiSmokeNative]::Click(($org.X + $cx), ($org.Y + $cy))
@@ -325,7 +407,7 @@ if (-not $disarmed) { $script:failures.Add("暂停后断电自愈项没有撤掉
 if (-not $labelPaused) { $script:failures.Add("暂停后按钮标签没有变成「恢复」（当前 '$pauseLabelPaused'）") }
 
 # —— 5. 恢复：全部回来，自愈项重新登记 ——
-Write-Host "[5/9] 点击「恢复」…" -ForegroundColor Gray
+Write-Host "[5/10] 点击「恢复」…" -ForegroundColor Gray
 [UiSmokeNative]::Force($hwnd)
 Start-Sleep -Milliseconds 300
 [UiSmokeNative]::Click(($org.X + $cx), ($org.Y + $cy))
@@ -347,7 +429,7 @@ if (-not $armed) { $script:failures.Add("恢复后断电自愈项没有重新登
 if (-not $labelResumed) { $script:failures.Add("恢复后按钮标签没有变回「暂停」（当前 '$pauseLabelResumed'）") }
 
 # —— 6. 日志区右键 → 复制代理地址 ——
-Write-Host "[6/9] 日志区右键「复制代理地址」…" -ForegroundColor Gray
+Write-Host "[6/10] 日志区右键「复制代理地址」…" -ForegroundColor Gray
 Set-Clipboard -Value "tongtu-sentinel"
 [UiSmokeNative]::Force($hwnd)
 Start-Sleep -Milliseconds 500
@@ -363,18 +445,13 @@ if ($clip -ne $proxyURL) { $script:failures.Add("复制代理地址得到 '$clip
 
 # —— 7. 改配置热生效 ——
 if ($SkipHotReload) {
-    Write-Host "[7/9] 跳过热加载检查（-SkipHotReload）。" -ForegroundColor Gray
+    Write-Host "[7/10] 跳过热加载检查（-SkipHotReload）。" -ForegroundColor Gray
 } else {
-    Write-Host "[7/9] 改配置验证热生效…" -ForegroundColor Gray
+    Write-Host "[7/10] 改配置验证热生效…" -ForegroundColor Gray
     $domain = "smoke{0}.example" -f (Get-Random -Minimum 1000 -Maximum 99999)
     $text = [IO.File]::ReadAllText($cfgPath, [System.Text.Encoding]::UTF8)
     $hitsBefore = @(Select-String -Path $logFile -Pattern "配置已热生效" -ErrorAction SilentlyContinue).Count
-    if ($text -match "(?m)^custom:") {
-        $script:notes.Add("配置里已有 custom: 段，热加载检查只验证生效日志，不改写配置结构")
-        $text = $text -replace "(?m)^custom:\r?\n", "custom:`r`n  domains: ['$domain']`r`n"
-    } else {
-        $text = "custom:`r`n  domains: ['$domain']`r`n" + $text
-    }
+    $text = Add-SmokeCustomDomain $text $domain
     [IO.File]::WriteAllText($cfgPath, $text, (New-Object System.Text.UTF8Encoding($false)))
     $script:cfgChanged = $true
     $hot = Wait-Until {
@@ -388,8 +465,64 @@ if ($SkipHotReload) {
     }
 }
 
-# —— 8. 点 × 只隐藏窗口，进程继续跑 ——
-Write-Host "[8/9] 点 ×，确认只隐藏窗口…" -ForegroundColor Gray
+# —— 8. 诊断面板：打开 → 输入域名 → 诊断 → 等结论 → 关闭 ——
+Write-Host "[8/10] 打开诊断面板，诊断 github.com…" -ForegroundColor Gray
+$probeOpened = $false
+$probeDone = $false
+$probeClosed = $false
+$probeVerdict = ""
+[UiSmokeNative]::Force($hwnd)
+Start-Sleep -Milliseconds 300
+$probeBtn = Get-Region "probe"
+if ($null -eq $probeBtn) {
+    $script:failures.Add("界面里没有「诊断」按钮（id=probe）")
+} else {
+    $px, $py = Get-RegionCenter $probeBtn
+    [UiSmokeNative]::Click(($org.X + $px), ($org.Y + $py))
+    Start-Sleep -Milliseconds 500
+    $probeLayout = Get-UILayout
+    $probeOpened = ($null -ne $probeLayout) -and [bool]$probeLayout.probe_open
+    if (-not $probeOpened) { $script:failures.Add("点「诊断」后快照没有标记 probe_open") }
+
+    $runBtn = Get-Region "proberun"
+    $edit = [UiSmokeNative]::VisibleEdit($hwnd)
+    if ($null -eq $runBtn) {
+        $script:failures.Add("诊断面板里没有运行按钮（id=proberun）")
+    } elseif ($edit -eq [IntPtr]::Zero) {
+        $script:failures.Add("诊断面板打开后找不到可见的域名输入框")
+    } else {
+        [UiSmokeNative]::SetText($edit, "github.com")
+        Start-Sleep -Milliseconds 300
+        $rx, $ry = Get-RegionCenter $runBtn
+        [UiSmokeNative]::Click(($org.X + $rx), ($org.Y + $ry))
+        # 结论在状态条上只闪几秒、日志里也没有，因此以 /ui/layout 的 probe_verdict 为准。
+        $probeDone = Wait-Until {
+            $l = Get-UILayout
+            return ($null -ne $l) -and [bool]$l.probe_open -and (-not [bool]$l.probe_busy) -and
+                ([string]$l.probe_verdict -ne "")
+        } 50
+        $shotLayout = Get-UILayout
+        if ($null -ne $shotLayout) { $probeVerdict = [string]$shotLayout.probe_verdict }
+        Shot $hwnd (Join-Path $ShotDir "06-probe.png") | Out-Null
+        if (-not $probeDone) {
+            $script:failures.Add("诊断没有在 50 秒内给出结论（probe_verdict='$probeVerdict'）")
+        }
+    }
+
+    # 再点一次「诊断」回到日志：面板开关必须双向可用，否则用户会被困在面板里。
+    $toggle = Get-Region "probe"
+    if ($null -ne $toggle) {
+        $tx, $ty = Get-RegionCenter $toggle
+        [UiSmokeNative]::Click(($org.X + $tx), ($org.Y + $ty))
+        Start-Sleep -Milliseconds 500
+        $afterClose = Get-UILayout
+        $probeClosed = ($null -ne $afterClose) -and (-not [bool]$afterClose.probe_open)
+        if (-not $probeClosed) { $script:failures.Add("再点「诊断」后面板没有关闭") }
+    }
+}
+
+# —— 9. 点 × 只隐藏窗口，进程继续跑 ——
+Write-Host "[9/10] 点 ×，确认只隐藏窗口…" -ForegroundColor Gray
 [UiSmokeNative]::Force($hwnd)
 Start-Sleep -Milliseconds 300
 [UiSmokeNative]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
@@ -400,7 +533,7 @@ if (-not $hidden) { $script:failures.Add("点 × 之后窗口还可见（应该�
 if ($script:proc.HasExited) { $script:failures.Add("点 × 之后进程退出了（应该继续运行）") }
 if ($null -eq $stAlive -or -not $stAlive.running) { $script:failures.Add("点 × 之后控制端口不可用了（服务应继续运行）") }
 
-Write-Host "[9/9] 结果" -ForegroundColor Gray
+Write-Host "[10/10] 结果" -ForegroundColor Gray
 Write-Host ""
 $rows = @(
     @{ Name = "暂停生效";       Ok = $paused;                 Detail = "paused=$($null -ne $paused -and $paused)" },
@@ -411,6 +544,8 @@ $rows = @(
     @{ Name = "恢复重新登记";   Ok = $armed;                  Detail = $(if ($armed) { "已登记" } else { "未登记" }) },
     @{ Name = "按钮标签随状态变"; Ok = (($pauseLabelPaused -eq "恢复") -and ($pauseLabelResumed -eq "暂停")); Detail = "暂停后='$pauseLabelPaused' 恢复后='$pauseLabelResumed'" },
     @{ Name = "复制代理地址";   Ok = ($clip -eq $proxyURL);    Detail = "'$clip'" },
+    @{ Name = "诊断面板开关";   Ok = ($probeOpened -and $probeClosed); Detail = "打开=$probeOpened 关闭=$probeClosed" },
+    @{ Name = "诊断给出结论";   Ok = $probeDone;              Detail = $(if ($probeVerdict) { $probeVerdict } else { "无结论" }) },
     @{ Name = "× 只隐藏窗口";   Ok = ($hidden -and -not $script:proc.HasExited); Detail = "hidden=$hidden 进程存活=$(-not $script:proc.HasExited)" }
 )
 foreach ($r in $rows) {
@@ -462,7 +597,7 @@ try {
 
 foreach ($n in $script:notes) { Write-Host "备注：$n" -ForegroundColor DarkYellow }
 if ($script:failures.Count -eq 0) {
-    Write-Host "结论：通过。按钮点击、暂停/恢复、右键复制、热加载、× 只隐藏都符合预期。" -ForegroundColor Green
+    Write-Host "结论：通过。按钮点击、暂停/恢复、右键复制、热加载、诊断面板、× 只隐藏都符合预期。" -ForegroundColor Green
     Write-Host "截图见: $ShotDir" -ForegroundColor Gray
     exit 0
 }

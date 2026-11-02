@@ -59,6 +59,9 @@ type uiLayout struct {
 	ProbeAdvice rectT   // 「下一步做什么」的多行说明
 	ProbeHint   rectT   // 底部一行说明
 	ProbeHost   string  // 当前诊断的目标域名（快照用；不参与几何）
+	// 诊断进度与结论（快照用；不参与几何）：脚本据此判断何时结束、结果如何。
+	ProbeBusy    bool
+	ProbeVerdict string
 }
 
 // uiPanelKind 是卡片区当前显示的内容。
@@ -80,6 +83,10 @@ type uiPanelState struct {
 	// ProbeHost 只在诊断面板有意义：它不决定几何，但会进快照/缓存键，
 	// 让 /ui/layout 能告诉脚本「现在诊断的是哪个域名」。
 	ProbeHost string
+	// ProbeBusy / ProbeVerdict 同样不决定几何，只进快照：
+	// 真机脚本靠它们判断一次诊断何时结束、结论是什么（toast 会消失，日志里也没有）。
+	ProbeBusy    bool
+	ProbeVerdict string
 }
 
 // uiSiteRow 是面板里的一行：域名文字在左，「反代」胶囊与「删除」按钮在右。
@@ -351,6 +358,8 @@ func layoutSitePanel(l *uiLayout, panel uiPanelState, contentL, contentR, ctrlY,
 func layoutProbePanel(l *uiLayout, panel uiPanelState, contentL, contentR, ctrlY, sepY, bottom int32,
 	dpi uint32, ctrlH, gap, btnPad int32, measure func(string) int32) {
 	l.ProbeHost = panel.ProbeHost
+	l.ProbeBusy = panel.ProbeBusy
+	l.ProbeVerdict = panel.ProbeVerdict
 
 	runW := 2*btnPad + measure("诊断")
 	inputW := contentR - contentL - gap - runW

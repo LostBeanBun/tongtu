@@ -129,7 +129,7 @@ func TestUILayoutSnapshotProbePanel(t *testing.T) {
 	})
 
 	st := layoutStatus()
-	panel := uiPanelState{Open: true, Kind: uiPanelProbe, ProbeHost: "github.com"}
+	panel := uiPanelState{Open: true, Kind: uiPanelProbe, ProbeHost: "github.com", ProbeBusy: true}
 	l := computeUILayout(855, 481, 96, st, panel, fixedMeasure, fixedMeasure)
 	recordUILayout(l, 855, 481, st)
 
@@ -137,7 +137,21 @@ func TestUILayoutSnapshotProbePanel(t *testing.T) {
 	if !snap.ProbeOpen || snap.ProbeHost != "github.com" {
 		t.Errorf("快照应标记诊断面板与目标域名：%+v", snap)
 	}
+	if !snap.ProbeBusy || snap.ProbeVerdict != "" {
+		t.Errorf("诊断中快照应标记 busy 且没有结论：%+v", snap)
+	}
 	if snap.SitesOpen || len(snap.Sites) != 0 {
 		t.Errorf("诊断面板不该同时标成站点面板：%+v", snap)
+	}
+
+	// 诊断结束：脚本要能从快照里看出「不再 busy」以及结论，而不是等服务端日志
+	// （这条提示只出现在状态条，几秒后就消失）。
+	panel.ProbeBusy = false
+	panel.ProbeVerdict = "可用"
+	l2 := computeUILayout(855, 481, 96, st, panel, fixedMeasure, fixedMeasure)
+	recordUILayout(l2, 855, 481, st)
+	snap2 := uiLayoutSnapshot().(uiSnapshot)
+	if snap2.ProbeBusy || snap2.ProbeVerdict != "可用" {
+		t.Errorf("诊断结束后快照应带上结论：%+v", snap2)
 	}
 }

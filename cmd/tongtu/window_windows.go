@@ -1498,7 +1498,11 @@ func (w *logWindow) panelSnapshot() uiPanelState {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.probeOpen {
-		return uiPanelState{Open: true, Kind: uiPanelProbe, ProbeHost: w.probeTarget}
+		p := uiPanelState{Open: true, Kind: uiPanelProbe, ProbeHost: w.probeTarget, ProbeBusy: w.probeBusy}
+		if w.probeResult != nil {
+			p.ProbeVerdict = w.probeResult.Verdict.Word()
+		}
+		return p
 	}
 	if w.sitesOpen {
 		return uiPanelState{Open: true, Kind: uiPanelSites, Sites: append([]uiSite(nil), w.sites...)}
@@ -1565,6 +1569,14 @@ func panelFingerprint(p uiPanelState) string {
 			b.WriteByte('p')
 			b.WriteByte('|')
 			b.WriteString(p.ProbeHost) // 目标域名进快照，也让布局缓存在目标变化时重算
+			// 进度与结论不改变几何，但必须让缓存失效一次，快照才能跟着更新：
+			// 真机脚本靠它在「诊断中 → 完成」这一刻改变主意。
+			if p.ProbeBusy {
+				b.WriteByte('|')
+				b.WriteByte('b')
+			}
+			b.WriteByte('|')
+			b.WriteString(p.ProbeVerdict)
 		} else {
 			b.WriteByte('1')
 		}
