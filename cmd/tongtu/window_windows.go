@@ -21,6 +21,7 @@ import (
 
 	"tongtu/internal/config"
 	"tongtu/internal/icon"
+	"tongtu/internal/selfcheck"
 )
 
 // 本文件实现「通途自己的窗口」——双击启动时的界面。
@@ -73,6 +74,8 @@ const (
 	wmAppTab          = 0x8000 + 2 // 子控件把 Tab 交回窗口：wparam 低两位 = Shift / 来自站点输入框
 	wmAppEscape       = 0x8000 + 3 // 子控件把 Esc 交回窗口：焦点回到窗口
 	wmAppSiteEnter    = 0x8000 + 4 // 站点输入框里按回车 = 点「添加」
+	wmAppProbeEnter   = 0x8000 + 5 // 诊断输入框里按回车 = 点「诊断」
+	wmAppProbeDone    = 0x8000 + 6 // 后台诊断结束：窗口线程刷新面板
 
 	emGetSel              = 0x00B0
 	emSetSel              = 0x00B1
@@ -244,9 +247,14 @@ const (
 	uiFilterMinDIP = 80  // 过滤输入框窄于这个宽度就不显示（窗口太窄时）
 	// 站点面板：输入框窄于这个宽度时优先保住输入框宽度（「添加」按钮仍然保留）。
 	uiSiteInputMinDIP = 160
-	uiSiteHintDIP     = 18  // 面板底部说明行的高度
-	uiMinWDIP         = 620 // 窗口最小宽度
-	uiMinHDIP         = 320 // 窗口最小高度
+	uiSiteHintDIP     = 18 // 面板底部说明行的高度
+	// 诊断面板：固定 6 行数据 + 一段建议。行长不随结果变化，避免面板跳动。
+	uiProbeRowDIP      = 24
+	uiProbeRowGapDIP   = 4
+	uiProbeLabelGapDIP = 12  // 标签列与值之间的间距
+	uiProbeAdviceDIP   = 40  // 「下一步」建议区的高度（约两行）
+	uiMinWDIP          = 620 // 窗口最小宽度
+	uiMinHDIP          = 320 // 窗口最小高度
 
 	uiPadDIP         = 12 // 客户区四周留白
 	uiCardPadDIP     = 8  // 日志卡片的内边距（内容相对卡片内缩的距离）
@@ -668,6 +676,7 @@ type logWindow struct {
 	edit      windows.Handle // 日志控件
 	filter    windows.Handle // 过滤输入框
 	siteEdit  windows.Handle // 自定义站点面板的域名输入框
+	probeEdit windows.Handle // 域名诊断面板的域名输入框
 	tooltip   windows.Handle // 悬浮提示
 	icon      windows.Handle // 标题前的小图标
 	uiLayout  uiLayout       // 当前几何（绘制与命中共用同一份）
@@ -683,6 +692,14 @@ type logWindow struct {
 	sites     []uiSite
 	// sitesBusy 表示站点增删正在后台执行（改配置 + 重建规则可能要拉一次 hosts）。
 	sitesBusy bool
+	// —— 域名诊断面板 ——
+	// probeOpen 表示卡片区正显示诊断面板（与 sitesOpen 互斥）；probeBusy 表示
+	// 后台诊断还没回来；probeTarget 是这次诊断的域名，probeResult / probeErr 是结果。
+	probeOpen   bool
+	probeBusy   bool
+	probeTarget string
+	probeResult *selfcheck.Row
+	probeErr    string
 	// selfTesting 表示自检正在后台跑：按钮保持选中态，重复点击只提示「正在进行」。
 	selfTesting bool
 	// pendingMode 是正在后台切换的开关 id（空 = 没有）。
@@ -1162,14 +1179,31 @@ func (w *logWindow) create() (windows.Handle, windows.Handle, error) {
 		procSendMessageW.Call(uintptr(siteEdit), emSetCueBanner, ecbTrue, uintptr(unsafe.Pointer(cue)))
 	}
 
+	// 诊断面板的域名输入框：与站点输入框同一种单行 EDIT，只在诊断面板打开时显示。
+	probeEdit, _, callErr := procCreateWindowExW.Call(
+		0,
+		uintptr(unsafe.Pointer(plainEditClass)),
+		0,
+		wsChild|esLeft|esAutoHScroll,
+		0, 0, 10, 10,
+		hwnd, 0, hInst, 0,
+	)
+	if probeEdit == 0 {
+		return 0, 0, fmt.Errorf("创建诊断输入框失败: %v", callErr)
+	}
+	if cue := utf16Ptr(uiProbeInputCue); cue != nil {
+		procSendMessageW.Call(uintptr(probeEdit), emSetCueBanner, ecbTrue, uintptr(unsafe.Pointer(cue)))
+	}
+
 	// 键盘：让 Tab / Esc 能从真控件回到窗口的焦点顺序（见 editSubclassProc）
 	installEditSubclass(windows.Handle(edit), subclassLogEdit)
 	installEditSubclass(windows.Handle(filter), subclassFilter)
 	installEditSubclass(windows.Handle(siteEdit), subclassSiteInput)
+	installEditSubclass(windows.Handle(probeEdit), subclassProbeInput)
 
 	w.mu.Lock()
 	w.theme, w.themeDarkSet, w.themeLightSet, w.dpi = theme, darkSet, lightSet, dpi
-	w.filter, w.siteEdit, w.icon = windows.Handle(filter), windows.Handle(siteEdit), smallIcon
+	w.filter, w.siteEdit, w.probeEdit, w.icon = windows.Handle(filter), windows.Handle(siteEdit), windows.Handle(probeEdit), smallIcon
 	w.mu.Unlock()
 
 	// 常规窗口样式：只把标题栏的明暗交给系统（跟随系统深浅色设置）。
@@ -1192,9 +1226,10 @@ func (w *logWindow) create() (windows.Handle, windows.Handle, error) {
 // 拿不到 comctl32 的 SetWindowSubclass 时静默退化：鼠标操作与其余键盘行为不受影响。
 
 const (
-	subclassLogEdit   = 0 // 日志区：Tab 从「第一个 / 最后一个停靠点」继续
-	subclassFilter    = 1 // 过滤框
-	subclassSiteInput = 2 // 站点输入框
+	subclassLogEdit    = 0 // 日志区：Tab 从「第一个 / 最后一个停靠点」继续
+	subclassFilter     = 1 // 过滤框
+	subclassSiteInput  = 2 // 站点输入框
+	subclassProbeInput = 3 // 诊断输入框
 )
 
 var (
@@ -1226,6 +1261,10 @@ func editSubclassProc(hwnd, msg, wparam, lparam, id, ref uintptr) uintptr {
 		case vkReturn:
 			if ref == subclassSiteInput {
 				procSendMessageW.Call(parent, wmAppSiteEnter, 0, 0)
+				return 0
+			}
+			if ref == subclassProbeInput {
+				procSendMessageW.Call(parent, wmAppProbeEnter, 0, 0)
 				return 0
 			}
 		}
@@ -1380,16 +1419,31 @@ func createUIFont(pt, weight int32, dpi uint32) uintptr {
 // ui_layout_windows.go），这里只负责把过滤框与日志控件挪到算好的位置。
 func (w *logWindow) layout() {
 	hwnd := w.handle()
-	edit, filter, siteEdit := w.editHandle(), w.filterHandle(), w.siteEditHandle()
+	edit, filter, siteEdit, probeEdit := w.editHandle(), w.filterHandle(), w.siteEditHandle(), w.probeEditHandle()
 	if hwnd == 0 || edit == 0 {
 		return
 	}
 	l := w.ensureLayout()
-	if w.panelSnapshot().Open {
-		// 站点面板：日志与过滤框让位，输入框按几何摆好。
+	if panel := w.panelSnapshot(); panel.Open {
+		// 面板打开：日志与过滤框让位，只摆当前面板自己的输入框。
 		procShowWindow.Call(uintptr(edit), swHide)
 		if filter != 0 {
 			procShowWindow.Call(uintptr(filter), swHide)
+		}
+		if panel.Kind == uiPanelProbe {
+			if siteEdit != 0 {
+				procShowWindow.Call(uintptr(siteEdit), swHide)
+			}
+			if probeEdit != 0 && l.ProbeInput.Right > l.ProbeInput.Left {
+				moveWindow(probeEdit, l.ProbeInput)
+				procShowWindow.Call(uintptr(probeEdit), swShow)
+			} else if probeEdit != 0 {
+				procShowWindow.Call(uintptr(probeEdit), swHide)
+			}
+			return
+		}
+		if probeEdit != 0 {
+			procShowWindow.Call(uintptr(probeEdit), swHide)
 		}
 		if siteEdit != 0 && l.SiteInput.Right > l.SiteInput.Left {
 			moveWindow(siteEdit, l.SiteInput)
@@ -1401,6 +1455,9 @@ func (w *logWindow) layout() {
 	}
 	if siteEdit != 0 {
 		procShowWindow.Call(uintptr(siteEdit), swHide)
+	}
+	if probeEdit != 0 {
+		procShowWindow.Call(uintptr(probeEdit), swHide)
 	}
 	if l.Edit.Right <= l.Edit.Left || l.Edit.Bottom <= l.Edit.Top {
 		return
@@ -1428,11 +1485,25 @@ func (w *logWindow) siteEditHandle() windows.Handle {
 	return w.siteEdit
 }
 
-// panelSnapshot 取站点面板的当前状态（打开与否 + 列表）。
+// probeEditHandle 返回诊断面板的输入框句柄。
+func (w *logWindow) probeEditHandle() windows.Handle {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.probeEdit
+}
+
+// panelSnapshot 取卡片区面板的当前状态（打开与否、哪种面板、列表 / 诊断目标）。
+// 站点面板与诊断面板互斥；两者都关时返回零值（日志）。
 func (w *logWindow) panelSnapshot() uiPanelState {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return uiPanelState{Open: w.sitesOpen, Sites: append([]uiSite(nil), w.sites...)}
+	if w.probeOpen {
+		return uiPanelState{Open: true, Kind: uiPanelProbe, ProbeHost: w.probeTarget}
+	}
+	if w.sitesOpen {
+		return uiPanelState{Open: true, Kind: uiPanelSites, Sites: append([]uiSite(nil), w.sites...)}
+	}
+	return uiPanelState{}
 }
 
 // ensureLayout 返回当前几何；客户区尺寸、DPI 或状态项一变就重算。
@@ -1490,7 +1561,13 @@ func itemFingerprint(items []windowStatusItem) string {
 func panelFingerprint(p uiPanelState) string {
 	var b strings.Builder
 	if p.Open {
-		b.WriteByte('1')
+		if p.Kind == uiPanelProbe {
+			b.WriteByte('p')
+			b.WriteByte('|')
+			b.WriteString(p.ProbeHost) // 目标域名进快照，也让布局缓存在目标变化时重算
+		} else {
+			b.WriteByte('1')
+		}
 	} else {
 		b.WriteByte('0')
 	}
@@ -1693,8 +1770,8 @@ func (w *logWindow) paintCard(hdc uintptr, l uiLayout) {
 	}
 
 	// 输入框的 1 像素描边：只靠底色差不够「像输入框」，加一圈发丝线把边界定出来
-	// （画在子控件矩形之外，因此不会被它自己遮住）。日志模式与站点面板各有一个输入框。
-	for _, f := range []rectT{l.Filter, l.SiteInput} {
+	// （画在子控件矩形之外，因此不会被它自己遮住）。日志模式与两种面板各有一个输入框。
+	for _, f := range []rectT{l.Filter, l.SiteInput, l.ProbeInput} {
 		if f.Right > f.Left {
 			drawRectOutline(hdc, rectT{Left: f.Left - 1, Top: f.Top - 1, Right: f.Right + 1, Bottom: f.Bottom + 1}, theme.hairlineBrush)
 		}
@@ -1727,7 +1804,8 @@ func (w *logWindow) paintHeader(hdc uintptr, l uiLayout) {
 	theme, dpi := w.theme, w.dpi
 	font, titleFont := w.font, w.fontTitle
 	status, icon := w.status, w.icon
-	onlyWarn, selfTesting, sitesOpen := w.onlyWarn, w.selfTesting, w.sitesOpen
+	onlyWarn, selfTesting := w.onlyWarn, w.selfTesting
+	sitesOpen, probeOpen, probeBusy := w.sitesOpen, w.probeOpen, w.probeBusy
 	focusID, keyFocus := w.focusID, w.keyFocus
 	w.mu.Unlock()
 	toast := w.activeToast() // 已过期/被清掉的提示按「没有」处理
@@ -1760,6 +1838,8 @@ func (w *logWindow) paintHeader(hdc uintptr, l uiLayout) {
 	procSelectObject.Call(hdc, font)
 	// 站点面板的「添加」在输入框为空时只是「不可用」：弱化显示，点了仍会说明原因。
 	addDim := sitesOpen && w.siteInputText() == ""
+	// 诊断面板同理：输入框为空时不把「诊断」藏起来，只是弱化；诊断中也不可重复点。
+	runDim := probeOpen && (probeBusy || w.probeInputText() == "")
 	for _, r := range l.Regions {
 		// 站点面板每行的「反代」胶囊自带状态（几何层已经算好）；其余胶囊看状态条。
 		on := r.On
@@ -1770,11 +1850,14 @@ func (w *logWindow) paintHeader(hdc uintptr, l uiLayout) {
 			on = selfTesting // 自检进行中：让按钮保持「按下」的样子
 		case r.ID == uiIDSites:
 			on = sitesOpen // 面板打开时按钮保持选中态（再点一次回到日志）
+		case r.ID == uiIDProbe:
+			on = probeOpen
 		case r.Kind == uiChip && !strings.HasPrefix(r.ID, uiSiteMITMPrefix):
 			on = status.onOf(r.ID)
 		}
 		drawRegion(hdc, theme, font, r, dpi, on, w.hoverID == r.ID, w.pressID == r.ID,
-			r.ID == uiIDSiteAdd && addDim, keyFocus && focusID == r.ID)
+			(r.ID == uiIDSiteAdd && addDim) || (r.ID == uiIDProbeRun && runDim),
+			keyFocus && focusID == r.ID)
 	}
 
 	// 第二行：轻量提示优先（那是刚发生的事），否则显示详情
@@ -1808,6 +1891,10 @@ func (w *logWindow) paintHeader(hdc uintptr, l uiLayout) {
 func (w *logWindow) paintPanel(hdc uintptr, l uiLayout) {
 	panel := w.panelSnapshot()
 	if !panel.Open || hdc == 0 {
+		return
+	}
+	if panel.Kind == uiPanelProbe {
+		w.paintProbePanel(hdc, l)
 		return
 	}
 	w.mu.Lock()
@@ -2066,6 +2153,11 @@ func wndProc(hwnd windows.Handle, msg uint32, wparam uintptr, lparam unsafe.Poin
 			procInvalidateRect.Call(uintptr(hwnd), 0, 0)
 			return 0
 		}
+		// 诊断输入框内容变化：同理，只影响「诊断」按钮的可用外观。
+		if child := uint32(wparam >> 16); child == enChange && uintptr(lparam) == uintptr(lw.probeEditHandle()) {
+			procInvalidateRect.Call(uintptr(hwnd), 0, 0)
+			return 0
+		}
 
 	case wmAppSitesChanged:
 		// 后台线程完成了站点增删：控件与几何只能在窗口线程上动，这里统一刷新面板。
@@ -2081,6 +2173,8 @@ func wndProc(hwnd windows.Handle, msg uint32, wparam uintptr, lparam unsafe.Poin
 			from = focusStopFilter
 		case subclassSiteInput:
 			from = focusStopSiteInput
+		case subclassProbeInput:
+			from = focusStopProbeInput
 		}
 		lw.moveKeyboardFocus(hwnd, from, wparam&1 != 0)
 		return 0
@@ -2095,6 +2189,15 @@ func wndProc(hwnd windows.Handle, msg uint32, wparam uintptr, lparam unsafe.Poin
 	case wmAppSiteEnter:
 		// 站点输入框里按回车 = 点「添加」：表单的主要动作不必再摸鼠标。
 		lw.invokeAction(hwnd, uiIDSiteAdd)
+		return 0
+
+	case wmAppProbeEnter:
+		// 诊断输入框里按回车 = 点「诊断」。
+		lw.invokeAction(hwnd, uiIDProbeRun)
+		return 0
+
+	case wmAppProbeDone:
+		lw.onProbeDone()
 		return 0
 
 	case wmTimer:
@@ -2143,14 +2246,14 @@ func wndProc(hwnd windows.Handle, msg uint32, wparam uintptr, lparam unsafe.Poin
 // 返回 0 会让子控件用空画刷绘制，因此不认识的控件交回默认处理。
 func (w *logWindow) ctlColor(hwnd windows.Handle, msg uint32, hdc, child uintptr) uintptr {
 	w.mu.Lock()
-	theme, edit, filter, siteEdit := w.theme, w.edit, w.filter, w.siteEdit
+	theme, edit, filter, siteEdit, probeEdit := w.theme, w.edit, w.filter, w.siteEdit, w.probeEdit
 	w.mu.Unlock()
 
-	if hdc == 0 || (child != uintptr(edit) && child != uintptr(filter) && child != uintptr(siteEdit)) {
+	if hdc == 0 || (child != uintptr(edit) && child != uintptr(filter) && child != uintptr(siteEdit) && child != uintptr(probeEdit)) {
 		ret, _, _ := procDefWindowProcW.Call(uintptr(hwnd), uintptr(msg), hdc, child)
 		return ret
 	}
-	if child == uintptr(filter) || child == uintptr(siteEdit) {
+	if child == uintptr(filter) || child == uintptr(siteEdit) || child == uintptr(probeEdit) {
 		// 输入框压在卡片底上：比卡片底再深/浅一档，看得出是输入框
 		procSetTextColor.Call(hdc, uintptr(theme.text))
 		procSetBkColor.Call(hdc, uintptr(theme.input))

@@ -41,20 +41,45 @@ type uiLayout struct {
 	Card      rectT // 卡片描边矩形
 	Regions   []uiRegion
 
+	// PanelOpen / PanelKind 记录这一帧卡片区显示的是哪种面板（日志模式下 PanelOpen=false）。
+	// 快照接口据此判断当前视图，不用再靠「某个矩形非空」去猜。
+	PanelOpen bool
+	PanelKind uiPanelKind
+
 	// —— 自定义站点面板（panel.Open 时有效，此时 Filter / Edit 为零值）——
 	SiteInput rectT       // 域名输入框（子控件）
 	SiteHint  rectT       // 底部一行说明
 	SiteList  rectT       // 列表区域（空状态提示画在这里）
 	SiteRows  []uiSiteRow // 每一行的位置
+
+	// —— 域名诊断面板（panel.Kind == uiPanelProbe 时有效）——
+	ProbeInput  rectT   // 域名输入框（子控件）
+	ProbeRows   []rectT // 固定 6 行的矩形（结论 / 解析 / TCP / 直连 / 经代理 / 反代）
+	ProbeLabelW int32   // 左侧标签列的宽度（右侧值从这里开始）
+	ProbeAdvice rectT   // 「下一步做什么」的多行说明
+	ProbeHint   rectT   // 底部一行说明
+	ProbeHost   string  // 当前诊断的目标域名（快照用；不参与几何）
 }
 
-// uiPanelState 是卡片区的第二种内容：自定义站点面板。
+// uiPanelKind 是卡片区当前显示的内容。
+type uiPanelKind int
+
+const (
+	uiPanelSites uiPanelKind = iota // 自定义站点（零值，兼容既有调用）
+	uiPanelProbe                    // 单个域名的端到端诊断
+)
+
+// uiPanelState 是卡片区的第二种内容：自定义站点面板或域名诊断面板。
 //
 // 放进几何计算而不是藏进窗口：面板的行数决定每一行的位置，绘制与命中判定必须
 // 用同一份数据（与日志区的几何同理），因此它是 computeUILayout 的入参。
 type uiPanelState struct {
 	Open  bool
+	Kind  uiPanelKind
 	Sites []uiSite
+	// ProbeHost 只在诊断面板有意义：它不决定几何，但会进快照/缓存键，
+	// 让 /ui/layout 能告诉脚本「现在诊断的是哪个域名」。
+	ProbeHost string
 }
 
 // uiSiteRow 是面板里的一行：域名文字在左，「反代」胶囊与「删除」按钮在右。
@@ -82,6 +107,7 @@ func uiActionButtons(st windowStatus) []uiRegion {
 		{ID: uiIDServices, Label: "服务组", Kind: uiGhost, Tip: "加速服务组：选择要为哪些站点加速（至少保留一个）"},
 		{ID: uiIDSites, Label: "站点", Kind: uiGhost, Tip: uiSitesTip},
 		{ID: uiIDSelfTest, Label: "自检", Kind: uiGhost, Tip: uiSelfTestTip},
+		{ID: uiIDProbe, Label: "诊断", Kind: uiGhost, Tip: uiProbeTip},
 		{ID: uiIDPause, Label: pauseLabel, Kind: uiGhost, Tip: pauseTip},
 	}
 	if st.TodoN > 0 {
@@ -146,6 +172,7 @@ func computeUILayout(clientW, clientH int32, dpi uint32, st windowStatus, panel 
 
 	var l uiLayout
 	l.DPI = dpi
+	l.PanelOpen, l.PanelKind = panel.Open, panel.Kind
 
 	// —— 第一行：图标 / 标题 / 状态词 + 开关胶囊 ——
 	l.Icon = rectT{Left: pad, Top: (row1 - iconSide) / 2, Right: pad + iconSide, Bottom: (row1 + iconSide) / 2}
@@ -209,8 +236,13 @@ func computeUILayout(clientW, clientH int32, dpi uint32, st windowStatus, panel 
 	l.FilterSep = rectT{Left: contentL, Top: sepY, Right: contentR, Bottom: sepY + 1}
 
 	if panel.Open {
-		layoutSitePanel(&l, panel, contentL, contentR, ctrlY, sepY, clientH-pad-inset,
-			dpi, ctrlH, gap, chipPad, btnPad, dot, measure)
+		if panel.Kind == uiPanelProbe {
+			layoutProbePanel(&l, panel, contentL, contentR, ctrlY, sepY, clientH-pad-inset,
+				dpi, ctrlH, gap, btnPad, measure)
+		} else {
+			layoutSitePanel(&l, panel, contentL, contentR, ctrlY, sepY, clientH-pad-inset,
+				dpi, ctrlH, gap, chipPad, btnPad, dot, measure)
+		}
 		return l
 	}
 
@@ -308,6 +340,80 @@ func layoutSitePanel(l *uiLayout, panel uiPanelState, contentL, contentR, ctrlY,
 		}
 		l.SiteRows = append(l.SiteRows, uiSiteRow{Pattern: s.Pattern, Rect: row, TextRight: textRight})
 		y += rowH + scaleDPI(4, dpi)
+	}
+}
+
+// layoutProbePanel 计算「域名诊断」面板的几何（computeUILayout 的面板分支）。
+//
+// 从上到下：输入框 + 诊断按钮 / 发丝线 / 固定 6 行（标签 + 值）/ 下一步建议 / 底部说明。
+// 行数与位置不随结果变化，因此诊断前后面板不会「长高」或「缩短」；窗口不够高时
+// 只画放得下的行（与站点面板一样不做滚动），保证建议与底部说明始终可见。
+func layoutProbePanel(l *uiLayout, panel uiPanelState, contentL, contentR, ctrlY, sepY, bottom int32,
+	dpi uint32, ctrlH, gap, btnPad int32, measure func(string) int32) {
+	l.ProbeHost = panel.ProbeHost
+
+	runW := 2*btnPad + measure("诊断")
+	inputW := contentR - contentL - gap - runW
+	if inputW <= 0 {
+		// 窄到放不下按钮时先保住输入框：没有输入框这个面板就没有意义。
+		inputW = contentR - contentL
+		runW = 0
+	}
+	l.ProbeInput = rectT{Left: contentL, Top: ctrlY, Right: contentL + inputW, Bottom: ctrlY + ctrlH}
+	if runW > 0 {
+		rx := contentR - runW
+		l.Regions = append(l.Regions, uiRegion{
+			ID: uiIDProbeRun, Label: "诊断", Kind: uiGhost, Tip: uiProbeRunTip,
+			Rect: rectT{Left: rx, Top: ctrlY, Right: rx + runW, Bottom: ctrlY + ctrlH},
+		})
+	}
+
+	// 从下往上摆：底部说明与建议区先占位，剩下的高度才给 6 行数据。
+	hintH := scaleDPI(uiSiteHintDIP, dpi)
+	l.ProbeHint = rectT{Left: contentL, Top: bottom - hintH, Right: contentR, Bottom: bottom}
+
+	adviceH := scaleDPI(uiProbeAdviceDIP, dpi)
+	adviceBottom := l.ProbeHint.Top - gap
+	adviceTop := adviceBottom - adviceH
+	listTop := sepY + 1 + scaleDPI(8, dpi)
+	if adviceTop < listTop {
+		adviceTop = listTop
+	}
+	if adviceBottom < adviceTop {
+		adviceBottom = adviceTop
+	}
+	l.ProbeAdvice = rectT{Left: contentL, Top: adviceTop, Right: contentR, Bottom: adviceBottom}
+
+	rowsBottom := l.ProbeAdvice.Top - gap
+	if rowsBottom < listTop {
+		rowsBottom = listTop
+	}
+
+	// 标签列按最长标签量一次：值统一从同一列开始，看起来才像一张表。
+	labelW := int32(0)
+	for _, label := range uiProbeLabels {
+		if w := measure(label); w > labelW {
+			labelW = w
+		}
+	}
+	labelW += scaleDPI(uiProbeLabelGapDIP, dpi)
+	if max := (contentR - contentL) / 2; labelW > max {
+		labelW = max
+	}
+	if labelW < 0 {
+		labelW = 0
+	}
+	l.ProbeLabelW = labelW
+
+	rowH := scaleDPI(uiProbeRowDIP, dpi)
+	rowGap := scaleDPI(uiProbeRowGapDIP, dpi)
+	y := listTop
+	for range uiProbeLabels {
+		if y+rowH > rowsBottom {
+			break // 放不下的行不画（固定行数是为了不跳动，不是为了强行塞满）
+		}
+		l.ProbeRows = append(l.ProbeRows, rectT{Left: contentL, Top: y, Right: contentR, Bottom: y + rowH})
+		y += rowH + rowGap
 	}
 }
 

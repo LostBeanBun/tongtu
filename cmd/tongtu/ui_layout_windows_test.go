@@ -68,9 +68,9 @@ func TestUILayoutRightAlignsControls(t *testing.T) {
 			btns = append(btns, r)
 		}
 	}
-	// 退出 / 日志 / 打开配置 / 服务组 / 站点 / 自检 / 暂停 + 只看警告（无待办时不出现「待办」）
-	if len(btns) != 8 {
-		t.Fatalf("应有 8 个幽灵按钮，实际 %d", len(btns))
+	// 退出 / 日志 / 打开配置 / 服务组 / 站点 / 自检 / 诊断 / 暂停 + 只看警告（无待办时不出现「待办」）
+	if len(btns) != 9 {
+		t.Fatalf("应有 9 个幽灵按钮，实际 %d", len(btns))
 	}
 	if btns[0].ID != uiIDQuit || btns[0].Rect.Right != w-pad {
 		t.Errorf("最右侧应是「退出」并贴右留白：%+v", btns[0])
@@ -79,9 +79,15 @@ func TestUILayoutRightAlignsControls(t *testing.T) {
 		t.Errorf("动作按钮应在第二行：%+v", btns[0].Rect)
 	}
 	// 详情区不能压到按钮上
-	firstBtn := btns[6] // 暂停（动作按钮表里的最后一个）
+	var firstBtn uiRegion
+	for _, b := range btns {
+		if b.ID == uiIDPause {
+			firstBtn = b
+			break
+		}
+	}
 	if firstBtn.ID != uiIDPause {
-		t.Fatalf("最左侧的动作按钮应是「暂停」：%+v", firstBtn)
+		t.Fatalf("动作按钮里应有「暂停」：%+v", btns)
 	}
 	if l.Detail.Right > firstBtn.Rect.Left {
 		t.Errorf("详情区压到了按钮：detail.Right=%d 按钮 left=%d", l.Detail.Right, firstBtn.Rect.Left)
@@ -416,6 +422,101 @@ func TestUILayoutSitePanelDropsOverflowRows(t *testing.T) {
 		if row.Rect.Bottom > l.SiteList.Bottom {
 			t.Errorf("行超出列表区域：%+v list=%+v", row.Rect, l.SiteList)
 		}
+	}
+}
+
+// TestUILayoutProbePanel 诊断面板：输入框 + 诊断按钮在工具条位置，下面是固定 6 行，
+// 再下面是建议与底部说明；日志区与过滤框让位。
+func TestUILayoutProbePanel(t *testing.T) {
+	panel := uiPanelState{Open: true, Kind: uiPanelProbe, ProbeHost: "github.com"}
+	l := computeUILayout(800, 500, 96, layoutStatus(), panel, fixedMeasure, fixedMeasure)
+	pad := int32(uiPadDIP)
+	inset := int32(uiCardPadDIP)
+
+	if !l.PanelOpen || l.PanelKind != uiPanelProbe {
+		t.Errorf("几何应标记为诊断面板：open=%v kind=%v", l.PanelOpen, l.PanelKind)
+	}
+	if l.Filter.Right > l.Filter.Left || l.Edit.Right > l.Edit.Left || l.SiteInput.Right > l.SiteInput.Left {
+		t.Errorf("诊断面板打开时不该有日志 / 站点控件几何：filter=%+v edit=%+v site=%+v",
+			l.Filter, l.Edit, l.SiteInput)
+	}
+	if l.ProbeInput.Left != l.Card.Left+1+inset || l.ProbeInput.Right >= l.Card.Right-1-inset {
+		t.Errorf("诊断输入框位置不对：%+v card=%+v", l.ProbeInput, l.Card)
+	}
+	if got := l.ProbeInput.Bottom - l.ProbeInput.Top; got != int32(uiControlDIP) {
+		t.Errorf("输入框高度应为 %d，实际 %d", uiControlDIP, got)
+	}
+	run, ok := regionByID(l, uiIDProbeRun)
+	if !ok {
+		t.Fatalf("诊断面板里应有「诊断」按钮：%+v", l.Regions)
+	}
+	if run.Rect.Left <= l.ProbeInput.Right || run.Rect.Top != l.ProbeInput.Top {
+		t.Errorf("「诊断」应在输入框右侧且同一行：input=%+v run=%+v", l.ProbeInput, run.Rect)
+	}
+	if run.Rect.Right != l.Card.Right-1-inset {
+		t.Errorf("「诊断」应贴右侧内边距：right=%d 期望 %d", run.Rect.Right, l.Card.Right-1-inset)
+	}
+
+	// 固定 6 行：诊断前、诊断中、诊断后位置都不变，面板不会跳动。
+	if len(l.ProbeRows) != len(uiProbeLabels) {
+		t.Fatalf("应固定显示 %d 行，实际 %d", len(uiProbeLabels), len(l.ProbeRows))
+	}
+	if l.ProbeLabelW <= 0 || l.ProbeLabelW >= l.ProbeRows[0].Right-l.ProbeRows[0].Left {
+		t.Errorf("标签列宽度不合理：%d（行宽 %d）", l.ProbeLabelW, l.ProbeRows[0].Right-l.ProbeRows[0].Left)
+	}
+	for i, r := range l.ProbeRows {
+		if i > 0 && r.Top < l.ProbeRows[i-1].Bottom {
+			t.Errorf("第 %d 行与上一行重叠：%+v / %+v", i, l.ProbeRows[i-1], r)
+		}
+		if r.Bottom > l.ProbeAdvice.Top {
+			t.Errorf("第 %d 行压到了建议区：%+v advice=%+v", i, r, l.ProbeAdvice)
+		}
+	}
+	if l.ProbeAdvice.Top < l.ProbeRows[len(l.ProbeRows)-1].Bottom {
+		t.Errorf("建议区应在最后一行下方：advice=%+v rows=%+v", l.ProbeAdvice, l.ProbeRows)
+	}
+	if l.ProbeHint.Top < l.ProbeAdvice.Bottom {
+		t.Errorf("底部说明应在建议区下方：hint=%+v advice=%+v", l.ProbeHint, l.ProbeAdvice)
+	}
+	if l.ProbeHint.Bottom != 500-pad-inset {
+		t.Errorf("底部说明应贴下内边距：bottom=%d 期望 %d", l.ProbeHint.Bottom, 500-pad-inset)
+	}
+	if l.ProbeHost != "github.com" {
+		t.Errorf("几何应带上诊断目标：%q", l.ProbeHost)
+	}
+
+	// 命中判定与几何同源
+	for _, r := range l.Regions {
+		got, ok := l.hit((r.Rect.Left+r.Rect.Right)/2, (r.Rect.Top+r.Rect.Bottom)/2)
+		if !ok || got.ID != r.ID {
+			t.Errorf("区域 %q 的中心点应命中自己，实际 %v/%q", r.ID, ok, got.ID)
+		}
+	}
+}
+
+// TestUILayoutProbePanelNarrow 窄 / 矮窗口：输入框仍可用，行数按剩余高度裁剪，
+// 建议与底部说明不会被挤出客户区。
+func TestUILayoutProbePanelNarrow(t *testing.T) {
+	l := computeUILayout(300, 320, 96, layoutStatus(),
+		uiPanelState{Open: true, Kind: uiPanelProbe}, fixedMeasure, fixedMeasure)
+	if l.ProbeInput.Right <= l.ProbeInput.Left {
+		t.Fatalf("窄窗口下输入框仍要可用：%+v", l.ProbeInput)
+	}
+	if run, ok := regionByID(l, uiIDProbeRun); ok {
+		if run.Rect.Left < l.ProbeInput.Right {
+			t.Errorf("输入框与「诊断」重叠：input=%+v run=%+v", l.ProbeInput, run.Rect)
+		}
+	}
+	if len(l.ProbeRows) == 0 || len(l.ProbeRows) > len(uiProbeLabels) {
+		t.Fatalf("行数应被裁剪到 1..%d，实际 %d", len(uiProbeLabels), len(l.ProbeRows))
+	}
+	for _, r := range l.ProbeRows {
+		if r.Bottom > l.ProbeAdvice.Top || r.Bottom > 320 {
+			t.Errorf("行超出可用区域：%+v advice=%+v", r, l.ProbeAdvice)
+		}
+	}
+	if l.ProbeHint.Bottom > 320 || l.ProbeAdvice.Bottom > l.ProbeHint.Top {
+		t.Errorf("建议 / 说明超出客户区：advice=%+v hint=%+v", l.ProbeAdvice, l.ProbeHint)
 	}
 }
 

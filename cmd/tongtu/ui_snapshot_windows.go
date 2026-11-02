@@ -38,6 +38,10 @@ type uiSnapshot struct {
 	// 否则会照着旧快照去点已经隐藏的日志控件。
 	SitesOpen bool     `json:"sites_open"`
 	Sites     []string `json:"sites,omitempty"`
+
+	// 域名诊断面板：同样让日志控件让位；Host 是这次诊断的目标（未诊断时为空）。
+	ProbeOpen bool   `json:"probe_open"`
+	ProbeHost string `json:"probe_host,omitempty"`
 }
 
 var (
@@ -55,11 +59,16 @@ func recordUILayout(l uiLayout, clientW, clientH int32, st windowStatus) {
 		})
 	}
 	snap := &uiSnapshot{DPI: l.DPI, ClientW: clientW, ClientH: clientH, Paused: st.Paused, Regions: regions}
-	// 面板打开时才有站点输入框几何（日志模式下 SiteInput 是零值）。
-	if l.SiteInput.Right > l.SiteInput.Left {
-		snap.SitesOpen = true
-		for _, row := range l.SiteRows {
-			snap.Sites = append(snap.Sites, row.Pattern)
+	// 面板打开时快照要标明是哪种视图：脚本据此决定点日志控件还是面板控件。
+	if l.PanelOpen {
+		if l.PanelKind == uiPanelProbe {
+			snap.ProbeOpen = true
+			snap.ProbeHost = l.ProbeHost
+		} else {
+			snap.SitesOpen = true
+			for _, row := range l.SiteRows {
+				snap.Sites = append(snap.Sites, row.Pattern)
+			}
 		}
 	}
 	uiSnapMu.Lock()

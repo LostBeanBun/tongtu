@@ -34,6 +34,8 @@ const (
 	uiIDOnlyWarn  = "onlywarn"  // 只看警告
 	uiIDSites     = "sites"     // 自定义站点面板（打开 / 回到日志）
 	uiIDSiteAdd   = "siteadd"   // 自定义站点面板里的「添加」
+	uiIDProbe     = "probe"     // 域名诊断面板（打开 / 回到日志）
+	uiIDProbeRun  = "proberun"  // 诊断面板里的「诊断」
 
 	// 自定义站点面板里每一行的动作 id 前缀（后缀是域名本身）。
 	uiSiteDelPrefix  = "sitedel:"
@@ -104,6 +106,9 @@ type windowActions struct {
 	// SelfTest 跑一次端到端自检（约 10 秒；窗口在后台 goroutine 上调用它）。
 	// ctx 取消时应尽快收手（见 internal/selfcheck）。
 	SelfTest func(ctx context.Context) []selfcheck.Row
+	// Probe 对单个域名做一次端到端体检（窗口「诊断」面板用）。
+	// 与 SelfTest 共用 internal/selfcheck，只是范围缩小到一个域名。
+	Probe func(ctx context.Context, host string) selfcheck.Row
 	// LogPath 返回当前日志文件路径（未启用文件日志时返回空串）。
 	LogPath func() string
 	// OpenLog 打开日志文件（文件不存在时退回打开数据目录）。

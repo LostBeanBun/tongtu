@@ -611,6 +611,7 @@ func wireWindowActions(a *app.App, cfg *config.Config, quit func(), restartEleva
 			Quit:        quit,
 			Refresh:     func() { setWindowStatus(windowStatusOf(a, cfg)) },
 			SelfTest:    func(ctx context.Context) []selfcheck.Row { return runSelfCheck(ctx, a, cfg) },
+			Probe:       func(ctx context.Context, host string) selfcheck.Row { return a.Probe(ctx, host) },
 			LogPath:     func() string { return cfg.LogFilePath() },
 			OpenLog:     func() error { return openLogInExplorer(cfg) },
 			Diagnostics: func() string { return buildDiagnostics(a, cfg) },

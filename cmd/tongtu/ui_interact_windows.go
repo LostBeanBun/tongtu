@@ -232,8 +232,9 @@ func mousePoint(lparam uintptr) (int32, int32) {
 // 交回窗口（见 window_windows.go 的 editSubclassProc），键盘用户因此不会被困在输入框里。
 
 const (
-	focusStopFilter    = "focus:filter"
-	focusStopSiteInput = "focus:siteinput"
+	focusStopFilter     = "focus:filter"
+	focusStopSiteInput  = "focus:siteinput"
+	focusStopProbeInput = "focus:probeinput"
 )
 
 // focusStop 是一个 Tab 停靠点：自绘区域用动作 id，输入框用上面的伪 id。
@@ -246,7 +247,7 @@ type focusStop struct {
 // focusStopsOf 把一帧里的可交互控件按「从上到下、从左到右」排成 Tab 顺序。
 // 纯函数：几何来自 uiLayout，因此可以脱离窗口单测。
 func focusStopsOf(l uiLayout) []focusStop {
-	stops := make([]focusStop, 0, len(l.Regions)+2)
+	stops := make([]focusStop, 0, len(l.Regions)+3)
 	for _, r := range l.Regions {
 		stops = append(stops, focusStop{ID: r.ID, Top: r.Rect.Top, Left: r.Rect.Left})
 	}
@@ -255,6 +256,9 @@ func focusStopsOf(l uiLayout) []focusStop {
 	}
 	if l.SiteInput.Right > l.SiteInput.Left {
 		stops = append(stops, focusStop{ID: focusStopSiteInput, Top: l.SiteInput.Top, Left: l.SiteInput.Left})
+	}
+	if l.ProbeInput.Right > l.ProbeInput.Left {
+		stops = append(stops, focusStop{ID: focusStopProbeInput, Top: l.ProbeInput.Top, Left: l.ProbeInput.Left})
 	}
 	sort.SliceStable(stops, func(i, j int) bool {
 		if stops[i].Top != stops[j].Top {
@@ -308,6 +312,11 @@ func (w *logWindow) setKeyboardFocus(hwnd windows.Handle, id string) {
 	case focusStopSiteInput:
 		w.setFocusID("")
 		if e := w.siteEditHandle(); e != 0 {
+			procSetFocus.Call(uintptr(e))
+		}
+	case focusStopProbeInput:
+		w.setFocusID("")
+		if e := w.probeEditHandle(); e != 0 {
 			procSetFocus.Call(uintptr(e))
 		}
 	default:
@@ -679,6 +688,10 @@ func (w *logWindow) invokeAction(hwnd windows.Handle, id string) {
 		w.toggleSitesPanel(hwnd)
 	case uiIDSiteAdd:
 		w.addSiteFromInput()
+	case uiIDProbe:
+		w.toggleProbePanel(hwnd)
+	case uiIDProbeRun:
+		w.runProbeFromInput()
 	case uiIDConfig:
 		if act.OpenConfig == nil {
 			w.toast("当前实例无法打开配置文件", styleWarn)
@@ -956,9 +969,10 @@ func (w *logWindow) toggleSitesPanel(hwnd windows.Handle) {
 		w.toast("当前实例无法管理自定义站点", styleWarn)
 		return
 	}
-	open := !w.panelSnapshot().Open
+	open := !w.panelSnapshot().Open || w.panelSnapshot().Kind != uiPanelSites
 	w.mu.Lock()
 	w.sitesOpen = open
+	w.probeOpen = false // 两种面板互斥：打开站点就等于离开诊断
 	w.mu.Unlock()
 
 	w.layout()

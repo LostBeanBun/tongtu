@@ -55,6 +55,11 @@ type fakeActions struct {
 	siteRemoves []string
 	siteMITMs   []fakeSiteMITM
 	siteErr     error
+
+	// 域名诊断：同样跑在后台 goroutine 上。
+	probeGate  chan struct{} // 非 nil 时 Probe 会等它被关闭
+	probeRow   selfcheck.Row // Probe 的返回值
+	probeCalls []string      // 依次记录被诊断的域名
 }
 
 type fakeSiteMITM struct {
@@ -106,6 +111,20 @@ func (f *fakeActions) actions() windowActions {
 				<-gate
 			}
 			return rows
+		},
+		Probe: func(ctx context.Context, host string) selfcheck.Row {
+			f.mu.Lock()
+			f.probeCalls = append(f.probeCalls, host)
+			gate, row := f.probeGate, f.probeRow
+			f.mu.Unlock()
+			if gate != nil {
+				<-gate
+			}
+			_ = ctx
+			if row.Host == "" {
+				row.Host = host
+			}
+			return row
 		},
 		CertReady: func() bool {
 			f.mu.Lock()
@@ -205,6 +224,13 @@ func (f *fakeActions) siteCalls() (adds, removes []string, mitms []fakeSiteMITM)
 		append([]fakeSiteMITM(nil), f.siteMITMs...)
 }
 
+// probes 返回依次被诊断的域名。
+func (f *fakeActions) probes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.probeCalls...)
+}
+
 // recordPause 记录一次暂停 / 恢复，并在需要时卡住（模拟耗时的接管 / 还原）。
 func (f *fakeActions) recordPause(what string) error {
 	f.mu.Lock()
@@ -273,6 +299,12 @@ func useFakeActions(t *testing.T, f *fakeActions) {
 			defer lw.mu.Unlock()
 			return !lw.selfTesting
 		})
+		// 诊断也跑在后台：它的结果会落到面板与提示上，必须等它收尾再复位。
+		waitFor(t, "诊断收尾", func() bool {
+			lw.mu.Lock()
+			defer lw.mu.Unlock()
+			return !lw.probeBusy
+		})
 		// 站点增删同样在后台跑；面板状态是全局的，必须还原，否则会影响后面的用例。
 		waitFor(t, "站点操作收尾", func() bool {
 			lw.mu.Lock()
@@ -281,6 +313,8 @@ func useFakeActions(t *testing.T, f *fakeActions) {
 		})
 		lw.mu.Lock()
 		lw.sitesOpen, lw.sites = false, nil
+		lw.probeOpen, lw.probeBusy = false, false
+		lw.probeResult, lw.probeErr, lw.probeTarget = nil, "", ""
 		lw.mu.Unlock()
 		lw.layout()
 	})
@@ -1538,5 +1572,246 @@ func TestContextMenuTargetsLogEdit(t *testing.T) {
 	}
 	if lw.isLogEdit(uintptr(edit) + 4) {
 		t.Error("别的子窗口不该弹菜单")
+	}
+}
+
+// —— 域名诊断面板 ——
+
+// probeStatusRow 是一份「可用」的诊断结果。
+func probeStatusRow() selfcheck.Row {
+	return selfcheck.Row{
+		Host: "github.com", IP: "1.2.3.4", DNSMs: 12, DNSOK: true,
+		TCP: "18ms", TCPOK: true,
+		Direct: "HTTP 200", DirectOK: true,
+		Proxy: "HTTP 200", ProxyOK: true, ProxyTested: true,
+		MITM: "未启用", Verdict: selfcheck.VerdictOK,
+	}
+}
+
+// TestProbePanelToggleAndRun 「诊断」按钮打开面板，输入域名后点「诊断」，
+// 后台返回结果并显示在面板里；再点一次回到日志。
+func TestProbePanelToggleAndRun(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, false, false)
+	f := &fakeActions{probeRow: probeStatusRow()}
+	useFakeActions(t, f)
+	lw.mu.Lock()
+	lw.probeOpen, lw.sitesOpen = false, false
+	lw.mu.Unlock()
+	lw.layout()
+
+	clickRegion(t, uiIDProbe)
+	waitFor(t, "诊断面板打开", func() bool {
+		p := lw.panelSnapshot()
+		return p.Open && p.Kind == uiPanelProbe
+	})
+	if _, ok := lw.regionAtID(uiIDProbeRun); !ok {
+		t.Fatal("诊断面板里应有「诊断」按钮")
+	}
+	edit := lw.probeEditHandle()
+	if edit == 0 {
+		t.Skip("诊断输入框未创建")
+	}
+	lw.setProbeInputText("https://GitHub.com/user/repo?x=1")
+
+	clickRegion(t, uiIDProbeRun)
+	waitFor(t, "发起诊断", func() bool {
+		return len(f.probes()) == 1
+	})
+	if got := f.probes(); len(got) != 1 || got[0] != "github.com" {
+		t.Fatalf("应把规范化后的域名交给 app 层，实际 %v", got)
+	}
+	waitFor(t, "诊断收尾", func() bool {
+		lw.mu.Lock()
+		defer lw.mu.Unlock()
+		return !lw.probeBusy && lw.probeResult != nil
+	})
+	if row := lw.probeResult; row == nil || row.Verdict != selfcheck.VerdictOK {
+		t.Errorf("面板应保留诊断结果，实际 %+v", row)
+	}
+	waitToast(t, "诊断完成的反馈", "诊断完成：github.com 可用")
+
+	// 再点一次：回到日志，面板控件不再可点。
+	clickRegion(t, uiIDProbe)
+	waitFor(t, "诊断面板关闭", func() bool { return !lw.panelSnapshot().Open })
+	if _, ok := lw.regionAtID(uiIDProbeRun); ok {
+		t.Error("关闭后不该还有「诊断」按钮")
+	}
+}
+
+// TestProbeEnterKeyRuns 诊断输入框里按回车等于点「诊断」。
+func TestProbeEnterKeyRuns(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	if !subclassReady {
+		t.Skip("当前环境没有可用的 SetWindowSubclass")
+	}
+	setStatusForInteraction(false, false, false)
+	f := &fakeActions{probeRow: probeStatusRow()}
+	useFakeActions(t, f)
+	lw.mu.Lock()
+	lw.probeOpen, lw.sitesOpen = false, false
+	lw.mu.Unlock()
+	lw.layout()
+
+	clickRegion(t, uiIDProbe)
+	waitFor(t, "诊断面板打开", func() bool { return lw.panelSnapshot().Open })
+	edit := lw.probeEditHandle()
+	if edit == 0 {
+		t.Skip("诊断输入框未创建")
+	}
+	lw.setProbeInputText("enter.example.com")
+
+	sendKey(t, edit, vkReturn)
+	waitFor(t, "回车发起诊断", func() bool {
+		calls := f.probes()
+		return len(calls) == 1 && calls[0] == "enter.example.com"
+	})
+}
+
+// TestProbePanelExclusiveWithSites 诊断与站点是同一个卡片区的两种视图，互斥切换。
+func TestProbePanelExclusiveWithSites(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, false, false)
+	f := &fakeActions{sites: []uiSite{{Pattern: "my.site.com"}}, probeRow: probeStatusRow()}
+	useFakeActions(t, f)
+	lw.mu.Lock()
+	lw.probeOpen, lw.sitesOpen = false, false
+	lw.mu.Unlock()
+	lw.layout()
+
+	clickRegion(t, uiIDSites)
+	waitFor(t, "站点面板打开", func() bool {
+		p := lw.panelSnapshot()
+		return p.Open && p.Kind == uiPanelSites
+	})
+
+	clickRegion(t, uiIDProbe)
+	waitFor(t, "切到诊断面板", func() bool {
+		lw.mu.Lock()
+		defer lw.mu.Unlock()
+		return lw.probeOpen && !lw.sitesOpen
+	})
+	if _, ok := lw.regionAtID(uiIDSiteAdd); ok {
+		t.Error("诊断面板打开时不该还有「添加」按钮")
+	}
+
+	clickRegion(t, uiIDSites)
+	waitFor(t, "切回站点面板", func() bool {
+		lw.mu.Lock()
+		defer lw.mu.Unlock()
+		return lw.sitesOpen && !lw.probeOpen
+	})
+	if _, ok := lw.regionAtID(uiIDProbeRun); ok {
+		t.Error("站点面板打开时不该还有「诊断」按钮")
+	}
+}
+
+// TestProbeBusyIgnored 诊断进行中重复点只提示，不会再起一次。
+func TestProbeBusyIgnored(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, false, false)
+	gate := make(chan struct{})
+	f := &fakeActions{probeGate: gate, probeRow: probeStatusRow()}
+	useFakeActions(t, f)
+	lw.mu.Lock()
+	lw.probeOpen, lw.sitesOpen = true, false
+	lw.mu.Unlock()
+	lw.layout()
+	lw.setProbeInputText("github.com")
+
+	clickRegion(t, uiIDProbeRun)
+	waitFor(t, "诊断开始", func() bool {
+		lw.mu.Lock()
+		defer lw.mu.Unlock()
+		return lw.probeBusy && len(f.probes()) == 1
+	})
+	clickRegion(t, uiIDProbeRun)
+	if got := toastText(); !strings.Contains(got, "正在进行") {
+		t.Errorf("重复点击应提示「正在进行」，实际 %q", got)
+	}
+	if n := len(f.probes()); n != 1 {
+		t.Errorf("诊断进行中不该再起一次，实际 %d 次", n)
+	}
+
+	close(gate)
+	waitFor(t, "诊断收尾", func() bool {
+		lw.mu.Lock()
+		defer lw.mu.Unlock()
+		return !lw.probeBusy
+	})
+}
+
+// TestProbeInputErrorsReported 空输入 / 通配写法都不派发诊断，只把原因写在面板与提示里。
+func TestProbeInputErrorsReported(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, false, false)
+	f := &fakeActions{probeRow: probeStatusRow()}
+	useFakeActions(t, f)
+	lw.mu.Lock()
+	lw.probeOpen, lw.sitesOpen = true, false
+	lw.mu.Unlock()
+	lw.layout()
+
+	lw.setProbeInputText("")
+	clickRegion(t, uiIDProbeRun)
+	if got := toastText(); !strings.Contains(got, "请先输入域名") {
+		t.Errorf("空输入应提示先输入域名，实际 %q", got)
+	}
+
+	lw.setProbeInputText("*.example.com")
+	clickRegion(t, uiIDProbeRun)
+	waitToast(t, "通配写法被拒绝", "通配")
+	if calls := f.probes(); len(calls) != 0 {
+		t.Errorf("非法输入不该派发诊断，实际 %v", calls)
+	}
+	lw.mu.Lock()
+	errMsg := lw.probeErr
+	lw.mu.Unlock()
+	if !strings.Contains(errMsg, "具体域名") {
+		t.Errorf("面板应保留失败原因，实际 %q", errMsg)
+	}
+}
+
+// TestProbeWithoutImplementation 当前实例没有 Probe 实现时，面板打开并说明原因，不 panic。
+func TestProbeWithoutImplementation(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, false, false)
+	// 只注入其余动作，故意不提供 Probe。
+	f := &fakeActions{}
+	act := f.actions()
+	act.Probe = nil
+	setWindowActionsHook(func() windowActions { return act })
+	t.Cleanup(func() {
+		setWindowActionsHook(nil)
+		lw.mu.Lock()
+		lw.probeOpen = false
+		lw.mu.Unlock()
+		lw.layout()
+	})
+	lw.mu.Lock()
+	lw.probeOpen, lw.sitesOpen = false, false
+	lw.mu.Unlock()
+	lw.layout()
+
+	clickRegion(t, uiIDProbe)
+	waitFor(t, "面板打开并说明不支持", func() bool {
+		lw.mu.Lock()
+		defer lw.mu.Unlock()
+		return lw.probeOpen && strings.Contains(lw.probeErr, "不支持诊断")
+	})
+	if got := toastText(); !strings.Contains(got, "不支持诊断") {
+		t.Errorf("应提示当前实例不支持诊断，实际 %q", got)
 	}
 }

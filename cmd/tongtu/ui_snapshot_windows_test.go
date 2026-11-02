@@ -115,3 +115,29 @@ func TestUILayoutSnapshotSitesPanel(t *testing.T) {
 		t.Errorf("日志模式下不该标记面板：%+v", snap2)
 	}
 }
+
+// TestUILayoutSnapshotProbePanel 诊断面板打开时快照要标明视图与目标域名，
+// 并且不能再标成站点面板（两者互斥）。
+func TestUILayoutSnapshotProbePanel(t *testing.T) {
+	uiSnapMu.Lock()
+	old := uiSnap
+	uiSnapMu.Unlock()
+	t.Cleanup(func() {
+		uiSnapMu.Lock()
+		uiSnap = old
+		uiSnapMu.Unlock()
+	})
+
+	st := layoutStatus()
+	panel := uiPanelState{Open: true, Kind: uiPanelProbe, ProbeHost: "github.com"}
+	l := computeUILayout(855, 481, 96, st, panel, fixedMeasure, fixedMeasure)
+	recordUILayout(l, 855, 481, st)
+
+	snap := uiLayoutSnapshot().(uiSnapshot)
+	if !snap.ProbeOpen || snap.ProbeHost != "github.com" {
+		t.Errorf("快照应标记诊断面板与目标域名：%+v", snap)
+	}
+	if snap.SitesOpen || len(snap.Sites) != 0 {
+		t.Errorf("诊断面板不该同时标成站点面板：%+v", snap)
+	}
+}
