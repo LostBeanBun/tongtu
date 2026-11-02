@@ -69,6 +69,16 @@
 - 本地通过：`gofmt`、`go vet ./...`、staticcheck、`go test ./... -count=1`、
   `GOOS=linux go build ./...`、`.\build.ps1`；`dist\tongtu.exe version` 输出 `tongtu 0.11.0`。
 - `-race` 与 Linux 测试由 CI 覆盖（本机无 gcc / WSL）。
+- CI 实跑全绿（run `41395145776`，提交 `51d6b23`）：格式与静态检查、Linux 测试、
+  Windows 完整测试均通过。
+- Release 实跑成功（run `41395319667`，tag `v0.11.0` → `51d6b23`）：质量门、构建、
+  exe 版本自检、打包与发布全部通过。`releases/latest` 已指向 v0.11.0；
+  `tongtu-0.11.0-windows-x64.exe`（10,156,544 字节）SHA-256 为
+  `d80ae1d6129f80f211c22167dd2c92097d2970867ef8020eca1bb6b2f7effafa`，
+  与 Release 附件 `SHA256SUMS.txt` 及资产 digest 一致；下载后 `tongtu version` 输出
+  `tongtu 0.11.0`。
+- 真机界面冒烟（`tools/ui-smoke.ps1`）已加入「复制结果」断言；本机当时正跑 24 小时浸泡
+  （占用控制端口），将在浸泡结束后补跑并记录结果。
 
 ## [0.10.0] - 2026-11-02
 
