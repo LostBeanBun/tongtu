@@ -36,6 +36,12 @@ const (
 	uiIDSiteAdd   = "siteadd"   // 自定义站点面板里的「添加」
 	uiIDProbe     = "probe"     // 域名诊断面板（打开 / 回到日志）
 	uiIDProbeRun  = "proberun"  // 诊断面板里的「诊断」
+	// 诊断面板底部的下一步动作：诊断本身只读，这些按钮是用户明确点了才会改配置。
+	uiIDProbeCopy   = "probecopy"   // 复制这次诊断的结果与建议
+	uiIDProbeAdd    = "probeadd"    // 把诊断目标加入自定义站点
+	uiIDProbeMITM   = "probemitm"   // 为诊断目标打开无 SNI 反代
+	uiIDProbeConfig = "probeconfig" // 打开配置文件
+	uiIDProbeTodo   = "probetodo"   // 打开待办菜单
 
 	// 自定义站点面板里每一行的动作 id 前缀（后缀是域名本身）。
 	uiSiteDelPrefix  = "sitedel:"

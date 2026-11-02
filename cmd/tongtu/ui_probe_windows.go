@@ -9,11 +9,14 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 
+	"tongtu/internal/clipboard"
 	"tongtu/internal/selfcheck"
 )
 
@@ -171,6 +174,161 @@ func (w *logWindow) onProbeDone() {
 	if hwnd := w.handle(); hwnd != 0 {
 		procInvalidateRect.Call(uintptr(hwnd), 0, 0)
 	}
+}
+
+// probeHost 返回这次诊断的目标域名（诊断中、诊断后都有效）。
+func (w *logWindow) probeHost() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.probeTarget != "" {
+		return w.probeTarget
+	}
+	if w.probeResult != nil {
+		return w.probeResult.Host
+	}
+	return ""
+}
+
+// copyProbeResult 把当前诊断复制成纯文本（「复制结果」）。
+//
+// 复制的是与屏幕完全一致的内容（uiProbeText 复用行文案与建议），方便用户把它贴给
+// 别人排查；诊断本身仍然只读，这里只写剪贴板。
+func (w *logWindow) copyProbeResult() {
+	w.mu.Lock()
+	row, busy, errMsg, paused := w.probeResult, w.probeBusy, w.probeErr, w.status.Paused
+	w.mu.Unlock()
+
+	if busy {
+		w.toast("诊断正在进行，请稍候…", styleMuted)
+		return
+	}
+	if row == nil {
+		if errMsg != "" {
+			w.toast("这次诊断没有结果可复制："+errMsg, styleWarn)
+		} else {
+			w.toast("还没有诊断结果，先输入域名点「诊断」", styleMuted)
+		}
+		return
+	}
+	if err := clipboard.Copy(uiProbeText(row, paused)); err != nil {
+		w.report(uiIDProbeCopy, err)
+		return
+	}
+	w.toast("诊断结果已复制到剪贴板", styleOK)
+}
+
+// probeAddSite 把诊断目标加入自定义站点（失败时的「加入站点」）。
+//
+// 先在后台读一次站点列表：已经在列表里就只提示，不派发一次注定失败的写入。
+// 写配置与重建规则放在 goroutine 上，窗口线程只负责反馈，避免界面卡住。
+func (w *logWindow) probeAddSite() {
+	act := currentWindowActions()
+	if act.AddSite == nil {
+		w.toast("当前实例无法添加自定义站点", styleWarn)
+		return
+	}
+	host := w.probeHost()
+	if host == "" {
+		w.toast("没有可加入的域名", styleWarn)
+		return
+	}
+	if !w.siteBusyBegin() {
+		w.toast("正在处理，请稍候…", styleMuted)
+		return
+	}
+	hwnd := w.handle()
+	w.toast("正在加入站点 "+host+"…", styleMuted)
+	go func() {
+		defer w.siteBusyEnd()
+		if act.Sites != nil {
+			for _, s := range act.Sites() {
+				if strings.EqualFold(s.Pattern, host) {
+					w.toast(host+" 已经在自定义站点里", styleMuted)
+					return
+				}
+			}
+		}
+		if _, err := act.AddSite(host); err != nil {
+			w.report(uiIDProbeAdd, err)
+			return
+		}
+		w.toast("已加入站点 "+host+"，立即生效", styleOK)
+		w.applySites(hwnd, act, false)
+		if act.Refresh != nil {
+			act.Refresh()
+		}
+	}()
+}
+
+// probeOpenMITM 为诊断目标打开无 SNI 反代（失败时的「打开反代」）。
+//
+// 与开关反代走同一套前置检查：缺根证书先问一次并支持一键安装；目标还不在站点里
+// 就先加进去。成功后不自动重跑诊断——用户想复查可以再点「诊断」，那样更容易看懂
+// 「刚才那次结果」和「现在又测了一次」的区别。
+func (w *logWindow) probeOpenMITM() {
+	act := currentWindowActions()
+	if act.AddSite == nil || act.SetSiteMITM == nil {
+		w.toast("当前实例无法修改反代设置", styleWarn)
+		return
+	}
+	host := w.probeHost()
+	if host == "" {
+		w.toast("没有可处理的域名", styleWarn)
+		return
+	}
+	if !w.siteBusyBegin() {
+		w.toast("正在处理，请稍候…", styleMuted)
+		return
+	}
+	hwnd := w.handle()
+	w.toast("正在为 "+host+" 打开反代…", styleMuted)
+	go func() {
+		defer w.siteBusyEnd()
+		if act.CertReady != nil && !act.CertReady() {
+			if act.InstallCert == nil {
+				w.report(uiIDProbeMITM, fmt.Errorf("根证书未安装，且当前实例不支持一键安装"))
+				return
+			}
+			if !confirmInstallCert() {
+				w.toast("已取消：开启无 SNI 反代需要根证书", styleMuted)
+				return
+			}
+			w.toast("正在安装根证书（可能弹出系统确认框，请留意屏幕）…", styleMuted)
+			if err := act.InstallCert(); err != nil {
+				w.report(uiIDProbeMITM, err)
+				return
+			}
+		}
+
+		inSites := false
+		if act.Sites != nil {
+			for _, s := range act.Sites() {
+				if strings.EqualFold(s.Pattern, host) {
+					inSites = true
+					if s.MITM {
+						w.toast(host+" 的反代已经开着", styleMuted)
+						return
+					}
+					break
+				}
+			}
+		}
+		if !inSites {
+			if _, err := act.AddSite(host); err != nil {
+				w.report(uiIDProbeMITM, err)
+				return
+			}
+		}
+		if err := act.SetSiteMITM(host, true); err != nil {
+			w.report(uiIDProbeMITM, err)
+			return
+		}
+		w.toast("已为 "+host+" 打开反代；再点「诊断」可复查", styleOK)
+		w.applySites(hwnd, act, false)
+		if act.Refresh != nil {
+			act.Refresh()
+		}
+	}()
 }
 
 // paintProbePanel 画诊断面板：固定 6 行（标签 + 值）、下一步建议与底部说明。

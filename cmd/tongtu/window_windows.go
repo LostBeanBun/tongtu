@@ -1498,7 +1498,10 @@ func (w *logWindow) panelSnapshot() uiPanelState {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.probeOpen {
-		p := uiPanelState{Open: true, Kind: uiPanelProbe, ProbeHost: w.probeTarget, ProbeBusy: w.probeBusy}
+		p := uiPanelState{
+			Open: true, Kind: uiPanelProbe, ProbeHost: w.probeTarget, ProbeBusy: w.probeBusy,
+			ProbeActions: uiProbeActions(w.probeResult, w.probeBusy, w.probeErr, w.status.TodoN),
+		}
 		if w.probeResult != nil {
 			p.ProbeVerdict = w.probeResult.Verdict.Word()
 		}
@@ -1577,6 +1580,14 @@ func panelFingerprint(p uiPanelState) string {
 			}
 			b.WriteByte('|')
 			b.WriteString(p.ProbeVerdict)
+			// 动作按钮的有无也改变几何（多一行按钮会顶起建议区），必须进缓存键。
+			for _, a := range p.ProbeActions {
+				b.WriteByte('|')
+				b.WriteString(a.ID)
+				if a.Dim {
+					b.WriteByte('!')
+				}
+			}
 		} else {
 			b.WriteByte('1')
 		}
@@ -1868,7 +1879,7 @@ func (w *logWindow) paintHeader(hdc uintptr, l uiLayout) {
 			on = status.onOf(r.ID)
 		}
 		drawRegion(hdc, theme, font, r, dpi, on, w.hoverID == r.ID, w.pressID == r.ID,
-			(r.ID == uiIDSiteAdd && addDim) || (r.ID == uiIDProbeRun && runDim),
+			r.Dim || (r.ID == uiIDSiteAdd && addDim) || (r.ID == uiIDProbeRun && runDim),
 			keyFocus && focusID == r.ID)
 	}
 

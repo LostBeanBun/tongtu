@@ -692,7 +692,15 @@ func (w *logWindow) invokeAction(hwnd windows.Handle, id string) {
 		w.toggleProbePanel(hwnd)
 	case uiIDProbeRun:
 		w.runProbeFromInput()
-	case uiIDConfig:
+	case uiIDProbeCopy:
+		w.copyProbeResult()
+	case uiIDProbeAdd:
+		w.probeAddSite()
+	case uiIDProbeMITM:
+		w.probeOpenMITM()
+	case uiIDProbeTodo:
+		w.showTodoMenu(hwnd)
+	case uiIDConfig, uiIDProbeConfig:
 		if act.OpenConfig == nil {
 			w.toast("当前实例无法打开配置文件", styleWarn)
 			return

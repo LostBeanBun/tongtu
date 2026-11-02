@@ -4,6 +4,8 @@ package main
 
 import (
 	"testing"
+
+	"tongtu/internal/selfcheck"
 )
 
 // 几何层是纯函数（文本度量由 measure 注入），因此可以脱离窗口单测：
@@ -517,6 +519,59 @@ func TestUILayoutProbePanelNarrow(t *testing.T) {
 	}
 	if l.ProbeHint.Bottom > 320 || l.ProbeAdvice.Bottom > l.ProbeHint.Top {
 		t.Errorf("建议 / 说明超出客户区：advice=%+v hint=%+v", l.ProbeAdvice, l.ProbeHint)
+	}
+}
+
+// TestUILayoutProbeActions 诊断面板底部的动作行：有结果时按钮排一行，
+// 6 行数据不被挤掉，动作行落在建议与底部说明之间；窄窗口可以先放弃按钮，
+// 但绝不能压到建议或说明。
+func TestUILayoutProbeActions(t *testing.T) {
+	row := selfcheck.Row{Host: "blocked.example", Verdict: selfcheck.VerdictFail}
+	actions := uiProbeActions(&row, false, "", 1)
+	panel := uiPanelState{Open: true, Kind: uiPanelProbe, ProbeHost: row.Host, ProbeActions: actions}
+	l := computeUILayout(800, 500, 96, layoutStatus(), panel, fixedMeasure, fixedMeasure)
+
+	if len(l.ProbeRows) != len(uiProbeLabels) {
+		t.Fatalf("有动作行时仍应显示 %d 行，实际 %d", len(uiProbeLabels), len(l.ProbeRows))
+	}
+	if l.ProbeActionRow.Bottom <= l.ProbeActionRow.Top {
+		t.Fatalf("800x500 下应放得下动作行：%+v", l.ProbeActionRow)
+	}
+	if l.ProbeActionRow.Top < l.ProbeAdvice.Bottom {
+		t.Errorf("动作行压到了建议区：actions=%+v advice=%+v", l.ProbeActionRow, l.ProbeAdvice)
+	}
+	if l.ProbeHint.Top < l.ProbeActionRow.Bottom {
+		t.Errorf("底部说明压到了动作行：hint=%+v actions=%+v", l.ProbeHint, l.ProbeActionRow)
+	}
+	for _, id := range []string{uiIDProbeCopy, uiIDProbeAdd, uiIDProbeMITM, uiIDProbeConfig, uiIDProbeTodo} {
+		r, ok := regionByID(l, id)
+		if !ok {
+			t.Errorf("动作行里缺少 %q：%+v", id, l.Regions)
+			continue
+		}
+		if r.Rect.Top != l.ProbeActionRow.Top || r.Rect.Bottom != l.ProbeActionRow.Bottom {
+			t.Errorf("%q 应与动作行同高：%+v row=%+v", id, r.Rect, l.ProbeActionRow)
+		}
+		if got, hit := l.hit((r.Rect.Left+r.Rect.Right)/2, (r.Rect.Top+r.Rect.Bottom)/2); !hit || got.ID != id {
+			t.Errorf("%q 的中心点应命中自己，实际 %v/%q", id, hit, got.ID)
+		}
+	}
+
+	// 窄 / 矮窗口：允许放弃动作行，但建议与说明仍要在客户区内且互不重叠。
+	narrow := computeUILayout(300, 320, 96, layoutStatus(), panel, fixedMeasure, fixedMeasure)
+	if a := narrow.ProbeActionRow; a.Bottom > a.Top {
+		if a.Top < narrow.ProbeAdvice.Bottom || a.Bottom > narrow.ProbeHint.Top {
+			t.Errorf("窄窗口动作行与建议 / 说明重叠：actions=%+v advice=%+v hint=%+v",
+				a, narrow.ProbeAdvice, narrow.ProbeHint)
+		}
+	}
+	if narrow.ProbeAdvice.Bottom > narrow.ProbeHint.Top {
+		t.Errorf("窄窗口建议压到了说明：advice=%+v hint=%+v", narrow.ProbeAdvice, narrow.ProbeHint)
+	}
+	for _, r := range narrow.Regions {
+		if r.Rect.Bottom > 320 || r.Rect.Right > 300 {
+			t.Errorf("区域超出客户区：%+v", r.Rect)
+		}
 	}
 }
 

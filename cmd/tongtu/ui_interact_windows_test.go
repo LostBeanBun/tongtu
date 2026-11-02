@@ -1641,6 +1641,93 @@ func TestProbePanelToggleAndRun(t *testing.T) {
 	}
 }
 
+// TestProbeActionsRunAfterFailure 失败结论出现后才能点「加入站点 / 打开反代 / 打开配置」：
+// 诊断只读，改配置必须由用户明确点一下，且动作走的是 app 层已有的站点接口。
+func TestProbeActionsRunAfterFailure(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, true, false)
+	row := selfcheck.Row{
+		Host: "blocked.example", IP: "1.2.3.4", DNSMs: 10, DNSOK: true,
+		TCP: "20ms", TCPOK: true,
+		Direct: "HTTP 200", DirectOK: true,
+		Proxy: "失败: 超时", ProxyTested: true,
+		MITM: "–", Verdict: selfcheck.VerdictDirectOnly,
+	}
+	f := &fakeActions{probeRow: row}
+	useFakeActions(t, f)
+	lw.mu.Lock()
+	lw.probeOpen, lw.sitesOpen = true, false
+	lw.mu.Unlock()
+	lw.layout()
+	lw.setProbeInputText("blocked.example")
+
+	clickRegion(t, uiIDProbeRun)
+	waitFor(t, "诊断收尾并出现动作按钮", func() bool {
+		for _, id := range []string{uiIDProbeCopy, uiIDProbeAdd, uiIDProbeMITM, uiIDProbeConfig} {
+			if _, ok := lw.regionAtID(id); !ok {
+				return false
+			}
+		}
+		return true
+	})
+
+	clickRegion(t, uiIDProbeAdd)
+	waitFor(t, "加入站点", func() bool {
+		adds, _, _ := f.siteCalls()
+		return len(adds) == 1 && adds[0] == "blocked.example"
+	})
+	waitToast(t, "加入站点的反馈", "已加入站点 blocked.example")
+	waitFor(t, "站点操作收尾", func() bool {
+		lw.mu.Lock()
+		defer lw.mu.Unlock()
+		return !lw.sitesBusy
+	})
+
+	// 已在站点里：打开反代不应再重复加一次，只调 SetSiteMITM。
+	clickRegion(t, uiIDProbeMITM)
+	waitFor(t, "打开反代", func() bool {
+		_, _, mitms := f.siteCalls()
+		return len(mitms) == 1 && mitms[0].Pattern == "blocked.example" && mitms[0].On
+	})
+	waitToast(t, "打开反代的反馈", "已为 blocked.example 打开反代")
+	if adds, _, _ := f.siteCalls(); len(adds) != 1 {
+		t.Errorf("已在站点里时不该重复添加，实际 %v", adds)
+	}
+
+	clickRegion(t, uiIDProbeConfig)
+	waitFor(t, "打开配置", func() bool { return f.configs() == 1 })
+}
+
+// TestProbeCopyWithoutResult 没有结果时「复制结果」仍然存在但弱化，点了说明原因，
+// 不会悄悄消失（诊断前 / 中 / 后行位置不变）。
+func TestProbeCopyWithoutResult(t *testing.T) {
+	if err := showLogWindow(); err != nil {
+		t.Skipf("当前会话无法创建窗口: %v", err)
+	}
+	setStatusForInteraction(false, true, false)
+	f := &fakeActions{}
+	useFakeActions(t, f)
+	lw.mu.Lock()
+	lw.probeOpen, lw.sitesOpen = true, false
+	lw.probeResult, lw.probeErr, lw.probeBusy = nil, "", false
+	lw.mu.Unlock()
+	lw.layout()
+
+	r, ok := lw.regionAtID(uiIDProbeCopy)
+	if !ok {
+		t.Fatal("未诊断时也应保留「复制结果」占位")
+	}
+	if !r.Dim {
+		t.Error("未诊断时「复制结果」应弱化")
+	}
+	clickRegion(t, uiIDProbeCopy)
+	if got := toastText(); !strings.Contains(got, "还没有诊断结果") {
+		t.Errorf("没有结果时点击应说明原因，实际 %q", got)
+	}
+}
+
 // TestProbeEnterKeyRuns 诊断输入框里按回车等于点「诊断」。
 func TestProbeEnterKeyRuns(t *testing.T) {
 	if err := showLogWindow(); err != nil {

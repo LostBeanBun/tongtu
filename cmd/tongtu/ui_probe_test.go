@@ -216,3 +216,106 @@ func TestNormalizeProbeHost(t *testing.T) {
 		}
 	}
 }
+
+// TestUIProbeActions 锁住「失败时才给改配置的动作」这条边界：
+// 成功时不诱导用户动配置；未诊断 / 诊断中 / 输入错误时只留一个弱化的「复制结果」，
+// 按钮位置不跳，点了也会说明原因。
+func TestUIProbeActions(t *testing.T) {
+	ids := func(acts []uiProbeAction) []string {
+		out := make([]string, 0, len(acts))
+		for _, a := range acts {
+			out = append(out, a.ID)
+		}
+		return out
+	}
+
+	ok := selfcheck.Row{Host: "github.com", Verdict: selfcheck.VerdictOK}
+	direct := selfcheck.Row{Host: "blocked.example", Verdict: selfcheck.VerdictDirectOnly}
+	fail := selfcheck.Row{Host: "bad.example", Verdict: selfcheck.VerdictFail}
+
+	for _, c := range []struct {
+		name string
+		row  *selfcheck.Row
+		busy bool
+		err  string
+	}{
+		{"未诊断", nil, false, ""},
+		{"诊断中", &ok, true, ""},
+		{"输入错误", nil, false, "请输入域名"},
+	} {
+		got := uiProbeActions(c.row, c.busy, c.err, 3)
+		if len(got) != 1 || got[0].ID != uiIDProbeCopy {
+			t.Errorf("%s：只应显示「复制结果」，实际 %v", c.name, ids(got))
+		}
+		if len(got) == 1 && !got[0].Dim {
+			t.Errorf("%s：没有结果可复制时应弱化按钮", c.name)
+		}
+	}
+
+	got := uiProbeActions(&ok, false, "", 2)
+	if len(got) != 1 || got[0].ID != uiIDProbeCopy || got[0].Dim {
+		t.Errorf("诊断成功时只应有一个可用的「复制结果」，实际 %v", got)
+	}
+
+	got = uiProbeActions(&direct, false, "", 0)
+	want := []string{uiIDProbeCopy, uiIDProbeAdd, uiIDProbeMITM, uiIDProbeConfig}
+	if strings.Join(ids(got), ",") != strings.Join(want, ",") {
+		t.Errorf("仅直连时应给出 %v，实际 %v", want, ids(got))
+	}
+	if got[0].Dim {
+		t.Error("有诊断结果时「复制结果」应可用")
+	}
+	for _, a := range got[1:] {
+		if a.Dim {
+			t.Errorf("失败动作 %q 应可用", a.ID)
+		}
+		if a.Tip == "" {
+			t.Errorf("失败动作 %q 应有悬浮说明", a.ID)
+		}
+	}
+
+	got = uiProbeActions(&fail, false, "", 2)
+	if last := got[len(got)-1]; last.ID != uiIDProbeTodo {
+		t.Errorf("有待办时最后应多一个「查看待办」，实际 %v", ids(got))
+	}
+	got = uiProbeActions(&fail, false, "", 0)
+	for _, a := range got {
+		if a.ID == uiIDProbeTodo {
+			t.Error("没有待办时不该显示「查看待办」")
+		}
+	}
+}
+
+// TestUIProbeText 复制出去的文字必须和界面一致：同一个域名、六行结果、同一句建议。
+func TestUIProbeText(t *testing.T) {
+	row := selfcheck.Row{
+		Host: "github.com", IP: "1.2.3.4", DNSMs: 42, DNSOK: true,
+		TCP: "31ms", TCPOK: true, Direct: "HTTP 200", DirectOK: true,
+		Proxy: "HTTP 200", ProxyOK: true, ProxyTested: true,
+		MITM: "✓", Verdict: selfcheck.VerdictOK,
+	}
+	got := uiProbeText(&row, false)
+	for _, want := range []string{
+		"通途诊断：github.com",
+		"结论：可用",
+		"解析：1.2.3.4 · 42ms",
+		"TCP:443：31ms",
+		"直连 HTTPS：HTTP 200",
+		"经代理：HTTP 200",
+		"无SNI反代：✓ 命中（本地解密后剥离 SNI）",
+		"建议：",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("复制文本缺少 %q：\n%s", want, got)
+		}
+	}
+	if !strings.Contains(got, "\r\n") {
+		t.Errorf("复制到 Windows 剪贴板应使用 CRLF 换行：%q", got)
+	}
+	if !strings.Contains(uiProbeText(&row, true), "已暂停") {
+		t.Error("暂停时复制的建议也应说明系统流量未经过本地代理")
+	}
+	if uiProbeText(nil, false) != "" {
+		t.Error("没有结果时复制文本应为空（调用方会提示原因）")
+	}
+}

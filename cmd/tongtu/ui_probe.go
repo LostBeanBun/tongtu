@@ -37,13 +37,72 @@ var uiProbeLabels = []string{"结论", "解析", "TCP:443", "直连 HTTPS", "经
 
 const (
 	uiProbeTip = "诊断：检查单个域名的干净解析、直连、经代理与反代命中，失败时给出下一步；再点一次回到日志"
-	// uiProbeHint 是面板底部的一行说明：把「只读」与「不修改配置」说清楚。
-	uiProbeHint = "只检查这一个域名，不修改任何配置；结果按当前运行状态计算。"
+	// uiProbeHint 是面板底部的一行说明：把「只读」与「动作按钮」的边界说清楚。
+	uiProbeHint = "诊断只读；下面的按钮只有点了才会改配置。结果按当前运行状态计算。"
 	// uiProbeInputCue 是输入框的占位提示。
 	uiProbeInputCue = "输入域名，例如 github.com"
 	// uiProbeRunTip 是「诊断」按钮的悬浮说明。
 	uiProbeRunTip = "诊断：测试输入框里的域名（回车也可以）；诊断期间可以继续使用窗口"
 )
+
+// uiProbeAction 是诊断面板底部的一个「下一步」按钮。
+//
+// 失败时的动作不自动执行：诊断只负责把问题说清楚，改配置必须由用户点一下。
+// Dim 表示当前不可用（例如还没有结果时的「复制结果」），点了会说明原因而不是消失。
+type uiProbeAction struct {
+	ID    string
+	Label string
+	Tip   string
+	Dim   bool
+}
+
+const (
+	uiProbeCopyTip   = "复制结果：把这次诊断的六行结果与下一步建议复制到剪贴板"
+	uiProbeAddTip    = "加入站点：把这个域名加入自定义加速白名单（立即生效）"
+	uiProbeMITMTip   = "打开反代：为该站开启无 SNI 反代（会先加入站点；需要本地根证书）"
+	uiProbeConfigTip = "打开配置：用记事本打开 config.yaml"
+	uiProbeTodoTip   = "查看待办：还有没配置好的事情（安装证书、以管理员重启…），点开可一键处理"
+)
+
+// uiProbeActions 决定诊断面板底部显示哪些动作。
+//
+// 规则：
+//   - 「复制结果」始终占位，没有结果时只是弱化：按钮不跳动，用户知道以后能复制；
+//     也保住面板在诊断前 / 中 / 后的行位置不变。
+//   - 只有拿到失败结论（仅直连 / 不通）才给出改配置的动作，成功时不诱导用户动配置。
+//   - 「查看待办」只在确实有待办时出现，与第二行的「待办」按钮同一策略。
+func uiProbeActions(row *selfcheck.Row, busy bool, errMsg string, todoN int) []uiProbeAction {
+	canCopy := row != nil && !busy
+	out := []uiProbeAction{{ID: uiIDProbeCopy, Label: "复制结果", Tip: uiProbeCopyTip, Dim: !canCopy}}
+	if row == nil || busy || errMsg != "" || row.Verdict == selfcheck.VerdictOK {
+		return out
+	}
+	out = append(out,
+		uiProbeAction{ID: uiIDProbeAdd, Label: "加入站点", Tip: uiProbeAddTip},
+		uiProbeAction{ID: uiIDProbeMITM, Label: "打开反代", Tip: uiProbeMITMTip},
+		uiProbeAction{ID: uiIDProbeConfig, Label: "打开配置", Tip: uiProbeConfigTip},
+	)
+	if todoN > 0 {
+		out = append(out, uiProbeAction{ID: uiIDProbeTodo, Label: "查看待办", Tip: uiProbeTodoTip})
+	}
+	return out
+}
+
+// uiProbeText 把一次诊断摊成可粘贴的纯文本（「复制结果」用）。
+//
+// 与界面共用 uiProbeLines / uiProbeAdvice：复制出去的内容和屏幕上看到的一致，
+// 不会出现「界面说建议打开反代、剪贴板却是另一套说法」。
+func uiProbeText(row *selfcheck.Row, paused bool) string {
+	if row == nil {
+		return ""
+	}
+	lines := []string{"通途诊断：" + row.Host}
+	for _, line := range uiProbeLines(row, false, "") {
+		lines = append(lines, line.Label+"："+line.Value)
+	}
+	lines = append(lines, "建议："+uiProbeAdvice(row, false, "", paused))
+	return strings.Join(lines, "\r\n")
+}
 
 // uiProbeLines 把一次诊断结果摊成固定 6 行。
 //

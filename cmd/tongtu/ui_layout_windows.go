@@ -26,6 +26,9 @@ type uiRegion struct {
 	// On 是几何层给出的初始开关态：站点面板每行的「反代」胶囊直接由列表数据决定。
 	// 其余控件（模式胶囊、只看警告…）由窗口状态决定，这里保持零值。
 	On bool
+	// Dim 是布局层已经确定的不可用态（诊断面板的动作按钮）：保留按钮、弱化显示，
+	// 点了会说明原因，而不是突然消失。
+	Dim bool
 }
 
 // uiLayout 是一帧的完整几何。
@@ -62,6 +65,8 @@ type uiLayout struct {
 	// 诊断进度与结论（快照用；不参与几何）：脚本据此判断何时结束、结果如何。
 	ProbeBusy    bool
 	ProbeVerdict string
+	// ProbeActionRow 是底部动作按钮所在的横行（按钮本身在 Regions 里）。
+	ProbeActionRow rectT
 }
 
 // uiPanelKind 是卡片区当前显示的内容。
@@ -87,6 +92,9 @@ type uiPanelState struct {
 	// 真机脚本靠它们判断一次诊断何时结束、结论是什么（toast 会消失，日志里也没有）。
 	ProbeBusy    bool
 	ProbeVerdict string
+	// ProbeActions 是这一帧诊断面板底部的动作按钮（复制 / 加入站点 / 打开反代…）。
+	// 由窗口按结果算好：几何、绘制与命中必须用同一份，避免按钮显示与行为不一致。
+	ProbeActions []uiProbeAction
 }
 
 // uiSiteRow 是面板里的一行：域名文字在左，「反代」胶囊与「删除」按钮在右。
@@ -377,14 +385,26 @@ func layoutProbePanel(l *uiLayout, panel uiPanelState, contentL, contentR, ctrlY
 		})
 	}
 
-	// 从下往上摆：底部说明与建议区先占位，剩下的高度才给 6 行数据。
+	// 从下往上摆：底部说明 → 动作行 → 建议区 → 6 行数据。
+	// 动作行即使还没有结果也占位（「复制结果」只是弱化），诊断前 / 中 / 后行位置不变。
 	hintH := scaleDPI(uiSiteHintDIP, dpi)
 	l.ProbeHint = rectT{Left: contentL, Top: bottom - hintH, Right: contentR, Bottom: bottom}
-
-	adviceH := scaleDPI(uiProbeAdviceDIP, dpi)
-	adviceBottom := l.ProbeHint.Top - gap
-	adviceTop := adviceBottom - adviceH
 	listTop := sepY + 1 + scaleDPI(8, dpi)
+	adviceH := scaleDPI(uiProbeAdviceDIP, dpi)
+
+	adviceBottom := l.ProbeHint.Top - gap
+	actionTop, actionBottom := int32(0), int32(0)
+	if len(panel.ProbeActions) > 0 {
+		actionBottom = l.ProbeHint.Top - gap
+		actionTop = actionBottom - ctrlH
+		// 窗口太矮时先放弃动作行：建议与数据行比按钮更重要。
+		if actionTop-gap-adviceH < listTop {
+			actionTop, actionBottom = 0, 0
+		} else {
+			adviceBottom = actionTop - gap
+		}
+	}
+	adviceTop := adviceBottom - adviceH
 	if adviceTop < listTop {
 		adviceTop = listTop
 	}
@@ -392,6 +412,7 @@ func layoutProbePanel(l *uiLayout, panel uiPanelState, contentL, contentR, ctrlY
 		adviceBottom = adviceTop
 	}
 	l.ProbeAdvice = rectT{Left: contentL, Top: adviceTop, Right: contentR, Bottom: adviceBottom}
+	l.ProbeActionRow = rectT{Left: contentL, Top: actionTop, Right: contentR, Bottom: actionBottom}
 
 	rowsBottom := l.ProbeAdvice.Top - gap
 	if rowsBottom < listTop {
@@ -423,6 +444,23 @@ func layoutProbePanel(l *uiLayout, panel uiPanelState, contentL, contentR, ctrlY
 		}
 		l.ProbeRows = append(l.ProbeRows, rectT{Left: contentL, Top: y, Right: contentR, Bottom: y + rowH})
 		y += rowH + rowGap
+	}
+
+	// 动作按钮从左往右排：读起来与建议文字同向。窄窗口放不下时少显示一个，
+	// 不压到已有控件；图标 / 文字都在 drawRegion 里统一画。
+	if actionBottom > actionTop {
+		x := contentL
+		for _, a := range panel.ProbeActions {
+			w := 2*btnPad + measure(a.Label)
+			if x+w > contentR {
+				break
+			}
+			l.Regions = append(l.Regions, uiRegion{
+				ID: a.ID, Label: a.Label, Kind: uiGhost, Tip: a.Tip, Dim: a.Dim,
+				Rect: rectT{Left: x, Top: actionTop, Right: x + w, Bottom: actionBottom},
+			})
+			x += w + gap
+		}
 	}
 }
 

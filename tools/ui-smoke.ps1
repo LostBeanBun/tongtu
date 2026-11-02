@@ -471,6 +471,8 @@ $probeOpened = $false
 $probeDone = $false
 $probeClosed = $false
 $probeVerdict = ""
+$probeCopied = $false
+$probeClip = ""
 [UiSmokeNative]::Force($hwnd)
 Start-Sleep -Milliseconds 300
 $probeBtn = Get-Region "probe"
@@ -506,6 +508,22 @@ if ($null -eq $probeBtn) {
         Shot $hwnd (Join-Path $ShotDir "06-probe.png") | Out-Null
         if (-not $probeDone) {
             $script:failures.Add("诊断没有在 50 秒内给出结论（probe_verdict='$probeVerdict'）")
+        }
+
+        # 「复制结果」把六行结论与建议写进剪贴板：这是失败后把问题贴给别人排查的入口。
+        $copyBtn = Get-Region "probecopy"
+        if ($null -eq $copyBtn) {
+            $script:failures.Add("诊断面板里没有「复制结果」按钮（id=probecopy）")
+        } else {
+            Set-Clipboard -Value "tongtu-probe-sentinel"
+            $qx, $qy = Get-RegionCenter $copyBtn
+            [UiSmokeNative]::Click(($org.X + $qx), ($org.Y + $qy))
+            Start-Sleep -Milliseconds 500
+            $probeClip = Get-Clipboard
+            $probeCopied = ($probeClip -like "*通途诊断：github.com*") -and ($probeClip -like "*建议：*")
+            if (-not $probeCopied) {
+                $script:failures.Add("复制结果没有把诊断文本写进剪贴板（'$probeClip'）")
+            }
         }
     }
 
@@ -546,6 +564,7 @@ $rows = @(
     @{ Name = "复制代理地址";   Ok = ($clip -eq $proxyURL);    Detail = "'$clip'" },
     @{ Name = "诊断面板开关";   Ok = ($probeOpened -and $probeClosed); Detail = "打开=$probeOpened 关闭=$probeClosed" },
     @{ Name = "诊断给出结论";   Ok = $probeDone;              Detail = $(if ($probeVerdict) { $probeVerdict } else { "无结论" }) },
+    @{ Name = "诊断结果可复制"; Ok = $probeCopied;            Detail = $(if ($probeCopied) { "剪贴板已收到六行结果与建议" } else { "剪贴板未更新" }) },
     @{ Name = "× 只隐藏窗口";   Ok = ($hidden -and -not $script:proc.HasExited); Detail = "hidden=$hidden 进程存活=$(-not $script:proc.HasExited)" }
 )
 foreach ($r in $rows) {
