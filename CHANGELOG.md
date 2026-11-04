@@ -51,7 +51,9 @@
   各自独立 `try`，任一步失败都不影响后面的还原。
 - **`start-soak.ps1` 从 `VERSION` 读版本**，不再执行 `tongtu.exe version` 取版本号：
   少一次进程启动，少一次被杀软行为启发式盯上的机会。
-- README 补充 `verify-release.ps1` / `start-soak.ps1`、发布后核验命令与 Defender 误报的排查说明。
+- README 补充 `verify-release.ps1` / `start-soak.ps1`、发布后核验命令、Defender 误报的排查说明，
+  以及「1.0 兼容性承诺」：命令 / 标志 / 退出码 / 配置键 / 数据位置 / 系统状态边界中哪些属于对外契约、
+  哪些明确不在契约内（内部命令、控制端口形状、界面几何、日志措辞、验收脚本参数）。
 
 ### 验证
 
