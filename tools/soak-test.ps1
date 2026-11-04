@@ -343,15 +343,30 @@ try {
     Write-Host "CSV 已保存: $CsvPath" -ForegroundColor Gray
 } finally {
     if ($null -ne $writer) { $writer.Dispose() }
+
     # —— 收尾：停实例、还原系统状态 ——
+    # 停实例优先走控制端口 /shutdown，而不是再启动一次 exe：
+    #   1. 副本可能被杀软隔离（2026-11-03 就因此让 Start-Process 直接抛错）；
+    #   2. 少一次进程启动，少一次被误报的机会。
+    # 每一步都单独 try：收尾不能因为前一步失败就跳过后面的还原，
+    # 否则会留下「系统代理指向已退出进程」这种最难排查的状态。
     try {
         if ($null -ne $proc -and -not $proc.HasExited) {
-            Start-Process -FilePath $Exe -ArgumentList "stop" -Wait | Out-Null
-            if (-not (Wait-Until { (Get-TongtuProcesses).Count -eq 0 } 20)) {
+            $stopped = $false
+            try {
+                $http.PostAsync("http://$control/shutdown", $null).GetAwaiter().GetResult() | Out-Null
+                $stopped = Wait-Until { (Get-TongtuProcesses).Count -eq 0 } 20
+            } catch { }
+            if (-not $stopped) {
                 Get-TongtuProcesses | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
                 Write-Host "实例没能在 20 秒内正常退出，已强制结束。" -ForegroundColor Yellow
             }
         }
+    } catch {
+        Write-Host "停止实例时出错：$($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    try {
         if ($null -ne $snapProxy) {
             $cur = Get-ProxySnapshot
             if ($cur.Enable -ne $snapProxy.Enable -or $cur.Server -ne $snapProxy.Server) {
@@ -359,24 +374,35 @@ try {
                 Write-Host "已还原系统代理为启动之前的状态。" -ForegroundColor Gray
             }
         }
+    } catch {
+        Write-Host "系统代理还原失败：$($_.Exception.Message)" -ForegroundColor Red
+    }
+
+    try {
         if ($null -ne $snapHosts -and (Test-HostsHasManagedBlock)) {
-            try {
-                [IO.File]::WriteAllBytes($hostsPath, $snapHosts)
-                Write-Host "已还原 hosts 为启动之前的内容。" -ForegroundColor Gray
-            } catch {
-                Write-Host "hosts 还原失败（需要管理员权限）：$($_.Exception.Message)" -ForegroundColor Yellow
-            }
+            [IO.File]::WriteAllBytes($hostsPath, $snapHosts)
+            Write-Host "已还原 hosts 为启动之前的内容。" -ForegroundColor Gray
         }
+    } catch {
+        Write-Host "hosts 还原失败（需要管理员权限）：$($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    try {
         if ((Get-RunOnceValue) -ne "") {
             Remove-ItemProperty -Path $runOnceKey -Name $runOnceName -ErrorAction SilentlyContinue
             Write-Host "清掉了残留的断电自愈项。" -ForegroundColor Gray
         }
+    } catch {
+        Write-Host "清理断电自愈项失败：$($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    try {
         if ($RestartAfter -and $wasRunning) {
             Start-Process -FilePath $Exe | Out-Null
             Write-Host "已重新启动通途（跑之前它本来就在运行）。" -ForegroundColor Gray
         }
     } catch {
-        Write-Host "收尾时出错：$($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "重新启动通途失败：$($_.Exception.Message)" -ForegroundColor Yellow
     }
 }
 

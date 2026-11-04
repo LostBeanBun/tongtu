@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
@@ -226,6 +227,77 @@ func TestMITMOnlyAllowlistedHostsAreDecrypted(t *testing.T) {
 	}
 	if !bytes.Equal(raw, up.Certificate().Raw) {
 		t.Fatal("名单外域名应直传上游证书（保持端到端隧道）")
+	}
+}
+
+// TestMITMClientVerifiesLocalCA 是「装好根证书的浏览器」那条真实路径的端到端用例：
+// 客户端把本地 CA 放进信任根（不跳过校验）→ CONNECT → 校验本地签发的叶证书 →
+// 发出 HTTPS 请求 → 上游确实收到响应，且出站握手没有 SNI。
+//
+// 其它用例为了观察行为用了 InsecureSkipVerify；只有这一条能证明「证书链本身是可信的」，
+// 否则 MITM 可能在真实浏览器里直接握手失败而测试全绿。
+func TestMITMClientVerifiesLocalCA(t *testing.T) {
+	var gotSNI atomic.Value
+	up := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "verified:%s", r.Host)
+	}))
+	up.TLS = &tls.Config{GetConfigForClient: func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
+		gotSNI.Store(chi.ServerName)
+		return nil, nil
+	}}
+	up.StartTLS()
+	defer up.Close()
+	u, err := url.Parse(up.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p, ca := newMITMTestProxy(t, "steamcommunity.com")
+	px := httptest.NewServer(p)
+	defer px.Close()
+
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(ca.PEM()) {
+		t.Fatal("本地 CA 证书应能加入信任根")
+	}
+	tc := connectMITMConn(t, px.Listener.Addr().String(),
+		net.JoinHostPort("steamcommunity.com", u.Port()),
+		&tls.Config{ServerName: "steamcommunity.com", RootCAs: roots})
+	if chains := tc.ConnectionState().VerifiedChains; len(chains) == 0 {
+		t.Fatal("客户端应验证到由本地 CA 签发的证书链")
+	}
+	resp := readMITMResponse(t, tc, "GET /verify HTTP/1.1\r\nHost: steamcommunity.com\r\nConnection: close\r\n\r\n")
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || string(body) != "verified:steamcommunity.com" {
+		t.Fatalf("经反代的响应不符: %d %q", resp.StatusCode, body)
+	}
+	if gotSNI.Load() != nil && gotSNI.Load() != "" {
+		t.Fatalf("出站握手不应携带 SNI，实际 %v", gotSNI.Load())
+	}
+}
+
+// TestMITMClientRejectsUntrustedCA 反向证明上一条不是「怎么都能通」：
+// 没把本地 CA 加入信任根时，客户端必须拒绝本地签发的叶证书。
+func TestMITMClientRejectsUntrustedCA(t *testing.T) {
+	up := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "unused")
+	}))
+	defer up.Close()
+	u, err := url.Parse(up.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p, _ := newMITMTestProxy(t, "steamcommunity.com")
+	px := httptest.NewServer(p)
+	defer px.Close()
+
+	err = mitmHandshakeErr(t, px.Listener.Addr().String(),
+		net.JoinHostPort("steamcommunity.com", u.Port()),
+		&tls.Config{ServerName: "steamcommunity.com"})
+	if err == nil {
+		t.Fatal("未信任本地 CA 时握手不应成功（否则证书链校验形同虚设）")
 	}
 }
 

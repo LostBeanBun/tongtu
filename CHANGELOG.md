@@ -26,6 +26,55 @@
 | `0.x.y` | 功能成型但未定稿 | 新增功能抬 minor，修复抬 patch；配置版本号（`config.yaml` 的 `version`）变更时会先备份、再保留用户设置升级 |
 | `1.0.0` | 可发布 | 配置格式与命令行为向后兼容；破坏性变更必须抬 major 并在本文件写明迁移方法 |
 
+## [未发布]
+
+> 主题：**1.0.0 硬门槛**。本段记录门槛项的落地与实跑结果。产品行为没有变化，
+> 因此不抬版本号；到正式发布 1.0.0 时再合并进对应版本条目。
+
+### 新增
+
+- **MITM 信任链端到端测试**（`internal/proxy/mitm_test.go`）：客户端把本地 CA 放进信任根
+  （不跳过校验）→ CONNECT → 校验本地签发的叶证书 → 发出 HTTPS 请求，断言
+  `VerifiedChains` 非空、响应正确、出站握手不带 SNI；另加反向用例证明没装 CA 时必须握手失败。
+  之前所有 MITM 用例都用了 `InsecureSkipVerify`，无法证明「证书链本身可信」。
+- **`tools/verify-release.ps1`**：发布后核验。从 GitHub API 取 Release，下载线上附件，
+  逐项比对大小、`SHA256SUMS.txt`、资产 digest 与 exe 自报版本；任意一项不一致以非零退出。
+  只信线上字节，不依赖本地构建产物。
+- **`tools/start-soak.ps1`**：通过 WMI（`Win32_Process.Create`）在后台启动浸泡，
+  父进程是 WMI 服务而非当前终端，关掉终端不会把浸泡一起收走；stdout / stderr 落文件，
+  等第一份 CSV 样本出现才返回。实例副本放 `%LOCALAPPDATA%\tongtu-soak\<版本>`。
+
+### 变更
+
+- **浸泡收尾优先走控制端口 `/shutdown`**：不再为了停止实例而再启动一次 exe——
+  副本被杀软隔离时 `Start-Process` 会直接抛错，收尾从此断掉。系统代理、hosts、RunOnce
+  各自独立 `try`，任一步失败都不影响后面的还原。
+- **`start-soak.ps1` 从 `VERSION` 读版本**，不再执行 `tongtu.exe version` 取版本号：
+  少一次进程启动，少一次被杀软行为启发式盯上的机会。
+- README 补充 `verify-release.ps1` / `start-soak.ps1`、发布后核验命令与 Defender 误报的排查说明。
+
+### 验证
+
+- `verify-release.ps1` 实跑 v0.11.0：Release 存在、latest 指向本版本、附件大小、
+  资产 digest、`SHA256SUMS.txt`、exe 自报版本共 7 项全部一致。
+- `tools/crash-test.ps1` 通过：`taskkill /F` 强杀主进程后，系统代理与 hosts 由监护进程还原，
+  无 `guard.json` 与进程残留。
+- `tools/recover-test.ps1` 通过：模拟断电后 `__recover` 还原系统代理、清除 RunOnce、
+  回收 `guard.json`；重复执行幂等。
+- `go test ./internal/proxy -run TestMITM` 全部通过（含新增的正 / 反向信任链用例）。
+- 真机界面冒烟（2026-11-04）12 项全部通过，见 `[0.11.0]` 段的说明。
+- 短时浸泡（0.02 小时 / 10 秒采样）通过：内存与句柄无增长，结束时系统代理还原、
+  无进程与 `guard.json` 残留，副本未被隔离。
+- 24 小时浸泡已于 2026-11-04 09:34 启动（实例副本在 `%LOCALAPPDATA%\tongtu-soak\0.11.0`），
+  结果待 2026-11-05 补记。
+
+### 已知风险
+
+- **Windows Defender 行为检测误报**：接管系统代理 + 登记 RunOnce + 开机自启的组合行为
+  会被判成 `Behavior:Win32/Impact.A!ml`（ID `2147776683`，严重），未签名的 exe 在接管瞬间可能被隔离。
+  本机验收已通过 Defender 排除项绕开；面向用户的发布仍需提交误报并向用户说明处理方式，
+  详细步骤见 README「故障排查」。
+
 ## [0.11.0] - 2026-11-02
 
 > 主题：**让诊断可行动**。0.10.0 的 `诊断` 会把问题说清楚，这一版把「说清楚」接到「解决它」：
@@ -77,8 +126,10 @@
   `d80ae1d6129f80f211c22167dd2c92097d2970867ef8020eca1bb6b2f7effafa`，
   与 Release 附件 `SHA256SUMS.txt` 及资产 digest 一致；下载后 `tongtu version` 输出
   `tongtu 0.11.0`。
-- 真机界面冒烟（`tools/ui-smoke.ps1`）已加入「复制结果」断言；本机当时正跑 24 小时浸泡
-  （占用控制端口），将在浸泡结束后补跑并记录结果。
+- 真机界面冒烟（`tools/ui-smoke.ps1`）于 2026-11-04 补跑通过：12 项断言全绿，
+  含暂停 / 恢复、复制代理地址、热加载、诊断结论与「复制结果」、× 只隐藏窗口。
+  详细结果见下面的 `[未发布]` 段。
+
 
 ## [0.10.0] - 2026-11-02
 

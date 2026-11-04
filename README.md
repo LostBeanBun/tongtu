@@ -201,8 +201,11 @@ tools/crash-test.ps1  崩溃防护验收：强杀主进程，验证系统状态�
 tools/recover-test.ps1 断电自愈验收：杀监护 → 杀主进程 → `__recover`，断言状态干净且幂等
 tools/ui-smoke.ps1    界面点击验收：读 `/ui/layout` 精确定位按钮，点暂停→选 15 分钟→恢复并断言标签翻转
 tools/soak-test.ps1   长时间浸泡测试（默认 24 小时）：采样内存/句柄/连接，结束时给出结论
+tools/start-soak.ps1  后台启动浸泡（脱离终端 / 会话），并把实例副本放在 LOCALAPPDATA
 tools/uninstall.ps1   卸载清理：撤销自启、证书、RunOnce、代理与 hosts 残留（可选删数据与 exe）
 tools/release-notes.ps1 从 CHANGELOG 提取版本条目，生成 Release 说明
+tools/verify-release.ps1 发布后核验：下载线上附件，对齐大小 / SHA-256 / 资产 digest / exe 版本
+tools/add-defender-exclusion.ps1 给本机开发目录加 Defender 排除项（需管理员，仅用于验收）
 .github/workflows/    CI（格式/静态检查/跨平台测试）与 Release（打 tag 自动构建发布）
 VERSION               版本号（唯一权威来源，见 bump.ps1 / CHANGELOG.md）
 ```
@@ -258,6 +261,15 @@ CI（[`ci.yml`](.github/workflows/ci.yml)）在每次 push / PR 时跑 gofmt、v
    `%APPDATA%\tongtu` 里的配置、证书与日志都会保留；配置版本升级时会先备份、再保留你的设置升级。
 
 > 不做「自动下载替换」：在 Windows 上替换正在运行的 exe 不可靠，静默失败比不升级更糟。
+
+发布后可以用一条命令核验线上附件（大小、`SHA256SUMS.txt`、资产 digest、exe 自报版本）：
+
+```powershell
+.\tools\verify-release.ps1                  # 核验 VERSION 对应的发布
+.\tools\verify-release.ps1 -Version 0.11.0  # 核验指定版本
+```
+
+它会直接下载 Release 上的附件再比对，不依赖本地构建产物；任何一项不一致都以非零退出码结束。
 
 ## 快速开始
 
@@ -794,6 +806,12 @@ tongtu 会临时修改**系统代理**与 **hosts**，因此会尽最大努力�
 - **怎么确认没有残留？** 检查 `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings` 的
   `ProxyEnable` 是否为 `0`、hosts 里是否还有 `tongtu managed block` 标记，以及
   `%APPDATA%\tongtu` 下是否还有 `sysproxy.json` / `guard.json`。有残留时执行一次 `tongtu stop` 即可清理。
+- **Windows Defender 报 `Behavior:Win32/Impact.A!ml` 并把 exe 隔离**：这是行为启发式的误报。
+  通途会改写系统代理、登记断电自愈项（RunOnce）和开机自启，这些正是「改动系统设置」的典型组合，
+  未做代码签名的 exe 更容易被判定。处理顺序：在 Defender 的「保护历史记录」里还原被隔离的文件 →
+  把 exe 所在目录加入排除项 → 有条件时向 Microsoft 提交误报（附上 exe 与 Release 页的 SHA-256）。
+  **不要**为了运行通途而关闭整个实时保护。仓库里提供了 `tools/add-defender-exclusion.ps1`
+  （需管理员提权）用于本机开发验收时一次性排除仓库目录与浸泡目录。
 
 ---
 
