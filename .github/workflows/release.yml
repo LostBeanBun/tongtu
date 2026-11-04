@@ -129,3 +129,13 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "创建 Release 失败" }
           }
           Write-Host "已发布：$env:GITHUB_REF_NAME" -ForegroundColor Green
+
+      # 发布后立刻以「用户视角」核验：下载线上附件，比对大小、SHA-256、资产 digest 与
+      # exe 自报版本。让「Release 真的可下载、字节没坏」成为流水线的一部分，
+      # 而不是发完再手工确认；任何一项不一致直接让本次发布变红。
+      - name: 核验线上发布
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          .\tools\verify-release.ps1

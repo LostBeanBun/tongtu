@@ -46,6 +46,10 @@ try {
 
 function Invoke-GitHub([string]$Uri) {
     $headers = @{ 'User-Agent' = 'tongtu-verify-release'; 'Accept' = 'application/vnd.github+json' }
+    # CI 里用仓库自带 token 避免匿名配额（共享 runner IP 很容易撞 60 次/小时的上限）。
+    # 本地运行一般没有这个环境变量，走匿名请求即可。
+    $token = if ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN } elseif ($env:GH_TOKEN) { $env:GH_TOKEN } else { "" }
+    if ($token) { $headers['Authorization'] = "Bearer $token" }
     $last = $null
     for ($i = 1; $i -le 3; $i++) {
         try {
@@ -90,10 +94,17 @@ try {
     Add-Result "Release 存在" ($rel.tag_name -eq $tag) "tag=$($rel.tag_name)"
 
     # 刚发布的版本应当就是 latest；核验旧版本时不强求（latest 本来就会更新）。
+    # GitHub 的 latest 指针有几秒传播延迟，CI 里发布完立刻核验时给 30 秒余量。
     $current = (Get-Content (Join-Path $root "VERSION") -Raw).Trim()
     if ($Version -eq $current) {
-        $latest = Invoke-GitHub "https://api.github.com/repos/$Repo/releases/latest"
-        Add-Result "latest 指向本版本" ($latest.tag_name -eq $tag) "latest=$($latest.tag_name)"
+        $latestTag = ""
+        for ($i = 0; $i -lt 6; $i++) {
+            $latest = Invoke-GitHub "https://api.github.com/repos/$Repo/releases/latest"
+            $latestTag = $latest.tag_name
+            if ($latestTag -eq $tag) { break }
+            if ($i -lt 5) { Start-Sleep -Seconds 5 }
+        }
+        Add-Result "latest 指向本版本" ($latestTag -eq $tag) "latest=$latestTag"
     }
 
     $assets = @($rel.assets)

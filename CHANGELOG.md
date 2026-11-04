@@ -39,7 +39,8 @@
   之前所有 MITM 用例都用了 `InsecureSkipVerify`，无法证明「证书链本身可信」。
 - **`tools/verify-release.ps1`**：发布后核验。从 GitHub API 取 Release，下载线上附件，
   逐项比对大小、`SHA256SUMS.txt`、资产 digest 与 exe 自报版本；任意一项不一致以非零退出。
-  只信线上字节，不依赖本地构建产物。
+  只信线上字节，不依赖本地构建产物。Release 流水线在发布完成后会自动跑一次，
+  核验不通过就让本次发布变红；CI 里用 `GITHUB_TOKEN` 避免匿名 API 配额。
 - **`tools/start-soak.ps1`**：通过 WMI（`Win32_Process.Create`）在后台启动浸泡，
   父进程是 WMI 服务而非当前终端，关掉终端不会把浸泡一起收走；stdout / stderr 落文件，
   等第一份 CSV 样本出现才返回。实例副本放 `%LOCALAPPDATA%\tongtu-soak\<版本>`。
