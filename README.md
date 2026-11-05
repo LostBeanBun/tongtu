@@ -201,7 +201,7 @@ tools/crash-test.ps1  崩溃防护验收：强杀主进程，验证系统状态�
 tools/recover-test.ps1 断电自愈验收：杀监护 → 杀主进程 → `__recover`，断言状态干净且幂等
 tools/ui-smoke.ps1    界面点击验收：读 `/ui/layout` 精确定位按钮，点暂停→选 15 分钟→恢复并断言标签翻转
 tools/soak-test.ps1   长时间浸泡测试（默认 24 小时）：采样内存/句柄/连接，结束时给出结论
-tools/start-soak.ps1  后台启动浸泡（脱离终端 / 会话），并把实例副本放在 LOCALAPPDATA
+tools/start-soak.ps1  后台启动浸泡（计划任务，脱离终端），并把实例副本放在 LOCALAPPDATA
 tools/uninstall.ps1   卸载清理：撤销自启、证书、RunOnce、代理与 hosts 残留（可选删数据与 exe）
 tools/release-notes.ps1 从 CHANGELOG 提取版本条目，生成 Release 说明
 tools/verify-release.ps1 发布后核验：下载线上附件，对齐大小 / SHA-256 / 资产 digest / exe 版本

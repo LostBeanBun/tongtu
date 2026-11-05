@@ -227,26 +227,33 @@ func startGuard(log *slog.Logger) {
 		}
 		return
 	}
-	cmd := exec.Command(self, guardSubcommand,
-		"--guard-pid", fmt.Sprint(os.Getpid()),
-		"--guard-token", token)
-	// 监护进程要能在主进程被杀之后继续活着：
-	//   - CREATE_NO_WINDOW：不创建控制台（GUI 子系统本身也不会有）；
-	//   - CREATE_BREAKAWAY_FROM_JOB：万一主进程在会「关闭即杀子进程」的作业对象里，
-	//     监护进程也能脱身（作业对象不允许脱离时会失败，此时退回普通启动）。
-	cmd.SysProcAttr = guardSysProcAttr(true)
-	err = cmd.Start()
+	// 每次都新建 *exec.Cmd：Start() 失败后同一个对象可能已经被标记为「已启动」，
+	// 再调一次只会得到 exec: already started，回退分支就永远走不通（已踩过）。
+	spawn := func(breakaway bool) (*exec.Cmd, error) {
+		cmd := exec.Command(self, guardSubcommand,
+			"--guard-pid", fmt.Sprint(os.Getpid()),
+			"--guard-token", token)
+		// 监护进程要能在主进程被杀之后继续活着：
+		//   - CREATE_NO_WINDOW：不创建控制台（GUI 子系统本身也不会有）；
+		//   - CREATE_BREAKAWAY_FROM_JOB：万一主进程在会「关闭即杀子进程」的作业对象里，
+		//     监护进程也能脱身（作业对象不允许脱离时会失败，此时退回普通启动）。
+		cmd.SysProcAttr = guardSysProcAttr(breakaway)
+		return cmd, cmd.Start()
+	}
+	cmd, err := spawn(true)
 	if err != nil {
+		breakawayErr := err
 		// 作业对象不允许脱离：退回普通启动。此时监护进程会随主进程一起被结束，
 		// 崩溃防护实际失效——必须明确告诉用户，别让人以为有保障。
-		cmd.SysProcAttr = guardSysProcAttr(false)
-		err = cmd.Start()
+		cmd, err = spawn(false)
 		if err == nil {
 			guard.markBreakawayFailed()
-			guardLog("监护进程无法脱离作业对象，已退回普通启动（崩溃防护受限 in_job=%v）", inJobObject())
+			guardLog("监护进程无法脱离作业对象（%v），已退回普通启动（崩溃防护受限 in_job=%v）",
+				breakawayErr, inJobObject())
 			if log != nil {
 				log.Warn("崩溃防护受限：当前启动方式下监护进程无法脱离作业对象，"+
 					"异常退出（崩溃/强杀）后系统代理与 hosts 要等下次启动才还原",
+					"原因", breakawayErr,
 					"建议", "从资源管理器双击启动，或改用「开机自启（最高权限）」")
 			}
 		}

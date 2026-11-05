@@ -171,19 +171,36 @@ try {
     $startArgs = @("start", "--no-tray", "--hidden")
     if ($NoHosts) { $startArgs += "--no-hosts" }
     if ($NoMITM) { $startArgs += "--no-mitm" }
+    # 把主进程的 stdout / stderr 也落到文件：启动失败时错误往往只打到「父进程的控制台」，
+    # 在计划任务 / 无终端环境里会直接消失，事后只剩下「主进程退出了」这一句。
+    $startOut = [IO.Path]::ChangeExtension($CsvPath, ".start.out.log")
+    $startErr = [IO.Path]::ChangeExtension($CsvPath, ".start.err.log")
     Write-Host "[2/4] 启动并等待接管…" -ForegroundColor Gray
-    $proc = Start-Process -FilePath $Exe -ArgumentList $startArgs -PassThru
+    $proc = Start-Process -FilePath $Exe -ArgumentList $startArgs -PassThru `
+        -RedirectStandardOutput $startOut -RedirectStandardError $startErr
     $mainPid = $proc.Id
     $ready = Wait-Until {
         $st = Get-Status
         return ($null -ne $st) -and $st.running -and ($st.system_proxy -or $st.hosts)
     } 60
     if ($proc.HasExited) {
-        Write-Host "结论：无法测试。主进程启动后就退出了。" -ForegroundColor Red
+        Write-Host ("结论：无法测试。主进程启动后就退出了（退出码 {0}）。" -f $proc.ExitCode) -ForegroundColor Red
+        if (Test-Path $startErr) {
+            $tail = Get-Content $startErr -Tail 20 -ErrorAction SilentlyContinue
+            if ($tail) { Write-Host "启动错误输出："; $tail }
+        }
+        if (Test-Path $startOut) {
+            $tail = Get-Content $startOut -Tail 10 -ErrorAction SilentlyContinue
+            if ($tail) { Write-Host "启动标准输出（末 10 行）："; $tail }
+        }
         exit 2
     }
     if (-not $ready) {
         Write-Host "结论：无法测试。60 秒内没有接管成功（检查 config.yaml 的 system_proxy / hosts）。" -ForegroundColor Red
+        if (Test-Path $startErr) {
+            $tail = Get-Content $startErr -Tail 20 -ErrorAction SilentlyContinue
+            if ($tail) { Write-Host "启动错误输出："; $tail }
+        }
         exit 2
     }
     $st0 = Get-Status
