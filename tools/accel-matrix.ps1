@@ -9,14 +9,14 @@
 #   A 系统DNS直连   ：不开通途时浏览器的路（system DNS + 真 SNI）
 #   B 干净IP直连    ：DoH 干净 IP + 真 SNI，只换解析不走代理 —— 归因「DNS 污染」
 #   C 经通途代理    ：系统 DNS 不参与，代理侧用干净 IP —— 产品实际走的路
-#   D 无SNI出站     ：0.11 反代的出站半边，0.12.0 已删除 —— 归因「SNI 阻断」
+#   D 无SNI出站     ：反代的出站半边（独立探针，不经通途）—— 复验无 SNI 出站是否仍可行
 #
 # 结论按域名分类：
 #   A败C胜          → 通途确实救回来了（DNS 污染 / TCP 不可达型，有效）
 #   A胜C胜          → 本来就能通，通途不添乱即可（比较 C 的耗时）
 #   A胜C败          → 代理反而失败（回归！必须修）
 #   A败B胜C败       → 干净 IP 直连能通但代理不通（回归嫌疑）
-#   A败C败D胜       → SNI 阻断，当前架构救不回（需要已删除的反代或中继）
+#   A败C败D胜       → SNI 阻断，D 路证明无 SNI 可救（检查反代是否开启、名单是否覆盖）
 #   全败             → 网络/目标问题，与加速无关
 #
 # 前置：通途正在运行；D 路需要 nosni 探针（见脚本内说明）。
@@ -88,7 +88,7 @@ function Invoke-Path($kind, [string]$hostName, [string]$ip) {
     return @{ Ok = $ok; T = [math]::Round($t, 2); Code = $code }
 }
 
-# D 路：无 SNI 出站（已删除能力的复刻），成功与否看探针退出码
+# D 路：无 SNI 出站（反代出站半边的独立复验），成功与否看探针退出码
 function Invoke-NoSNI([string]$hostName, [string]$ip) {
     if (-not $ip -or -not $probe -or -not (Test-Path $probe)) { return @{ Ok = $false; T = -1; Skip = $true } }
     $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -99,7 +99,7 @@ function Invoke-NoSNI([string]$hostName, [string]$ip) {
 }
 
 Write-Host "加速效果归因矩阵（$Rounds 轮取最好成绩，$TimeoutSec 秒超时）" -ForegroundColor Cyan
-Write-Host "  A=系统DNS直连  B=干净IP直连  C=经通途  D=无SNI出站(0.12.0已删)" -ForegroundColor DarkGray
+Write-Host "  A=系统DNS直连  B=干净IP直连  C=经通途  D=无SNI出站(独立探针)" -ForegroundColor DarkGray
 Write-Host ""
 
 $clean = @{}; $system = @{}
@@ -147,7 +147,7 @@ foreach ($row in $rows) {
     elseif ($row.C.Ok -and $row.A.Ok) { $v = "本就可通（不添乱）"; $c = "Gray" }
     elseif (-not $row.C.Ok -and $row.A.Ok) { $v = "代理反而失败（回归！）"; $c = "Red" }
     elseif (-not $row.C.Ok -and -not $row.A.Ok -and $row.B.Ok) { $v = "干净IP通但代理不通（回归嫌疑）"; $c = "Red" }
-    elseif (-not $row.C.Ok -and -not $row.A.Ok -and -not $row.B.Ok -and $row.D.Ok) { $v = "SNI阻断（架构边界，已删能力可救）"; $c = "Yellow" }
+    elseif (-not $row.C.Ok -and -not $row.A.Ok -and -not $row.B.Ok -and $row.D.Ok) { $v = "SNI阻断（无SNI可救，检查反代名单）"; $c = "Yellow" }
     else { $v = "全败（网络/目标侧）"; $c = "Yellow" }
     $verdicts += [pscustomobject]@{ Host = $row.Host; V = $v; C = $c }
     Write-Host ("  {0,-30} {1,-17} {2,-24} {3}" -f $row.Host, $dnsNote, $abc, $v) -ForegroundColor $c
@@ -165,7 +165,7 @@ $regress = @($verdicts | Where-Object { $_.V -like "*回归*" }).Count
 $sni = @($verdicts | Where-Object { $_.V -like "SNI阻断*" }).Count
 $dead = @($verdicts | Where-Object { $_.V -like "全败*" }).Count
 Write-Host ""
-Write-Host ("汇总：{0} 个目标 · 通途救回 {1} · 本就可通 {2} · 代理回归 {3} · SNI阻断(架构边界) {4} · 全败 {5}" -f `
+Write-Host ("汇总：{0} 个目标 · 通途救回 {1} · 本就可通 {2} · 代理回归 {3} · SNI阻断(反代未覆盖) {4} · 全败 {5}" -f `
     $rows.Count, $valid, $noHarm, $regress, $sni, $dead) -ForegroundColor Cyan
 if ($regress -gt 0) { Write-Host "存在代理回归，需修复。" -ForegroundColor Red; exit 1 }
 exit 0

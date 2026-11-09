@@ -206,6 +206,9 @@ tools/uninstall.ps1   卸载清理：撤销自启、证书、RunOnce、代理与
 tools/release-notes.ps1 从 CHANGELOG 提取版本条目，生成 Release 说明
 tools/verify-release.ps1 发布后核验：下载线上附件，对齐大小 / SHA-256 / 资产 digest / exe 版本
 tools/add-defender-exclusion.ps1 给本机开发目录加 Defender 排除项（需管理员，仅用于验收）
+tools/speed-test.ps1  加速效果对照：直连 / 经代理 / 系统代理通道三路 TTFB+吞吐，多轮取最好
+tools/accel-matrix.ps1 加速归因矩阵：系统DNS / 干净IP / 经通途 / 无SNI出站四路对照，代理回归非零退出
+tools/nosni-probe/     无 SNI 出站探针（Go）：反代出站半边的独立复验，供矩阵 D 路调用
 .github/workflows/    CI（格式/静态检查/跨平台测试）与 Release（打 tag 自动构建发布）
 VERSION               版本号（唯一权威来源，见 bump.ps1 / CHANGELOG.md）
 ```

@@ -28,8 +28,8 @@
 
 ## [未发布]
 
-> 主题：**1.0.0 硬门槛**。本段记录门槛项的落地与实跑结果。产品行为没有变化，
-> 因此不抬版本号；到正式发布 1.0.0 时再合并进对应版本条目。
+> 主题：**1.0.0 硬门槛**，另记累积的修复与测量工具。本段不单独抬版本号；
+> 到正式发布 1.0.0 时再合并进对应版本条目并用 bump.ps1 抬版本。
 
 ### 新增
 
@@ -44,6 +44,10 @@
 - **`tools/start-soak.ps1`**：通过计划任务（默认）或 WMI（`-ViaProcess`）在后台启动浸泡，
   不挂在当前终端 / 控制台下；stdout / stderr 落文件，等第一份 CSV 样本出现才返回。
   实例副本放 `%LOCALAPPDATA%\tongtu-soak\<版本>`。
+- **加速效果三层测量工具**：`tools/speed-test.ps1`（直连 / 经代理 / 系统代理通道三路
+  TTFB+吞吐对照，多轮取最好，不通非零退出）、`tools/accel-matrix.ps1`（系统DNS / 干净IP /
+  经通途 / 无SNI出站四路归因矩阵，代理回归时非零退出）、`tools/nosni-probe`（无 SNI 出站
+  探针，单目标按退出码判定，供矩阵 D 路与反代出站能力复验）。
 
 ### 修复
 
@@ -52,6 +56,11 @@
   这条兜底形同虚设——日志里表现为 `拉起监护进程失败 err="exec: already started"`，
   崩溃防护在计划任务 / 作业对象环境里实际是关闭的。现在每次尝试都新建 `exec.Cmd`，
   并把第一次失败的原因（如 `fork/exec ...: Access is denied.`）写进日志与启动摘要。
+- **冷解析固定 2s 税**：宽限期到点后由后台协程消费在途结果，晚到的失败现在会记入端点
+  熔断账（90s 冷却）；并查出站与调用方取消解耦（`context.WithoutCancel`），否则代理请求
+  拿到结果即 `cancel()`，在途失败全变成 `context.Canceled` 无法记账。实测 `tongtu test`
+  的 DNS 列从 15/15 全是 ~2000ms 降到除首个域名外 5-90ms。回归测试
+  `TestGraceWindowAccountsLateFailures`。
 
 ### 变更
 
@@ -69,6 +78,8 @@
 - README 补充 `verify-release.ps1` / `start-soak.ps1`、发布后核验命令、Defender 误报的排查说明，
   以及「1.0 兼容性承诺」：命令 / 标志 / 退出码 / 配置键 / 数据位置 / 系统状态边界中哪些属于对外契约、
   哪些明确不在契约内（内部命令、控制端口形状、界面几何、日志措辞、验收脚本参数）。
+- **`.gitattributes` 固定行尾**：统一 LF（`*.ps1` / `*.bat` 保留 CRLF），防止 Windows 上
+  提交带 CRLF 的 `.go` 文件让 ubuntu CI 的 gofmt 红灯。
 
 ### 验证
 
@@ -90,6 +101,11 @@
   成功退回普通启动（日志写明 `fork/exec ...: Access is denied.`），结束时系统代理还原、
   无进程与 `guard.json` 残留。
 - 24 小时浸泡已改用计划任务重新启动（2026-11-05），结果待补记。
+- **无 SNI 反代全链路实跑（2026-11-09）**：开启反代并安装本地根证书后 `tongtu test`
+  15/15 可用——SNI 阻断的 steamcommunity 系 / avatars / gist / raw 直连失败、经反代全部
+  拿到响应；`accel-matrix` 代理回归 0、通途救回 3、全败 0；`speed-test` 经代理 5/5、
+  系统代理通道 5/5。测试后 `tongtu stop` 还原：无进程残留、`ProxyEnable=0`、
+  `ProxyServer` 还原为接管前值、无 `guard.json`。
 
 ### 已知风险
 
