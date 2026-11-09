@@ -4,6 +4,7 @@ package resolver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -257,7 +258,11 @@ func (r *Resolver) LookupAllUncached(ctx context.Context, host string) []net.IP 
 	resCh := make(chan result, len(order))
 	for _, ep := range order {
 		go func(ep string) {
-			ips, ttl, err := r.query(ctx, ep, host)
+			// 查询与调用方的取消解耦：调用方（代理请求）拿到结果后会立刻 cancel，
+			// 若在途查询跟着一起死，宽限期后到达的结果就只剩「调用方取消」这一种错误，
+			// 无从判断端点好坏，记账（accountLate）也就无从谈起。
+			// 生命周期改由自己的超时（r.cfg.Timeout）约束，最迟 cfg.Timeout 后必有结果。
+			ips, ttl, err := r.query(context.WithoutCancel(ctx), ep, host)
 			resCh <- result{ep: ep, ips: ips, ttl: ttl, err: err}
 		}(ep)
 	}
@@ -265,22 +270,42 @@ func (r *Resolver) LookupAllUncached(ctx context.Context, host string) []net.IP 
 	var out []net.IP
 	var minTTL time.Duration
 
+	// account 只做端点记账：成功记 OK、失败记 Fail，供 breaker（unionOrder 跳过
+	// 冷却期内的失败端点）降权。返回是否拿到了可用 IP。
+	account := func(res result) bool {
+		if res.err != nil || len(res.ips) == 0 {
+			if res.err == nil {
+				res.err = fmt.Errorf("无 A 记录")
+			}
+			// 查询已与调用方取消解耦，失败只取决于端点本身；
+			// 仍保留 Canceled 判断，避免把「没人要了」误算成端点故障。
+			if !errors.Is(res.err, context.Canceled) {
+				r.markFail(res.ep, res.err)
+			}
+			return false
+		}
+		r.markOK(res.ep)
+		return true
+	}
+
+	// accountLate 消费被放弃的在途结果（宽限期到点 / 调用方取消）：只记账，不参与合并。
+	// 关键在于「晚到的失败必须记账」：否则 1.1.1.1 这类在宽限期之后才报错的端点
+	// 永远进不了冷却，每个域名的冷查询都要重付一个宽限期
+	// （实测 tongtu test 的 DNS 一列全是 ~2000ms，而健康端点只要 30-150ms）。
+	accountLate := func(pending int) {
+		for i := 0; i < pending; i++ {
+			account(<-resCh)
+		}
+	}
+
 	// 首个成功响应后开始「宽限计时」：慢/不可达端点（如被拒连的 1.1.1.1）
 	// 不再拖住整体延迟，但仍在窗口内收集其它端点的结果以对抗单点污染。
 	var graceC <-chan time.Time
 	var graceTimer *time.Timer
 	collect := func(res result) {
-		if res.err != nil || len(res.ips) == 0 {
-			if res.err == nil {
-				res.err = fmt.Errorf("无 A 记录")
-			}
-			// 调用方取消导致的失败不视为端点故障，避免误降权
-			if ctx.Err() == nil {
-				r.markFail(res.ep, res.err)
-			}
+		if !account(res) {
 			return
 		}
-		r.markOK(res.ep)
 		for _, ip := range res.ips {
 			key := ip.String()
 			if seen[key] || !validIP(ip) {
@@ -298,20 +323,36 @@ func (r *Resolver) LookupAllUncached(ctx context.Context, host string) []net.IP 
 		}
 	}
 
-	for i := 0; i < len(order); i++ {
+	read := 0
+loop:
+	for read < len(order) {
 		if graceC == nil {
-			collect(<-resCh)
+			select {
+			case res := <-resCh:
+				collect(res)
+				read++
+			case <-ctx.Done():
+				break loop // 调用方取消：立刻收手，在途结果交给 accountLate 记账
+			}
 			continue
 		}
 		select {
 		case res := <-resCh:
 			collect(res)
+			read++
 		case <-graceC:
-			i = len(order) // 宽限期到，用已有结果
+			break loop // 宽限期到：用已有结果返回
+		case <-ctx.Done():
+			break loop
 		}
 	}
 	if graceTimer != nil {
 		graceTimer.Stop()
+	}
+	// 放弃的在途结果不能一丢了之：交给后台读干净并记账（channel 有全量缓冲，
+	// 查询 goroutine 不会因此卡住）。调用方不等它们——那正是宽限期的意义。
+	if pending := len(order) - read; pending > 0 {
+		go accountLate(pending)
 	}
 	out = r.mergeRemote(host, out)
 	if len(out) == 0 {

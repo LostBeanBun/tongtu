@@ -40,6 +40,15 @@
 - **`tools/start-soak.ps1`**：通过计划任务（默认）或 WMI（`-ViaProcess`）在后台启动浸泡，
   不挂在当前终端 / 控制台下；stdout / stderr 落文件，等第一份 CSV 样本出现才返回。
   实例副本放 `%LOCALAPPDATA%\tongtu-soak\<版本>`。
+- **`tools/speed-test.ps1`**：加速效果验收——同一批目标同时打「直连 / 经本地代理 / 系统代理通道」
+  三路，量 TTFB 与固定窗口吞吐，多轮取最好成绩（网络抖动不会偏袒任何一方）；
+  经代理或系统通道有目标不通时以非零退出。
+- **`tools/accel-matrix.ps1`**：加速归因矩阵——A 系统DNS直连 / B 干净IP直连 / C 经通途 /
+  D 无SNI出站 四路对照，逐域名判定「通途救回 / 本就可通 / 代理回归 / SNI阻断 / 全败」，
+  存在代理回归时以非零退出。
+- **`tools/nosni-probe`**：无 SNI 出站探针（0.11 反代出站半边的复刻），内置清单模式与
+  单目标退出码模式（供归因矩阵的 D 路）。`go run ./tools/nosni-probe` 可随时复验
+  「带 SNI 被重置、不带 SNI 即通」这两个事实。
 
 ### 修复
 
@@ -48,6 +57,15 @@
   这条兜底形同虚设——日志里表现为 `拉起监护进程失败 err="exec: already started"`，
   崩溃防护在计划任务 / 作业对象环境里实际是关闭的。现在每次尝试都新建 `exec.Cmd`，
   并把第一次失败的原因（如 `fork/exec ...: Access is denied.`）写进日志与启动摘要。
+- **冷解析不再每次固定等待 2 秒**：`LookupAllUncached` 在宽限期（`lookupGraceWindow`，2s）
+  到点后直接返回，在途端点的结果无人读取——晚到的失败永远不进 `markFail`，
+  `unionOrder` 的端点熔断（90s 冷却）因此从不生效，每个域名的**每次**冷查询都要重付满 2 秒
+  （实测 `tongtu test` 15 个域名的 DNS 一列全是 2006-2046ms，而健康端点只要 30-150ms）。
+  现在到点后由后台协程把在途结果读干净并记账；并查的出站查询同时与调用方取消解耦
+  （`context.WithoutCancel`，生命周期由 `cfg.Timeout` 约束）——否则调用方（代理请求）
+  拿到结果后立刻 `cancel()`，在途失败会全变成 `context.Canceled`，依然无从判断端点好坏。
+  修复后同一进程内首个域名仍付一次 2s（宽限期本身的设计），其余域名的冷 DNS 降至 5-90ms。
+  新增回归测试 `TestGraceWindowAccountsLateFailures`。
 
 ### 变更
 
@@ -85,6 +103,13 @@
   成功退回普通启动（日志写明 `fork/exec ...: Access is denied.`），结束时系统代理还原、
   无进程与 `guard.json` 残留。
 - 24 小时浸泡已改用计划任务重新启动（2026-11-05），结果待补记。
+- 加速效果三层取证（2026-11-09，见 `tools/speed-test.ps1` 与 `tools/accel-matrix.ps1`）：
+  `tongtu test` 15 域名的冷 DNS 除首个 ~2s 外全部 5-90ms（修复前 15/15 均 ~2000ms）；
+  归因矩阵 3 轮取最好＝通途救回 1 · 本就可通 3 · 代理回归 0；
+  `github.com` 直连 20 秒建不起 TCP、经通途 4 秒拿 525KB/HTTP 200；
+  SNI 探针证明失败域名「同一 IP 带 SNI 被 RST、不带 SNI 即通」，
+  无 SNI 出站复刻对 6 个失败域名全部拿到站点响应（`tools/nosni-probe` 可复跑），
+  TLS-in-TLS 嵌套已实测不可行——SNI 阻断需出站剥 SNI + 本地证书，属已知架构边界。
 
 ### 已知风险
 

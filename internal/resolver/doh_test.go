@@ -236,3 +236,63 @@ func TestResetClearsCacheAndRestoresOrder(t *testing.T) {
 		t.Fatalf("Reset 后应重新请求好端点（实际 %d 次）", got)
 	}
 }
+
+// TestGraceWindowAccountsLateFailures 覆盖「宽限期到点后在途结果仍要记账」。
+//
+// 背景：并查在首个成功响应后再等一个宽限期（lookupGraceWindow），到点就返回。
+// 若此时把在途端点的结果一丢了之，晚到的失败永远不会 markFail，
+// breaker（unionOrder 跳过冷却期内的失败端点）就永不生效——
+// 于是每个域名的每次冷查询都要重付一个宽限期。
+// 实测表现：tongtu test 里 15 个域名的 DNS 一列全是 ~2000ms，
+// 而健康端点只要 30-150ms。
+func TestGraceWindowAccountsLateFailures(t *testing.T) {
+	good, _ := fakeDoH(t, "1.2.3.4")
+	// 比宽限期更晚才失败的端点（复刻 1.1.1.1 在 2068ms 才报错的形态）。
+	// 注意用比 newTestResolver 更大的 Timeout：否则查询会在宽限期之前就超时返回，
+	// 走不到「晚到」这条路径。
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(lookupGraceWindow + 700*time.Millisecond)
+		w.WriteHeader(http.StatusGatewayTimeout)
+	}))
+	t.Cleanup(slow.Close)
+
+	r := New(Config{
+		Endpoints: []string{slow.URL, good.URL},
+		Timeout:   5 * time.Second,
+		CacheMin:  time.Second,
+		CacheMax:  time.Minute,
+	}, nil)
+
+	ips := r.LookupAllUncached(context.Background(), "example.com")
+	if len(ips) != 1 || ips[0].String() != "1.2.3.4" {
+		t.Fatalf("应拿到健康端点的结果，实际 %v", ips)
+	}
+
+	// 慢端点的失败在宽限期之后才到达：必须被读走并记账（降权 + 进冷却）
+	hasSlow := func() bool {
+		for _, ep := range r.unionOrder() {
+			if ep == slow.URL {
+				return true
+			}
+		}
+		return false
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && hasSlow() {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if hasSlow() {
+		t.Fatal("宽限期后到达的失败结果未被记账：慢端点仍在并查名单里，breaker 永不生效")
+	}
+
+	// breaker 生效后，第二次并查只查健康端点，不该再等满一个宽限期
+	start := time.Now()
+	ips2 := r.LookupAllUncached(context.Background(), "example.com")
+	elapsed := time.Since(start)
+	if len(ips2) != 1 || ips2[0].String() != "1.2.3.4" {
+		t.Fatalf("第二次并查结果异常: %v", ips2)
+	}
+	if elapsed >= lookupGraceWindow {
+		t.Fatalf("breaker 生效后第二次并查不应再等宽限期，实际耗时 %v", elapsed)
+	}
+}

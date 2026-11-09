@@ -271,7 +271,8 @@ Release 流水线在发布完成后也会自动跑同一个脚本，核验不通
 dist\tongtu.exe start
 ```
 
-默认**接管系统代理**：浏览器等走系统代理的程序即可访问 GitHub、Steam 社区。
+默认**接管系统代理**：浏览器等走系统代理的程序即可访问 GitHub 及其附属站点与 Steam 商店 / 登录 / CDN；
+**Steam 社区主站属于 SNI 阻断，当前版本救不回**，见[已知限制](#已知限制)。
 不需要管理员权限、不装证书、不改 hosts。`--no-sysproxy` 可以临时关掉系统代理（本次启动有效，不改配置）。
 
 查看状态 / 停止：
@@ -670,6 +671,12 @@ tongtu 会临时修改**系统代理**，因此会尽最大努力保证"停下�
 
 ## 已知限制
 
+- **SNI 阻断型站点当前无法加速**：干净解析与 `TCP:443` 都正常，但 TLS 握手一发出携带目标域名的
+  SNI 就被重置——实测同一 IP 上 `github.com` 可握手、`gist.github.com` 被 RST，阻断只认 SNI。
+  实测属于此类的有 `steamcommunity.com`（含 `www` / `help`）、`avatars.steamstatic.com`、`gist.github.com`。
+  对付它需要出站不带 SNI + 本地证书解密（0.11 的「无 SNI 反代」，需显式开启并安装根证书），
+  0.12.0 起按「只留系统代理、不装证书」的定位不再提供；`go run ./tools/nosni-probe` 可复验
+  「带 SNI 被重置、不带 SNI 即通」，`tools\accel-matrix.ps1` 的 D 路即复刻那条出站路径。
 - **github.com 主站可能被限速**：这是网络层速率限制，非代理问题。
 - **个别域名的干净 DoH 答案不可达**：例如 `www` / `help.steamcommunity.com` 会解析到国内打不通的机房，
   这类域名由 `dns.static_hosts` 的实测兜底 IP 兜住；如果你的线路也打不通，换成自己实测可用的 IP 即可。

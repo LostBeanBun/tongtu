@@ -8,9 +8,11 @@
 
 ## 1. 这是什么
 
-通途是一个面向境内网络的 **Steam 社区**与 **GitHub 及其附属站点**加速工具（独立实现、绿色单文件），只做一件事：
+通途是一个面向境内网络的 **Steam** 与 **GitHub 及其附属站点**加速工具（独立实现、绿色单文件），只做一件事：
 
-> 在境内网络下，稳定访问 **Steam 社区** 与 **GitHub 及其附属站点**。
+> 在境内网络下，访问 **GitHub 及其附属站点** 与 **Steam（商店 / 登录 / CDN）**：
+> 绕过 DNS 污染与 TCP 不可达。**SNI 阻断的站点（如 Steam 社区主站）不在覆盖范围**——
+> 怎么判定见[常见问题](#8-常见问题faq)，完整边界见 README「已知限制」。
 
 - ✅ 绕过 DNS 污染（DoH 干净解析 + 优选 IP 直连）
 - ✅ **一种开启方式：接管系统代理**——不需要管理员、不需要证书、不改写 hosts
@@ -124,7 +126,7 @@
 tongtu start
 ```
 
-- **默认就是这一种**：只接管**系统代理**，Chrome / Edge 等走系统代理的程序即可访问 GitHub、Steam 社区。
+- **默认就是这一种**：只接管**系统代理**，Chrome / Edge 等走系统代理的程序即可访问 GitHub 与 Steam 商店 / 登录 / CDN（SNI 阻断的 Steam 社区主站除外，见 FAQ）。
 - 不改写 hosts、不安装根证书，首次启动不会有任何系统提示。
 - 保持这个窗口开着；按 `Ctrl+C` 或另开窗口执行 `tongtu stop` 结束。
 
@@ -136,19 +138,22 @@ tongtu status          # 查看运行状态、DNS 端点健康度、流量
 tongtu stop            # 停止并还原系统代理
 ```
 
-`tongtu test` 输出示例：
+`tongtu test` 输出示例（网络状况不同，结果会波动）：
 
 ```
-结论    域名                    解析IP(干净)        DNS     TCP:443  直连HTTPS  经代理
-可用    steamcommunity.com      104.89.103.51 +4   2046ms  42ms     失败: ...  HTTP 200
-可用    store.steampowered.com  23.63.226.116      2009ms  43ms     HTTP 200   HTTP 200
-可用    github.com              140.82.112.3 +3    2009ms  249ms    HTTP 200   HTTP 200
+结论    域名                      解析IP(干净)         DNS     TCP:443  直连HTTPS  经代理
+不通    steamcommunity.com        104.89.103.51 +3    2042ms  39ms     失败: ...  失败: EOF
+可用    store.steampowered.com    23.15.142.182       12ms    43ms     HTTP 200   HTTP 200
+可用    github.com                140.82.112.3 +3     7ms     253ms    HTTP 200   HTTP 200
 ...
 ```
 
+- `DNS` 列是冷查询耗时：首个域名要等并查宽限期（约 2 秒），端点熔断生效后其余域名都是几十毫秒。
 - `解析IP(干净)` 是 DoH 干净答案；`TCP:443` 不通说明候选 IP 不可用（加进 `dns.static_hosts` 换一个）。
 - `直连HTTPS` 是**绕过代理**的结果，`经代理` 才是通途生效的证据：后者为 `HTTP 200` 即加速已生效。
 - `直连` 失败而 `经代理` 成功属正常——这正是需要加速的域名。
+- `TCP:443` 通但两列都以 `EOF` / 重置收场＝**SNI 阻断**（握手一发域名就被掐），当前版本救不回，
+  判定方法见 FAQ，完整边界见 README「已知限制」。
 
 ---
 
@@ -345,7 +350,9 @@ custom:                        # 你自己的站点：改完保存即生效（�
 **Q：`steamcommunity.com` / `github.com` 仍失败？**
 先按上一条确认它卡在哪一步：`解析IP(干净)` 说明 DoH 拿到的地址、`TCP:443` 说明这个地址通不通。
 解析被污染时通途会用干净 IP 直连；TCP 不通时把可用 IP 加进 `dns.static_hosts`；
-两个都通但页面仍打不开时，多半是浏览器走了别的代理插件。
+解析与 TCP 都通但 HTTPS 仍以 `EOF` / 重置收场，是 **SNI 阻断**——握手一发出携带域名的 SNI 就被掐，
+当前版本救不回（实测 `steamcommunity.com` 及其 `www` / `help`、`avatars.steamstatic.com`、
+`gist.github.com` 属此类），详见 README「已知限制」；其余情况多半是浏览器走了别的代理插件。
 
 **Q：`store.steampowered.com` 第一次打开要转好几秒，之后很快？**
 冷启动的第一笔访问要现查干净 DoH、再对候选 IP 逐个做 TCP + TLS 探测（2–5 秒）。
