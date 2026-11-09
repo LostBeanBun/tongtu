@@ -37,20 +37,6 @@ func openLocation(path string) error {
 	return cmd.Start()
 }
 
-func messageBoxYesNo(title, msg string, flags uint32) bool {
-	t, err1 := windows.UTF16PtrFromString(title)
-	m, err2 := windows.UTF16PtrFromString(msg)
-	if err1 != nil || err2 != nil {
-		return false
-	}
-	const idYes = 6
-	r, _, _ := procMsgBoxW.Call(0,
-		uintptr(unsafe.Pointer(m)),
-		uintptr(unsafe.Pointer(t)),
-		uintptr(flags))
-	return int32(r) == idYes
-}
-
 // notifyError 弹出一个提示框。控制台窗口被隐藏（开机自启）时，这是唯一能让
 // 用户看到失败原因的方式，所以菜单里的操作失败都通过它反馈。
 func notifyError(title, msg string) {

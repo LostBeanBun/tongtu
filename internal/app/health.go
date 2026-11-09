@@ -57,8 +57,6 @@ const (
 	recoverDebounce = 3 * time.Second
 	// dnsResetCooldown 避免在长时间断网时每 15 秒就重置一次 DNS。
 	dnsResetCooldown = 2 * time.Minute
-	// healCooldown 限制同一种自愈动作的重试频率，避免每 15 秒重试并刷一遍日志。
-	healCooldown = time.Minute
 )
 
 // 健康问题类型。

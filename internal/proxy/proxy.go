@@ -46,9 +46,6 @@ type Proxy struct {
 	tr        *http.Transport
 	rp        *httputil.ReverseProxy
 	c         counters
-
-	// allowLoopback 仅供测试：允许候选 IP 为回环地址（注入本地假上游）
-	allowLoopback bool
 }
 
 // LookupFunc 解析主机名到 IP 列表（生产实现为 resolver.Resolver.Lookup）。
