@@ -28,9 +28,6 @@ func DisableRun() error { return nil }
 // RunCommand 在非 Windows 平台返回空。
 func RunCommand() (string, error) { return "", nil }
 
-// EnableTask 在非 Windows 平台返回不支持。
-func EnableTask(string) error { return errUnsupported }
-
 // DisableTask 在非 Windows 平台为空实现。
 func DisableTask() error { return nil }
 

@@ -70,11 +70,11 @@ func waitProcessExit(pid int) bool {
 // processAlive 报告 pid 是否还有一个活着的进程。
 //
 // 用在「遗留清理」之前的安全检查上（见 foreignLiveSession）：上一轮实例的主进程还活着，
-// 系统代理 / hosts 就归它管，我们不能去清。
+// 系统代理就归它管，我们不能去清。
 //
-// 权限注意：对方可能是提权运行的实例，此时 OpenProcess 会以 ACCESS_DENIED 失败。
-// 这种「打不开」必须按「还活着」处理——否则非提权启动的第二个实例会把提权实例的
-// 系统代理清空，而提权实例自己还以为接管着。只有 ERROR_INVALID_PARAMETER
+// 权限注意：对方可能是以更高权限（或不同用户）运行的进程，此时 OpenProcess 会以
+// ACCESS_DENIED 失败。这种「打不开」必须按「还活着」处理——否则第二个实例会把第一个
+// 实例的系统代理清空，而对方自己还以为接管着。只有 ERROR_INVALID_PARAMETER
 // （pid 根本不存在）才算真的退出了。
 func processAlive(pid int) bool {
 	if pid <= 0 {

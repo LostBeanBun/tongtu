@@ -9,13 +9,12 @@
 # 用法：
 #   .\tools\soak-test.ps1                          # 跑满 24 小时，每 60 秒采一次
 #   .\tools\soak-test.ps1 -Hours 0.05 -IntervalSec 10   # 3 分钟快速验证脚本本身
-#   .\tools\soak-test.ps1 -NoHosts -NoMITM         # 只浸泡系统代理路径（不动 hosts / 反代）
 #   .\tools\soak-test.ps1 -CsvPath D:\tmp\soak.csv # 指定 CSV 输出位置
 #
 # 注意：
-#   - 脚本会启动一个 `--no-tray --hidden` 实例并让它接管系统代理（默认也含 hosts / 反代），
+#   - 脚本会启动一个 `--no-tray --hidden` 实例并让它接管系统代理，
 #     期间这台电脑的流量就走通途——这正是「真实长期运行」的场景，建议就在日常使用中跑。
-#   - 结束时会正常停止实例并还原系统代理 / hosts，不会把机器留在半接管状态。
+#   - 结束时会正常停止实例并还原系统代理，不会把机器留在半接管状态。
 #   - 判定阈值是经验值：内存增长 >150 MB 或句柄增长 >300 视为失败（先 WARN 后 FAIL），
 #     长时间空闲运行出现这种增长通常意味着有泄漏。
 param(
@@ -24,8 +23,6 @@ param(
     [int]$IntervalSec = 60,
     [string]$CsvPath = "",
     [int]$WarmupSamples = 5,     # 前几个样本算启动热身（缓存/预热），不计入基线
-    [switch]$NoHosts,
-    [switch]$NoMITM,
     [switch]$RestartAfter        # 测完重新启动一个实例（若跑之前本来就在运行）
 )
 
@@ -51,8 +48,6 @@ $runOnceKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
 $runOnceName = "TongtuRecover"
 $dataDir = Join-Path $env:APPDATA "tongtu"
 $cfgPath = Join-Path $dataDir "config.yaml"
-$hostsPath = Join-Path $env:WINDIR "System32\drivers\etc\hosts"
-$beginMark = "# >>> tongtu managed block >>>"
 
 $listen = "127.0.0.1:19180"
 $control = "127.0.0.1:19181"
@@ -96,12 +91,6 @@ function Get-Status {
 
 function Get-TongtuProcesses { @(Get-Process -Name tongtu -ErrorAction SilentlyContinue) }
 
-function Test-HostsHasManagedBlock {
-    if (-not (Test-Path $hostsPath)) { return $false }
-    return [bool](Get-Content -Path $hostsPath -ErrorAction SilentlyContinue |
-        Where-Object { $_ -like "*$beginMark*" } | Select-Object -First 1)
-}
-
 function Get-RunOnceValue {
     $k = Get-ItemProperty -Path $runOnceKey -Name $runOnceName -ErrorAction SilentlyContinue
     if ($null -eq $k) { return "" }
@@ -136,8 +125,7 @@ Write-Host "通途长时间运行浸泡测试" -ForegroundColor Cyan
 Write-Host ("  exe:      {0}" -f $Exe)
 Write-Host ("  时长:     {0} 小时（每 {1} 秒采样）" -f $Hours, $IntervalSec)
 Write-Host ("  CSV:      {0}" -f $CsvPath)
-Write-Host ("  接管范围: 系统代理=开，hosts={0}，反代={1}" -f `
-    $(if ($NoHosts) { "关" } else { "开" }), $(if ($NoMITM) { "关" } else { "开" }))
+Write-Host "  接管范围: 系统代理=开"
 Write-Host ""
 
 $failures = New-Object System.Collections.Generic.List[string]
@@ -164,13 +152,10 @@ try {
     }
 
     $snapProxy = Get-ProxySnapshot
-    $snapHosts = if (Test-Path $hostsPath) { [IO.File]::ReadAllBytes($hostsPath) } else { $null }
 
     # —— 2. 启动 ——
     # 注意别用 $args：它是 PowerShell 的自动变量（未绑定参数），拿来存命令行容易出怪问题。
     $startArgs = @("start", "--no-tray", "--hidden")
-    if ($NoHosts) { $startArgs += "--no-hosts" }
-    if ($NoMITM) { $startArgs += "--no-mitm" }
     # 把主进程的 stdout / stderr 也落到文件：启动失败时错误往往只打到「父进程的控制台」，
     # 在计划任务 / 无终端环境里会直接消失，事后只剩下「主进程退出了」这一句。
     $startOut = [IO.Path]::ChangeExtension($CsvPath, ".start.out.log")
@@ -181,7 +166,7 @@ try {
     $mainPid = $proc.Id
     $ready = Wait-Until {
         $st = Get-Status
-        return ($null -ne $st) -and $st.running -and ($st.system_proxy -or $st.hosts)
+        return ($null -ne $st) -and $st.running -and $st.system_proxy
     } 60
     if ($proc.HasExited) {
         Write-Host ("结论：无法测试。主进程启动后就退出了（退出码 {0}）。" -f $proc.ExitCode) -ForegroundColor Red
@@ -196,7 +181,7 @@ try {
         exit 2
     }
     if (-not $ready) {
-        Write-Host "结论：无法测试。60 秒内没有接管成功（检查 config.yaml 的 system_proxy / hosts）。" -ForegroundColor Red
+        Write-Host "结论：无法测试。60 秒内没有接管成功（检查 config.yaml 的 system_proxy）。" -ForegroundColor Red
         if (Test-Path $startErr) {
             $tail = Get-Content $startErr -Tail 20 -ErrorAction SilentlyContinue
             if ($tail) { Write-Host "启动错误输出："; $tail }
@@ -205,9 +190,8 @@ try {
     }
     $st0 = Get-Status
     $startTakeover = [bool]$st0.system_proxy
-    $startHosts = [bool]$st0.hosts
-    Write-Host ("      就绪：pid={0} 系统代理={1} hosts={2} 反代={3}；RunOnce={4}" -f `
-        $mainPid, $st0.system_proxy, $st0.hosts, $st0.mitm,
+    Write-Host ("      就绪：pid={0} 系统代理={1}；RunOnce={2}" -f `
+        $mainPid, $st0.system_proxy,
         $(if (Get-RunOnceValue) { "已登记" } else { "未登记" })) -ForegroundColor Gray
 
     # —— 3. 采样 ——
@@ -268,10 +252,6 @@ try {
         }
         if ($startTakeover -and -not $st.system_proxy) {
             $failures.Add("系统代理接管在第 $count 个样本时丢了（ProxyNote=$($st.proxy_note)）")
-            break
-        }
-        if ($startHosts -and -not $st.hosts) {
-            $failures.Add("hosts 接管在第 $count 个样本时丢了")
             break
         }
     }
@@ -393,15 +373,6 @@ try {
         }
     } catch {
         Write-Host "系统代理还原失败：$($_.Exception.Message)" -ForegroundColor Red
-    }
-
-    try {
-        if ($null -ne $snapHosts -and (Test-HostsHasManagedBlock)) {
-            [IO.File]::WriteAllBytes($hostsPath, $snapHosts)
-            Write-Host "已还原 hosts 为启动之前的内容。" -ForegroundColor Gray
-        }
-    } catch {
-        Write-Host "hosts 还原失败（需要管理员权限）：$($_.Exception.Message)" -ForegroundColor Yellow
     }
 
     try {

@@ -74,10 +74,10 @@ func TestLoadUnknownService(t *testing.T) {
 	}
 }
 
-// TestHostsCoverSteamStoreHosts 提醒：hosts 名单要覆盖到「必须走反代」的主机。
+// TestHostsCoverSteamStoreHosts 提醒：预热名单要覆盖到「必须靠代理才连得上」的主机。
 //
-// 反代域名在 hosts 模式下会写 127.0.0.1（见 app.mitmLocalNamesFor），
-// 名单里少了某个主机，Steam 客户端走 hosts 时就绕不过 SNI 封锁。
+// 这些主机直连会被 SNI 封锁或直接 RST，只有经代理（或优选 IP 直连）才通；
+// 名单里少了它们，启动预热就白做了一半。
 func TestHostsCoverSteamStoreHosts(t *testing.T) {
 	set, err := Load([]string{"steam"})
 	if err != nil {
@@ -88,14 +88,14 @@ func TestHostsCoverSteamStoreHosts(t *testing.T) {
 		hosts[h] = true
 	}
 	for _, want := range []string{
-		"store.steampowered.com",  // 商店：直连被 SNI 阻断，走反代
-		"avatars.steamstatic.com", // 头像：直连 RST，走反代
+		"store.steampowered.com",  // 商店：直连被 SNI 阻断
+		"avatars.steamstatic.com", // 头像：直连 RST
 		"steamcommunity.com",
 		"www.steamcommunity.com",
 		"help.steamcommunity.com",
 	} {
 		if !hosts[want] {
-			t.Errorf("hosts 名单缺少 %s", want)
+			t.Errorf("预热名单缺少 %s", want)
 		}
 	}
 }
@@ -130,7 +130,7 @@ func TestAddPatterns(t *testing.T) {
 	}
 }
 
-// TestCustomHosts 精确主机名进 hosts 覆盖；通配无法枚举，只靠系统代理模式（不进 hosts）。
+// TestCustomHosts 精确主机名进预热名单；通配无法枚举，只靠系统代理的白名单匹配。
 func TestCustomHosts(t *testing.T) {
 	set, err := Load([]string{"github"})
 	if err != nil {
@@ -142,12 +142,12 @@ func TestCustomHosts(t *testing.T) {
 		hosts[h] = true
 	}
 	if !hosts["my.site.com"] {
-		t.Error("hosts 名单应包含自定义的精确域名")
+		t.Error("预热名单应包含自定义的精确域名")
 	}
 	if hosts["*.example.com"] || hosts["example.com"] {
-		t.Error("通配模式不该进 hosts（无法枚举，会写出一个无意义的主机名）")
+		t.Error("通配模式不该进预热名单（无法枚举，会得到一个无意义的主机名）")
 	}
 	if !hosts["github.com"] {
-		t.Error("内置服务组的 hosts 不应被自定义规则顶掉")
+		t.Error("内置服务组的预热名单不应被自定义规则顶掉")
 	}
 }

@@ -30,15 +30,11 @@ func hasID(list []uiTodoItem, id string) bool {
 func TestTodosRuntimeFix(t *testing.T) {
 	cfg := config.Default()
 	cfg.SystemProxy = true
-	cfg.Hosts = true
-	cfg.MITM.Enabled = true
-	st := app.Status{Running: true, SystemProxy: false, Hosts: false, MITM: false}
+	st := app.Status{Running: true, SystemProxy: false}
 
-	got := compileTodos(st, cfg, false, true, func() bool { return true })
-	for _, want := range []string{uiIDTodoTake, uiIDTodoElev, uiIDTodoCert} {
-		if !hasID(got, want) {
-			t.Errorf("应包含待办 %q，实际 %v", want, statuses(got))
-		}
+	got := compileTodos(st, cfg, true)
+	if !hasID(got, uiIDTodoTake) {
+		t.Errorf("应包含待办 %q，实际 %v", uiIDTodoTake, statuses(got))
 	}
 	if hasID(got, uiIDTodoAuto) {
 		t.Error("自启已配置时不该再提示自启")
@@ -53,37 +49,25 @@ func TestTodosRuntimeFix(t *testing.T) {
 func TestTodosPausedIsSilent(t *testing.T) {
 	cfg := config.Default()
 	cfg.SystemProxy = true
-	cfg.Hosts = true
-	cfg.MITM.Enabled = true
 	st := app.Status{Running: true, Paused: true}
 
-	certCalled := false
-	got := compileTodos(st, cfg, false, true, func() bool {
-		certCalled = true
-		return true
-	})
+	got := compileTodos(st, cfg, true)
 	if len(got) != 0 {
 		t.Fatalf("暂停中不该有待办，实际 %v", statuses(got))
 	}
-	if certCalled {
-		t.Error("暂停中连证书探测都不该做（没必要起 certutil）")
-	}
 
-	if got := compileTodos(st, cfg, false, false, nil); len(got) != 1 || got[0].ID != uiIDTodoAuto {
+	if got := compileTodos(st, cfg, false); len(got) != 1 || got[0].ID != uiIDTodoAuto {
 		t.Fatalf("与暂停无关的自启待办应保留，实际 %v", statuses(got))
 	}
 }
 
 // TestTodosOnlyWhenRunning 没在跑的时候不报运行期问题（否则「已停止」还催你夺回系统代理）。
-// 装证书这类静态准备仍可提示：它不需要加速在跑。
 func TestTodosOnlyWhenRunning(t *testing.T) {
 	cfg := config.Default()
 	cfg.SystemProxy = true
-	cfg.Hosts = true
 	st := app.Status{Running: false}
 
-	got := compileTodos(st, cfg, false, true, func() bool { return true })
-	if hasID(got, uiIDTodoTake) || hasID(got, uiIDTodoElev) {
+	if got := compileTodos(st, cfg, true); hasID(got, uiIDTodoTake) {
 		t.Fatalf("未运行时不该有运行期待办，实际 %v", statuses(got))
 	}
 }

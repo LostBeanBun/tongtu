@@ -17,14 +17,11 @@ func OpenInNotepad(path string) error { return openInNotepad(path) }
 // NotifyError 弹出错误提示框（窗口不可见时的兜底反馈通道）。
 func NotifyError(title, msg string) { notifyError(title, msg) }
 
-// ConfirmRestartElevated 询问是否以管理员身份重启。
-func ConfirmRestartElevated() bool { return confirmRestartElevated() }
-
 // ToggleService 切换单个加速服务组（至少保留一个）。
 func ToggleService(a *app.App, id string) error { return toggleService(a, id) }
 
-// EnableAutostart 写入开机自启（elevated=false 用 HKCU Run 键，true 用最高权限计划任务）。
-func EnableAutostart(elevated bool) error { return enableAutostart(elevated) }
+// EnableAutostart 写入开机自启（当前用户权限的 HKCU Run 键）。
+func EnableAutostart() error { return enableAutostart() }
 
 // OpenLocation 在资源管理器里打开文件所在目录并选中它。
 func OpenLocation(path string) error { return openLocation(path) }

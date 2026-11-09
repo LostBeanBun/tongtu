@@ -17,7 +17,7 @@ import (
 // API 是控制端点背后的能力接口（由 app.App 实现）。
 type API interface {
 	Status() app.Status
-	SetMode(sys, hosts bool) error
+	SetMode(sys bool) error
 }
 
 // Server 是回环 HTTP 控制服务。
@@ -88,13 +88,12 @@ func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	sys, ok1 := parseBool(q.Get("sysproxy"))
-	hosts, ok2 := parseBool(q.Get("hosts"))
-	if !ok1 || !ok2 {
-		http.Error(w, "参数需要 sysproxy 与 hosts 两个布尔值", http.StatusBadRequest)
+	sys, ok := parseBool(q.Get("sysproxy"))
+	if !ok {
+		http.Error(w, "参数需要 sysproxy 布尔值", http.StatusBadRequest)
 		return
 	}
-	if err := s.api.SetMode(sys, hosts); err != nil {
+	if err := s.api.SetMode(sys); err != nil {
 		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}

@@ -1,15 +1,14 @@
 # crash-test.ps1 — 崩溃防护验收：强杀通途主进程，检查系统状态是否被自动还原。
 #
 # 为什么要跑这个：
-#   通途接管了系统代理 / hosts 之后，一旦异常退出（崩溃、任务管理器强杀、进程树被连带结束），
+#   通途接管系统代理之后，一旦异常退出（崩溃、任务管理器强杀、进程树被连带结束），
 #   系统就会留着「指向已经不存在的本地代理」的设置，表现为整个浏览器都上不了网。
 #   兜底靠的是独立进程 `tongtu __guard`：它盯着主进程，发现主进程死了就立刻还原。
 #
 #   这个脚本模拟最恶劣的情况——直接 taskkill /F，不给任何清理机会——然后验证：
 #     1. 系统代理是否还原成启动之前的样子；
-#     2. hosts 里是否没有残留托管块；
-#     3. 监护进程是否自己也退干净了（不留僵尸进程）；
-#     4. 数据目录里是否没有残留的 guard.json。
+#     2. 监护进程是否自己也退干净了（不留僵尸进程）；
+#     3. 数据目录里是否没有残留的 guard.json。
 #
 # 用法：
 #   .\tools\crash-test.ps1                        # 用 dist\tongtu.exe
@@ -17,8 +16,7 @@
 #   .\tools\crash-test.ps1 -Exe .\dist\tongtu.exe -WaitRestoreSec 90
 #
 # 注意：
-#   - 脚本会快照并在结束时还原系统代理与 hosts，不会破坏你原本的网络配置。
-#   - 非管理员运行时 hosts 本来就接管不了（属预期），此时只验证系统代理那一半。
+#   - 脚本会快照并在结束时还原系统代理，不会破坏你原本的网络配置。
 #   - 如果本脚本是被「作业对象」包着的终端启动的（某些 IDE / CI / 任务计划里会这样），
 #     监护进程可能无法脱离主进程，异常退出时会一起被带走——这是启动方式的限制，
 #     不是代码问题；输出里会区分这两种结论，并可查看 guard.log 佐证。
@@ -39,12 +37,10 @@ if (-not (Test-Path $Exe)) { throw "找不到可执行文件: $Exe（先执行 .
 $Exe = (Resolve-Path $Exe).Path
 
 $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
-$hostsPath = Join-Path $env:WINDIR "System32\drivers\etc\hosts"
 $dataDir = Join-Path $env:APPDATA "tongtu"
 $cfgPath = Join-Path $dataDir "config.yaml"
 $guardState = Join-Path $dataDir "guard.json"
 $guardLog = Join-Path $dataDir "guard.log"
-$beginMark = "# >>> tongtu managed block >>>"
 
 # 监听地址（用来识别「指向通途但通途并不在跑」的自代理残留）
 $listen = "127.0.0.1:19180"
@@ -79,12 +75,6 @@ function Set-ProxySnapshot($snap) {
 }
 
 function Get-TongtuProcesses { @(Get-Process -Name tongtu -ErrorAction SilentlyContinue) }
-
-function Test-HostsHasManagedBlock {
-    if (-not (Test-Path $hostsPath)) { return $false }
-    $lines = Get-Content -Path $hostsPath -ErrorAction SilentlyContinue
-    return [bool]($lines | Where-Object { $_ -like "*$beginMark*" })
-}
 
 function Test-PortOpen([string]$addr) {
     $parts = $addr.Split(":")
@@ -128,9 +118,8 @@ if ($staleLeftover) {
 
 # —— 3. 快照「启动前」的干净基线 ——
 $snapProxy = Get-ProxySnapshot
-$snapHosts = if (Test-Path $hostsPath) { [IO.File]::ReadAllBytes($hostsPath) } else { $null }
-Write-Host ("[3/6] 基线: ProxyEnable={0} ProxyServer='{1}'；hosts 托管块={2}；管理员={3}" -f `
-    $snapProxy.Enable, $snapProxy.Server, (Test-HostsHasManagedBlock), $admin)
+Write-Host ("[3/6] 基线: ProxyEnable={0} ProxyServer='{1}'；管理员={2}" -f `
+    $snapProxy.Enable, $snapProxy.Server, $admin)
 
 $failures = New-Object System.Collections.Generic.List[string]
 $notes = New-Object System.Collections.Generic.List[string]
@@ -191,8 +180,7 @@ while ($sw.Elapsed.TotalSeconds -lt $WaitRestoreSec) {
     if (($now.Enable -eq $snapProxy.Enable) -and
         ($now.Server -eq $snapProxy.Server) -and
         (-not (Test-Path $guardState)) -and
-        ($procs.Count -eq 0) -and
-        (-not (Test-HostsHasManagedBlock))) { $restored = $true; break }
+        ($procs.Count -eq 0)) { $restored = $true; break }
     Start-Sleep -Milliseconds 500
 }
 $restoreSec = [math]::Round($sw.Elapsed.TotalSeconds, 1)
@@ -200,7 +188,6 @@ $restoreSec = [math]::Round($sw.Elapsed.TotalSeconds, 1)
 # —— 6. 断言与报告 ——
 $now = Get-ProxySnapshot
 $procs = Get-TongtuProcesses
-$hostsBlock = Test-HostsHasManagedBlock
 $guardLeft = Test-Path $guardState
 
 if (-not $killOk) { $failures.Add("主进程没被杀掉，测试无效") }
@@ -208,7 +195,6 @@ if (($now.Enable -ne $snapProxy.Enable) -or ($now.Server -ne $snapProxy.Server))
     $failures.Add(("系统代理没还原: 现在 ProxyEnable={0} ProxyServer='{1}'，应为 ProxyEnable={2} ProxyServer='{3}'" -f `
         $now.Enable, $now.Server, $snapProxy.Enable, $snapProxy.Server))
 }
-if ($hostsBlock) { $failures.Add("hosts 里残留托管块（$beginMark）") }
 if ($guardLeft) { $failures.Add("数据目录残留 guard.json") }
 if ($procs.Count -gt 0) { $failures.Add("还有通途进程没退出: pid $($procs.Id -join ', ')") }
 
@@ -217,7 +203,6 @@ Write-Host ""
 Write-Host "  检查项                       期望                        实际" -ForegroundColor Cyan
 $rows = @(
     @{ Name = "系统代理已还原";   Want = "ProxyEnable=$($snapProxy.Enable)"; Got = "ProxyEnable=$($now.Enable)"; Ok = (($now.Enable -eq $snapProxy.Enable) -and ($now.Server -eq $snapProxy.Server)) },
-    @{ Name = "hosts 无托管块";   Want = "无";                             Got = $(if ($hostsBlock) { "有" } else { "无" }); Ok = (-not $hostsBlock) },
     @{ Name = "无 guard.json 残留"; Want = "无";                           Got = $(if ($guardLeft) { "有" } else { "无" }); Ok = (-not $guardLeft) },
     @{ Name = "无通途进程残留";   Want = "0 个";                           Got = "$($procs.Count) 个"; Ok = ($procs.Count -eq 0) }
 )
@@ -258,14 +243,6 @@ if (-not $SkipRestore) {
     if (($cur.Enable -ne $snapProxy.Enable) -or ($cur.Server -ne $snapProxy.Server) -or ($cur.AutoConfig -ne $snapProxy.AutoConfig)) {
         Set-ProxySnapshot $snapProxy
         Write-Host "已把系统代理还原为启动之前的状态。" -ForegroundColor Gray
-    }
-    if ($snapHosts -and (Test-HostsHasManagedBlock)) {
-        try {
-            [IO.File]::WriteAllBytes($hostsPath, $snapHosts)
-            Write-Host "已把 hosts 还原为启动之前的内容。" -ForegroundColor Gray
-        } catch {
-            Write-Host "hosts 还原失败（需要管理员权限）：$($_.Exception.Message)" -ForegroundColor Yellow
-        }
     }
 }
 

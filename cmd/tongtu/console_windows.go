@@ -143,7 +143,7 @@ func messageBox(title, text string, flags uint32) int32 {
 }
 
 // installConsoleCloseHandler 注册控制台事件处理：用户关闭控制台窗口 / 注销 / 关机时，
-// 触发一次优雅停止（还原系统代理与 hosts），避免留下指向已停止代理的失效设置。
+// 触发一次优雅停止（还原系统代理），避免留下指向已停止代理的失效设置。
 // Ctrl+C / Ctrl+Break 不在本处理范围内，仍由 os/signal 处理。
 //
 // 正常情况下通途会在界面就绪后主动分离控制台（见 detachConsole），因此这条路径

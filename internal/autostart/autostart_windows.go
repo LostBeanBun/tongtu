@@ -1,8 +1,7 @@
 //go:build windows
 
-// Package autostart 管理 Windows 开机自启，提供两种机制：
-//   - HKCU Run 键：无需管理员，登录时以当前用户权限启动（仅系统代理模式可用）
-//   - 计划任务：需管理员，登录时以最高权限启动（hosts 模式亦可用，且无 UAC 弹窗）
+// Package autostart 管理 Windows 开机自启：HKCU Run 键，无需管理员，
+// 登录时以当前用户权限启动。
 //
 // 另外提供「断电自愈」用的 HKCU RunOnce 登记（见 RecoverCommand）：它不是开机自启，
 // 只在通途接管期间存在，用来兜底掉电 / 蓝屏后遗留的错误网络配置。
@@ -137,17 +136,10 @@ func deleteRunValue(keyPath, name string) error {
 	return nil
 }
 
-// EnableTask 创建登录自启的计划任务（最高权限；需管理员）。
-func EnableTask(cmdLine string) error {
-	out, err := run("schtasks", "/Create", "/TN", taskName, "/SC", "ONLOGON",
-		"/TR", cmdLine, "/RL", "HIGHEST", "/F")
-	if err != nil {
-		return fmt.Errorf("创建计划任务失败（需以管理员身份运行）: %v %s", err, strings.TrimSpace(out))
-	}
-	return nil
-}
-
 // DisableTask 删除计划任务（不存在时无操作）。
+//
+// 现在已不再创建计划任务（见包注释），这一条是给旧版本升级来的机器清理残留用的：
+// 留着它会让「开机自启」状态出现两个来源，甚至重复启动。
 func DisableTask() error {
 	if !taskExists() {
 		return nil

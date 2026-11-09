@@ -9,7 +9,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 	"unsafe"
@@ -260,78 +259,7 @@ func (w *logWindow) probeAddSite() {
 	}()
 }
 
-// probeOpenMITM 为诊断目标打开无 SNI 反代（失败时的「打开反代」）。
-//
-// 与开关反代走同一套前置检查：缺根证书先问一次并支持一键安装；目标还不在站点里
-// 就先加进去。成功后不自动重跑诊断——用户想复查可以再点「诊断」，那样更容易看懂
-// 「刚才那次结果」和「现在又测了一次」的区别。
-func (w *logWindow) probeOpenMITM() {
-	act := currentWindowActions()
-	if act.AddSite == nil || act.SetSiteMITM == nil {
-		w.toast("当前实例无法修改反代设置", styleWarn)
-		return
-	}
-	host := w.probeHost()
-	if host == "" {
-		w.toast("没有可处理的域名", styleWarn)
-		return
-	}
-	if !w.siteBusyBegin() {
-		w.toast("正在处理，请稍候…", styleMuted)
-		return
-	}
-	hwnd := w.handle()
-	w.toast("正在为 "+host+" 打开反代…", styleMuted)
-	go func() {
-		defer w.siteBusyEnd()
-		if act.CertReady != nil && !act.CertReady() {
-			if act.InstallCert == nil {
-				w.report(uiIDProbeMITM, fmt.Errorf("根证书未安装，且当前实例不支持一键安装"))
-				return
-			}
-			if !confirmInstallCert() {
-				w.toast("已取消：开启无 SNI 反代需要根证书", styleMuted)
-				return
-			}
-			w.toast("正在安装根证书（可能弹出系统确认框，请留意屏幕）…", styleMuted)
-			if err := act.InstallCert(); err != nil {
-				w.report(uiIDProbeMITM, err)
-				return
-			}
-		}
-
-		inSites := false
-		if act.Sites != nil {
-			for _, s := range act.Sites() {
-				if strings.EqualFold(s.Pattern, host) {
-					inSites = true
-					if s.MITM {
-						w.toast(host+" 的反代已经开着", styleMuted)
-						return
-					}
-					break
-				}
-			}
-		}
-		if !inSites {
-			if _, err := act.AddSite(host); err != nil {
-				w.report(uiIDProbeMITM, err)
-				return
-			}
-		}
-		if err := act.SetSiteMITM(host, true); err != nil {
-			w.report(uiIDProbeMITM, err)
-			return
-		}
-		w.toast("已为 "+host+" 打开反代；再点「诊断」可复查", styleOK)
-		w.applySites(hwnd, act, false)
-		if act.Refresh != nil {
-			act.Refresh()
-		}
-	}()
-}
-
-// paintProbePanel 画诊断面板：固定 6 行（标签 + 值）、下一步建议与底部说明。
+// paintProbePanel 画诊断面板：固定 5 行（标签 + 值）、下一步建议与底部说明。
 //
 // 行内没有任何自绘按钮（诊断按钮在工具条里，由 paintHeader 统一画），
 // 因此这里只处理文字与颜色；几何来自 uiLayout，与命中共用同一份。

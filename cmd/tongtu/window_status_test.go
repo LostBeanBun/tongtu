@@ -17,20 +17,20 @@ func TestWindowStatusKey(t *testing.T) {
 	base := windowStatus{
 		Title:  "通途 Tongtu 0.1.0",
 		State:  "运行中",
-		Items:  []windowStatusItem{{Label: "系统代理", On: true}, {Label: "Hosts", On: false}},
+		Items:  []windowStatusItem{{Label: "系统代理", On: true}},
 		Detail: []string{"服务组 steam"},
 	}
 	same := base
-	same.Items = []windowStatusItem{{Label: "系统代理", On: true}, {Label: "Hosts", On: false}}
+	same.Items = []windowStatusItem{{Label: "系统代理", On: true}}
 	if same.key() != base.key() {
 		t.Error("内容相同的两份状态指纹应当一致")
 	}
 	for name, mutate := range map[string]func(s *windowStatus){
 		"标题":   func(s *windowStatus) { s.Title = "别的标题" },
 		"状态词":  func(s *windowStatus) { s.State = "已停止" },
-		"开关":   func(s *windowStatus) { s.Items[1].On = true },
+		"开关":   func(s *windowStatus) { s.Items[0].On = false },
 		"开关名":  func(s *windowStatus) { s.Items[0].Label = "代理" },
-		"开关条目": func(s *windowStatus) { s.Items = s.Items[:1] },
+		"开关条目": func(s *windowStatus) { s.Items = nil },
 		"右侧信息": func(s *windowStatus) { s.Detail = []string{"服务组 github"} },
 	} {
 		s := base
@@ -43,7 +43,7 @@ func TestWindowStatusKey(t *testing.T) {
 }
 
 // TestStatusLevel 健康度决定状态词的颜色：期望接管却没接上必须判为降级，
-// 否则界面会一律显示「运行中」，把「hosts 没写进去」这类问题藏起来。
+// 否则界面会一律显示「运行中」，把「系统代理没接上」这类问题藏起来。
 func TestStatusLevel(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -66,8 +66,8 @@ func TestStatusLevel(t *testing.T) {
 	}
 }
 
-// TestWindowStatusOfDegraded 走真实代码路径：配置里开了 hosts 但没接管成功
-// （非管理员就是这种情况），状态条必须显示「部分生效」，而不是「运行中」。
+// TestWindowStatusOfDegraded 走真实代码路径：配置里期望接管系统代理但实际没接上，
+// 状态条必须显示「部分生效」，而不是「运行中」。
 func TestWindowStatusOfDegraded(t *testing.T) {
 	rs, err := rules.Load([]string{"steam"})
 	if err != nil {
@@ -87,18 +87,18 @@ func TestWindowStatusOfDegraded(t *testing.T) {
 		_ = a.Shutdown(ctx)
 	}()
 
-	// 期望开 hosts，实际没开（本次没有接管）→ 降级
-	cfg.SystemProxy, cfg.Hosts, cfg.MITM.Enabled = false, true, false
+	// 期望接管系统代理，实际没接管（Options.SysProxy=false）→ 降级
+	cfg.SystemProxy = true
 	st := windowStatusOf(a, cfg)
 	if st.Level != stateDegraded || st.State != "部分生效" {
-		t.Errorf("期望开 hosts 却没生效时应为「部分生效」（降级），实际 level=%d state=%q", st.Level, st.State)
+		t.Errorf("期望接管却没生效时应为「部分生效」（降级），实际 level=%d state=%q", st.Level, st.State)
 	}
-	if len(st.Items) != 3 || st.Items[1].Label != "Hosts" || st.Items[1].On {
-		t.Errorf("状态条开关项应与实际状态一致（Hosts 未生效），实际 %+v", st.Items)
+	if len(st.Items) != 1 || st.Items[0].Label != "系统代理" || st.Items[0].On {
+		t.Errorf("状态条开关项应与实际状态一致（系统代理未生效），实际 %+v", st.Items)
 	}
 
-	// 不再期望 hosts → 全部符合预期，回到「运行中」
-	cfg.Hosts = false
+	// 不再期望接管 → 全部符合预期，回到「运行中」
+	cfg.SystemProxy = false
 	st = windowStatusOf(a, cfg)
 	if st.Level != stateOK || st.State != "运行中" {
 		t.Errorf("全部符合预期时应为「运行中」，实际 level=%d state=%q", st.Level, st.State)

@@ -65,7 +65,7 @@ func TestGuardStillOurs(t *testing.T) {
 }
 
 // TestForeignGuardOwner 覆盖「遗留清理前的安全检查」：只有当令牌文件里的那个实例不是自己、
-// 并且确实还活着时，才认定系统代理 / hosts 由别人持有（此时必须跳过清理）。
+// 并且确实还活着时，才认定系统代理由别人持有（此时必须跳过清理）。
 func TestForeignGuardOwner(t *testing.T) {
 	const self = 1234
 	alive := func(pid int) bool { return pid == 9001 }

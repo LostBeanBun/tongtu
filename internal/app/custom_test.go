@@ -12,7 +12,7 @@ import (
 	"tongtu/internal/rules"
 )
 
-// newCustomTestApp 起一个不接管系统代理 / hosts / 反代的实例，配置写到临时目录。
+// newCustomTestApp 起一个不接管系统代理的实例，配置写到临时目录。
 //
 // 必须指定 ConfigPath：增删自定义站点会写回配置文件，测试绝不能碰真实的
 // %APPDATA%\tongtu\config.yaml。
@@ -24,7 +24,7 @@ func newCustomTestApp(t *testing.T) (*App, string) {
 	}
 	cfg := config.Default()
 	cfg.Listen = "127.0.0.1:0"
-	cfg.SystemProxy, cfg.Hosts, cfg.MITM.Enabled = false, false, false
+	cfg.SystemProxy = false
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := config.Save(path, cfg); err != nil {
 		t.Fatalf("保存初始配置: %v", err)
@@ -42,7 +42,7 @@ func newCustomTestApp(t *testing.T) (*App, string) {
 	return a, path
 }
 
-// TestCustomSiteLifecycle 添加 / 打开反代 / 删除：每一步都要写回配置并立即生效。
+// TestCustomSiteLifecycle 添加 / 删除：每一步都要写回配置并立即生效。
 func TestCustomSiteLifecycle(t *testing.T) {
 	a, path := newCustomTestApp(t)
 
@@ -59,7 +59,7 @@ func TestCustomSiteLifecycle(t *testing.T) {
 		t.Fatalf("应规范化为 my.site.com，实际 %q", p)
 	}
 	sites := a.CustomSites()
-	if len(sites) != 1 || sites[0].Pattern != "my.site.com" || sites[0].MITM {
+	if len(sites) != 1 || sites[0].Pattern != "my.site.com" {
 		t.Fatalf("添加后列表不对: %+v", sites)
 	}
 	// 立即生效：规则集里已经能匹配到它（不用重启）。
@@ -76,39 +76,16 @@ func TestCustomSiteLifecycle(t *testing.T) {
 		t.Error("错误的通配写法应报错")
 	}
 
-	// 打开反代：同时进反代名单与白名单。
-	if err := a.SetCustomSiteMITM("my.site.com", true); err != nil {
-		t.Fatalf("SetCustomSiteMITM: %v", err)
-	}
-	sites = a.CustomSites()
-	if len(sites) != 1 || !sites[0].MITM {
-		t.Fatalf("打开反代后列表不对: %+v", sites)
-	}
-
 	// 配置已写回：重新加载能看到同样的内容。
 	cfg, err := config.Load(path)
 	if err != nil {
 		t.Fatalf("重新加载配置: %v", err)
 	}
-	if !containsString(cfg.Custom.Domains, "my.site.com") ||
-		!containsString(cfg.Custom.MITMDomains, "my.site.com") {
+	if !containsString(cfg.Custom.Domains, "my.site.com") {
 		t.Fatalf("配置未写回: %+v", cfg.Custom)
 	}
-	if !rules.MatchPatterns("my.site.com", cfg.MITMPatterns()) {
-		t.Error("配置里的反代名单应包含该域名")
-	}
 
-	// 关掉反代只影响反代名单，白名单保留。
-	if err := a.SetCustomSiteMITM("my.site.com", false); err != nil {
-		t.Fatalf("关闭反代: %v", err)
-	}
-	cfg, _ = config.Load(path)
-	if !containsString(cfg.Custom.Domains, "my.site.com") ||
-		containsString(cfg.Custom.MITMDomains, "my.site.com") {
-		t.Fatalf("关闭反代后的配置不对: %+v", cfg.Custom)
-	}
-
-	// 删除：两个名单都要清掉。
+	// 删除：白名单与配置都要清掉。
 	if err := a.RemoveCustomSite("my.site.com"); err != nil {
 		t.Fatalf("RemoveCustomSite: %v", err)
 	}
@@ -119,8 +96,7 @@ func TestCustomSiteLifecycle(t *testing.T) {
 		t.Error("删除后不该再匹配该域名")
 	}
 	cfg, _ = config.Load(path)
-	if containsString(cfg.Custom.Domains, "my.site.com") ||
-		containsString(cfg.Custom.MITMDomains, "my.site.com") {
+	if containsString(cfg.Custom.Domains, "my.site.com") {
 		t.Fatalf("删除未写回配置: %+v", cfg.Custom)
 	}
 
@@ -130,17 +106,12 @@ func TestCustomSiteLifecycle(t *testing.T) {
 	}
 }
 
-// TestCustomSitesMergesMITMOnly 只出现在反代名单里的域名也要显示出来（否则界面里删不掉）。
-func TestCustomSitesMergesMITMOnly(t *testing.T) {
+// TestCustomSitesOfDedupes 同一个域名重复出现时只显示一次（列表不该出现重复行）。
+func TestCustomSitesOfDedupes(t *testing.T) {
 	got := customSitesOf(config.CustomConfig{
-		Domains:     []string{"a.com", "b.com"},
-		MITMDomains: []string{"b.com", "c.com"},
+		Domains: []string{"a.com", "a.com", "b.com"},
 	})
-	want := []CustomSite{
-		{Pattern: "a.com", MITM: false},
-		{Pattern: "b.com", MITM: true},
-		{Pattern: "c.com", MITM: true},
-	}
+	want := []CustomSite{{Pattern: "a.com"}, {Pattern: "b.com"}}
 	if len(got) != len(want) {
 		t.Fatalf("合并后应有 %d 项，实际 %+v", len(want), got)
 	}

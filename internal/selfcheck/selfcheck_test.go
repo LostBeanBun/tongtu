@@ -52,10 +52,10 @@ func TestRowDescribe(t *testing.T) {
 		Host: "steamcommunity.com", IP: "104.89.103.51 +1", DNSMs: 42, DNSOK: true,
 		TCP: "38ms", TCPOK: true,
 		Direct: "失败: 超时", Proxy: "HTTP 200", ProxyOK: true, ProxyTested: true,
-		MITM: "✓", Verdict: VerdictOK,
+		Verdict: VerdictOK,
 	}
 	got := r.Describe()
-	for _, want := range []string{"解析 104.89.103.51 +1（42ms）", "TCP 38ms", "直连 失败: 超时", "经代理 HTTP 200", "反代 ✓"} {
+	for _, want := range []string{"解析 104.89.103.51 +1（42ms）", "TCP 38ms", "直连 失败: 超时", "经代理 HTTP 200"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Describe() = %q，缺少 %q", got, want)
 		}
@@ -70,22 +70,6 @@ func TestRowDescribeDNSFailure(t *testing.T) {
 	}
 	if strings.Contains(got, "TCP") {
 		t.Errorf("没解析出 IP 时不该假装测过 TCP，实际 %q", got)
-	}
-	if strings.Contains(got, "反代") {
-		t.Errorf("反代状态为「未启用」时不必出现在描述里，实际 %q", got)
-	}
-}
-
-func TestMitmMark(t *testing.T) {
-	pats := []string{"*.steamcommunity.com", "github.com"}
-	if got := mitmMark(false, pats, "github.com"); got != "未启用" {
-		t.Errorf("未启用反代时应显示未启用，实际 %q", got)
-	}
-	if got := mitmMark(true, pats, "store.steamcommunity.com"); got != "✓" {
-		t.Errorf("命中通配应显示 ✓，实际 %q", got)
-	}
-	if got := mitmMark(true, pats, "store.steampowered.com"); got != "–" {
-		t.Errorf("未命中应显示 –，实际 %q", got)
 	}
 }
 

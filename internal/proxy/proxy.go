@@ -9,11 +9,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
-	"sync"
 	"sync/atomic"
 	"time"
 
-	"tongtu/internal/mitm"
 	"tongtu/internal/resolver"
 	"tongtu/internal/rules"
 )
@@ -38,50 +36,29 @@ type counters struct {
 // Proxy 是一个本地正向代理：
 //   - 白名单命中的域名：经 DoH 干净解析后直连（绕过 DNS 污染）
 //   - 其余流量：完全直通，行为与直连一致
-//   - 启用 MITM 后：SNI 被封锁的域名在本地解密、出站剥离 SNI（见 mitm.go）
 type Proxy struct {
 	// ruleSet 可运行时替换（托盘切换加速服务组），读写走原子指针。
-	ruleSet atomic.Pointer[rules.Set]
-	lookup  LookupFunc
-	log     *slog.Logger
-	dialer  *net.Dialer
-	tr      *http.Transport
-	rp      *httputil.ReverseProxy
-	c       counters
-
-	// 无 SNI 反代（可选，EnableMITM 启用；可用 DisableMITM 热停用）
-	// mitmMu 保护下列字段的替换；mitmActive 是热路径的开关标志。
-	// 注意：停用只翻标志、不清空字段，使已在途的连接仍能安全使用旧的反代组件。
-	mitmMu            sync.RWMutex
-	mitmActive        atomic.Bool
-	mitmCa            *mitm.CA
-	matchMITM         func(host string) bool
-	lookupAll         LookupAllFunc
-	lookupAllUncached LookupAllFunc
-	mtr               *http.Transport
-	mrp               *httputil.ReverseProxy
-	mitmHandler       http.Handler
-
-	goodMu sync.Mutex
-	good   map[string]goodEntry
+	ruleSet   atomic.Pointer[rules.Set]
+	lookup    LookupFunc
+	lookupAll LookupAllFunc
+	log       *slog.Logger
+	dialer    *net.Dialer
+	tr        *http.Transport
+	rp        *httputil.ReverseProxy
+	c         counters
 
 	// allowLoopback 仅供测试：允许候选 IP 为回环地址（注入本地假上游）
 	allowLoopback bool
-
-	// warmPort 仅供测试：启动预热拨号的目标端口（生产恒为 443）。
-	warmPort string
-
-	localMu sync.Mutex
-	ln443   net.Listener
-	ln80    net.Listener
-	// ln443v6 / ln80v6 是尽力而为的 `[::1]` 回环监听：IPv6 优先的客户端会先连 ::1。
-	// 绑不上时保持为 nil，hosts 里也就不会写 ::1（见 hosts.Manager.SetLocalIPv6）。
-	ln443v6 net.Listener
-	ln80v6  net.Listener
 }
 
 // LookupFunc 解析主机名到 IP 列表（生产实现为 resolver.Resolver.Lookup）。
 type LookupFunc func(ctx context.Context, host string) ([]net.IP, error)
+
+// LookupAllFunc 并发查询所有 DoH 端点并返回去重后的候选 IP（生产实现为 resolver.LookupAll）。
+type LookupAllFunc func(ctx context.Context, host string) []net.IP
+
+// SetLookupAll 注入「多端点并查」解析函数；隧道路径与预热共用。
+func (p *Proxy) SetLookupAll(fn LookupAllFunc) { p.lookupAll = fn }
 
 // New 创建代理实例。
 func New(rs *rules.Set, res *resolver.Resolver, log *slog.Logger) *Proxy {
@@ -100,7 +77,6 @@ func NewWithLookup(rs *rules.Set, lookup LookupFunc, log *slog.Logger) *Proxy {
 			Timeout:   15 * time.Second,
 			KeepAlive: 30 * time.Second,
 		},
-		good: make(map[string]goodEntry),
 	}
 	p.ruleSet.Store(rs)
 	p.tr = &http.Transport{
@@ -134,9 +110,9 @@ func NewWithLookup(rs *rules.Set, lookup LookupFunc, log *slog.Logger) *Proxy {
 
 // stripAltSvc 删除上游响应里的 Alt-Svc 广告（HTTP/3 提示）。
 //
-// 为什么要删：hosts 模式下反代域名被指向 127.0.0.1，而本地只监听 TCP；浏览器若读到
-// Alt-Svc 会去尝试 QUIC(UDP:443)，白白多一次注定失败的握手（表现为首次加载多等几秒）。
-// 经代理的 HTTPS 看不到响应头（端到端加密），那里由浏览器「走代理时不用 QUIC」兜住。
+// 为什么要删：本地代理只处理 TCP，浏览器若读到 Alt-Svc 会去尝试 QUIC(UDP:443)，
+// 白白多一次注定失败（或绕过代理）的握手。经代理的 HTTPS 看不到响应头（端到端加密），
+// 那里由浏览器「走代理时不用 QUIC」兜住。
 func stripAltSvc(resp *http.Response) error {
 	resp.Header.Del("Alt-Svc")
 	return nil
@@ -177,12 +153,6 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, _, err := net.SplitHostPort(target); err != nil {
 		target = net.JoinHostPort(target, "443")
-	}
-
-	// SNI 被封锁的域名：本地解密 + 出站剥离 SNI（见 mitm.go）
-	if p.mitmMatch(stripPort(target)) {
-		p.handleMITMConnect(w, r, target)
-		return
 	}
 
 	up, err := p.dialContext(r.Context(), "tcp", target)
@@ -332,6 +302,14 @@ func (p *Proxy) Snapshot() Snapshot {
 		BytesIn:  p.c.bytesIn.Load(),
 		BytesOut: p.c.bytesOut.Load(),
 	}
+}
+
+// ResetNetwork 丢弃与旧网络绑定的空闲连接。
+//
+// 睡眠 / 换网后这些连接已经不可用，继续复用只会让第一批请求卡在超时上；
+// 关掉它们，后续请求会重新建连（解析缓存由 app 层单独重置）。
+func (p *Proxy) ResetNetwork() {
+	p.tr.CloseIdleConnections()
 }
 
 // countingConn 在转发过程中累计字节数。

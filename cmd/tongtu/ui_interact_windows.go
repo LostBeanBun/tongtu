@@ -8,7 +8,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"sort"
 	"strconv"
@@ -603,9 +602,7 @@ func (w *logWindow) clearLog() {
 
 // uiModeNames 是开关项在反馈文案里的名字。
 var uiModeNames = map[string]string{
-	uiIDSys:   "系统代理",
-	uiIDHosts: "Hosts",
-	uiIDMITM:  "无SNI反代",
+	uiIDSys: "系统代理",
 }
 
 // invokeAction 执行一次界面动作：成功的给轻量反馈，失败的写日志 + 提示原因。
@@ -622,7 +619,7 @@ func (w *logWindow) invokeAction(hwnd windows.Handle, id string) {
 
 	act := currentWindowActions()
 	switch id {
-	case uiIDSys, uiIDHosts, uiIDMITM:
+	case uiIDSys:
 		if act.ToggleMode == nil {
 			w.toast("当前实例没有可用的开关实现", styleWarn)
 			return
@@ -696,8 +693,6 @@ func (w *logWindow) invokeAction(hwnd windows.Handle, id string) {
 		w.copyProbeResult()
 	case uiIDProbeAdd:
 		w.probeAddSite()
-	case uiIDProbeMITM:
-		w.probeOpenMITM()
 	case uiIDProbeTodo:
 		w.showTodoMenu(hwnd)
 	case uiIDConfig, uiIDProbeConfig:
@@ -713,27 +708,19 @@ func (w *logWindow) invokeAction(hwnd windows.Handle, id string) {
 			act.Quit()
 		}
 	default:
-		// 站点面板每一行的两个动作：删除 / 反代开关。
+		// 站点面板每一行的删除动作。
 		if pattern, ok := uiSiteFromID(id, uiSiteDelPrefix); ok {
 			w.removeSite(pattern)
-			return
-		}
-		if pattern, ok := uiSiteFromID(id, uiSiteMITMPrefix); ok {
-			on := true
-			if r, ok := w.regionAtID(id); ok {
-				on = !r.On // 点一下就是「切换」：当前是开就关，当前是关就开
-			}
-			w.toggleSiteMITM(pattern, on)
 			return
 		}
 	}
 }
 
-// toggleMode 切换单个加速模式。开关的当前状态取自状态条（与显示完全一致）。
+// toggleMode 切换加速开关。开关的当前状态取自状态条（与显示完全一致）。
 //
-// 切换放到后台 goroutine 上做：app 层要改系统代理 / hosts，启用无 SNI 反代还会重新预热，
-// 可能耗时几秒。如果在窗口线程里直接做，这几秒窗口既不重画也不响应鼠标（看着像卡死），
-// 所以窗口线程只负责立刻给一句「正在切换」的反馈，做完再回报结果。
+// 切换放到后台 goroutine 上做：app 层要改系统代理，可能耗时几秒。如果在窗口线程里
+// 直接做，这几秒窗口既不重画也不响应鼠标（看着像卡死），所以窗口线程只负责立刻给
+// 一句「正在切换」的反馈，做完再回报结果。
 //
 // 切换期间忽略再次点击：状态还没回读，连着点只会得到与期望相反的结果（托盘菜单是同样
 // 的行为——它也把动作放在自己的 goroutine 上串行执行）。
@@ -757,26 +744,6 @@ func (w *logWindow) toggleMode(act windowActions, id string) {
 			w.pendingMode = ""
 			w.mu.Unlock()
 		}()
-
-		// 无 SNI 反代的前置条件：根证书必须已在当前用户存储里。
-		// 在窗口里点开关的人不该被要求去开终端（0.2.0「不用命令行」）：
-		// 没装就在这里问一次、装完继续开。
-		if on && id == uiIDMITM && act.CertReady != nil && !act.CertReady() {
-			if act.InstallCert == nil {
-				w.report(id, fmt.Errorf("根证书未安装，且当前实例不支持一键安装"))
-				return
-			}
-			if !confirmInstallCert() {
-				w.toast("已取消：开启无 SNI 反代需要根证书", styleMuted)
-				return
-			}
-			w.toast("正在安装根证书（可能弹出系统确认框，请留意屏幕）…", styleMuted)
-			if err := act.InstallCert(); err != nil {
-				w.report(id, err)
-				return
-			}
-			w.toast("根证书已安装，正在开启反代…", styleOK)
-		}
 
 		err := act.ToggleMode(id, on)
 		if err != nil {
@@ -854,7 +821,7 @@ func (w *logWindow) showPauseMenu(hwnd windows.Handle, act windowActions) {
 
 // pauseFor 按选中的时长暂停全部加速。
 //
-// 和 toggleMode 一样放到后台：暂停要还原系统代理、退出 hosts 接管，可能要几秒；
+// 和 toggleMode 一样放到后台：暂停要还原系统代理，可能要几秒；
 // 在窗口线程里做会让窗口在这几秒里完全不响应。暂停期间重复点击只提示，不再派发。
 func (w *logWindow) pauseFor(act windowActions, id string) {
 	choice, ok := pauseChoiceByID(id)
@@ -893,7 +860,7 @@ func (w *logWindow) pauseFor(act windowActions, id string) {
 		if choice.D > 0 {
 			w.toast("已暂停，将在 "+humanPause(choice.D)+"后自动恢复", styleOK)
 		} else {
-			w.toast("已暂停加速：系统代理与 hosts 已还原，点「恢复」可再打开", styleOK)
+			w.toast("已暂停加速：系统代理已还原，点「恢复」可再打开", styleOK)
 		}
 		if act.Refresh != nil {
 			act.Refresh()
@@ -969,7 +936,7 @@ func windowText(h windows.Handle) string {
 // toggleSitesPanel 打开 / 关闭卡片区的自定义站点面板（第二行的「站点」按钮）。
 //
 // 打开时顺带把焦点给输入框：用户点这个按钮就是想加/删站点，让他再点一次输入框
-// 纯属多余。列表在后台读取——app 层可能正持锁重写 hosts（切开关 / 暂停之后），
+// 纯属多余。列表在后台读取——app 层可能正持锁重建规则（切开关 / 暂停之后），
 // 窗口线程不能为了几行文字去等它。
 func (w *logWindow) toggleSitesPanel(hwnd windows.Handle) {
 	act := currentWindowActions()
@@ -997,7 +964,7 @@ func (w *logWindow) toggleSitesPanel(hwnd windows.Handle) {
 
 // applySites 在后台读取最新站点列表、写回窗口状态，再请窗口线程重排（绘制 / 命中）。
 //
-// 列表只能在这里读：它要走 app 的锁，可能正在写 hosts。窗口线程拿到数据后只做
+// 列表只能在这里读：它要走 app 的锁，可能正在重建规则。窗口线程拿到数据后只做
 // 纯界面的事（onSitesChanged）。
 func (w *logWindow) applySites(hwnd windows.Handle, act windowActions, clearInput bool) {
 	var sites []uiSite
@@ -1031,7 +998,7 @@ func (w *logWindow) onSitesChanged(clearInput bool) {
 
 // siteBusyBegin 尝试进入「正在处理」状态；已经在处理时返回 false。
 //
-// 增删要改配置并重建规则（hosts 开着时还会拉一次远程列表），可能耗时几秒；
+// 增删要改配置并重建规则（可能还会拉一次远程优选 IP 列表），可能耗时几秒；
 // 期间重复点击只提示，不排队——排队的第二个操作多半是误触。
 func (w *logWindow) siteBusyBegin() bool {
 	w.mu.Lock()
@@ -1115,37 +1082,7 @@ func (w *logWindow) removeSite(pattern string) {
 	}()
 }
 
-// toggleSiteMITM 切换某个站点是否走无 SNI 反代（行内的「反代」胶囊）。
-func (w *logWindow) toggleSiteMITM(pattern string, on bool) {
-	act := currentWindowActions()
-	if act.SetSiteMITM == nil {
-		w.toast("当前实例无法修改反代设置", styleWarn)
-		return
-	}
-	if !w.siteBusyBegin() {
-		w.toast("正在处理，请稍候…", styleMuted)
-		return
-	}
-	hwnd := w.handle()
-	go func() {
-		defer w.siteBusyEnd()
-		if err := act.SetSiteMITM(pattern, on); err != nil {
-			w.report(uiIDSites, err)
-			return
-		}
-		word := "已关闭反代"
-		if on {
-			word = "已打开反代"
-		}
-		w.toast(pattern+" "+word, styleOK)
-		w.applySites(hwnd, act, false)
-		if act.Refresh != nil {
-			act.Refresh()
-		}
-	}()
-}
-
-// report 把失败写进日志（窗口里能看到完整原因），并在状态条上给一行简短提示。
+// removeSite 删除一个自定义站点（行内的「删除」按钮）。
 func (w *logWindow) report(id string, err error) {
 	slog.Warn("界面操作失败", "action", id, "err", err)
 	w.toast(err.Error(), styleWarn)

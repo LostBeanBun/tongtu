@@ -189,11 +189,11 @@ func (r *Resolver) Lookup(ctx context.Context, host string) ([]net.IP, error) {
 	return ips, nil
 }
 
-// LookupPublic 与 Lookup 相同，但只保留公网 IPv4（供 hosts 模式使用）。
+// LookupPublic 与 Lookup 相同，但只保留公网 IPv4（供预热直连与批量解析使用）。
 //
-// 为什么把 IPv6 也滤掉：写进 hosts 的地址会成为客户端的**首选**（IPv6 优先），
-// 而我们没有干净来源可以校验 AAAA（DoH 查询只取 A 记录）；写错一个不可达/被污染的
-// 地址比不写更糟。反代域名走另一条路——那里写的是本机回环 `::1`（见 hosts.SetLocalIPv6）。
+// 为什么把 IPv6 也滤掉：拿去预热 / 直连的地址会成为客户端的**首选**（IPv6 优先），
+// 而我们没有干净来源可以校验 AAAA（DoH 查询只取 A 记录）；用一个不可达/被污染的
+// 地址比不用更糟——它会把本来能通的连接也拖下水。
 func (r *Resolver) LookupPublic(ctx context.Context, host string) ([]net.IP, error) {
 	ips, err := r.Lookup(ctx, host)
 	if err != nil {

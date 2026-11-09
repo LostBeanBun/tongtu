@@ -21,8 +21,6 @@ func layoutStatus() windowStatus {
 		Level: stateOK,
 		Items: []windowStatusItem{
 			{Label: "系统代理", On: true, Action: uiIDSys},
-			{Label: "Hosts", On: false, Action: uiIDHosts},
-			{Label: "无SNI反代", On: true, Action: uiIDMITM},
 		},
 		Detail: []string{"服务组 Steam", "活跃隧道 2", "↓1.2 MB ↑340 KB"},
 	}
@@ -34,18 +32,18 @@ func TestUILayoutRightAlignsControls(t *testing.T) {
 	pad := int32(uiPadDIP)
 
 	// 开关胶囊靠右排：最右一项的右边贴在留白上
-	chips := make([]uiRegion, 0, 3)
+	chips := make([]uiRegion, 0, 1)
 	for _, r := range l.Regions {
 		if r.Kind == uiChip {
 			chips = append(chips, r)
 		}
 	}
-	if len(chips) != 3 {
-		t.Fatalf("应有三项开关胶囊，实际 %d 项：%+v", len(chips), l.Regions)
+	if len(chips) != 1 {
+		t.Fatalf("应有一项开关胶囊，实际 %d 项：%+v", len(chips), l.Regions)
 	}
 	rightmost := chips[0] // Regions 是按从右往左的顺序追加的
-	if rightmost.ID != uiIDMITM {
-		t.Errorf("最右侧应是最后一项（无SNI反代），实际 %q", rightmost.ID)
+	if rightmost.ID != uiIDSys {
+		t.Errorf("最右侧应是系统代理开关，实际 %q", rightmost.ID)
 	}
 	if rightmost.Rect.Right != w-pad {
 		t.Errorf("最右胶囊应贴右留白：right=%d 期望 %d", rightmost.Rect.Right, w-pad)
@@ -162,9 +160,10 @@ func TestUILayoutNarrowWindowDropsFilter(t *testing.T) {
 }
 
 func TestUILayoutTitleGivesWayToStateWord(t *testing.T) {
-	// 第一行挤不下时先压缩标题（状态词是健康度，比品牌名重要）
+	// 第一行挤不下时先压缩标题（状态词是健康度，比品牌名重要）。
+	// 宽度取比窗口最小宽度还窄的极端值：此时状态条只剩一个开关也要靠压缩标题腾位置。
 	st := layoutStatus()
-	l := computeUILayout(430, 300, 96, st, uiPanelState{}, fixedMeasure, fixedMeasure)
+	l := computeUILayout(260, 300, 96, st, uiPanelState{}, fixedMeasure, fixedMeasure)
 	titleW := l.Title.Right - l.Title.Left
 	fullW := fixedMeasure(st.Title)
 	if titleW >= fullW {
@@ -180,7 +179,7 @@ func TestUILayoutTitleGivesWayToStateWord(t *testing.T) {
 
 func TestUILayoutWithoutItemsUsesDefaultModes(t *testing.T) {
 	// 状态项还没填（窗口刚建好）时不能算出负数或崩溃；
-	// 而且此时仍要摆出三个默认开关胶囊——否则窗口起来的第一帧会「少一排按钮」，随后突然跳出来。
+	// 而且此时仍要摆出默认开关胶囊——否则窗口起来的第一帧会「少一排按钮」，随后突然跳出来。
 	l := computeUILayout(700, 400, 96, windowStatus{}, uiPanelState{}, fixedMeasure, fixedMeasure)
 	if l.Edit.Right <= l.Edit.Left {
 		t.Errorf("没有状态项时日志区仍应可用：%+v", l.Edit)
@@ -194,7 +193,7 @@ func TestUILayoutWithoutItemsUsesDefaultModes(t *testing.T) {
 			}
 		}
 	}
-	for _, id := range []string{uiIDSys, uiIDHosts, uiIDMITM} {
+	for _, id := range []string{uiIDSys} {
 		if !got[id] {
 			t.Errorf("默认状态项应包含 %q，实际 %v", id, got)
 		}
@@ -276,8 +275,8 @@ func TestPauseButtonLabel(t *testing.T) {
 // 底部是说明；日志区与过滤框让位（不参与绘制 / 命中）。
 func TestUILayoutSitePanel(t *testing.T) {
 	panel := uiPanelState{Open: true, Sites: []uiSite{
-		{Pattern: "huggingface.co", MITM: true},
-		{Pattern: "*.githubusercontent.com", MITM: false},
+		{Pattern: "huggingface.co"},
+		{Pattern: "*.githubusercontent.com"},
 	}}
 	l := computeUILayout(800, 500, 96, layoutStatus(), panel, fixedMeasure, fixedMeasure)
 	pad := int32(uiPadDIP)
@@ -311,7 +310,7 @@ func TestUILayoutSitePanel(t *testing.T) {
 		t.Errorf("「添加」应贴右侧内边距：right=%d 期望 %d", add.Rect.Right, l.Card.Right-1-inset)
 	}
 
-	// 两行站点：每行有「删除」与「反代」，域名文字在左，反代胶囊的开关态来自列表数据
+	// 两行站点：每行有「删除」，域名文字在左
 	if len(l.SiteRows) != 2 {
 		t.Fatalf("应有两行站点，实际 %+v", l.SiteRows)
 	}
@@ -330,22 +329,9 @@ func TestUILayoutSitePanel(t *testing.T) {
 	if !ok {
 		t.Fatalf("第一行应有「删除」：%+v", l.Regions)
 	}
-	mitm0, ok := regionByID(l, uiSiteMITMID(panel.Sites[0].Pattern))
-	if !ok {
-		t.Fatalf("第一行应有「反代」：%+v", l.Regions)
-	}
-	if !mitm0.On {
-		t.Error("第一行反代开着，胶囊应显示为开")
-	}
-	if mitm1, ok := regionByID(l, uiSiteMITMID(panel.Sites[1].Pattern)); !ok || mitm1.On {
-		t.Errorf("第二行反代关着，胶囊应显示为关：%+v ok=%v", mitm1, ok)
-	}
-	// 行内控件：反代在删除左边、不重叠，且都不压到域名文字
-	if mitm0.Rect.Right > del0.Rect.Left {
-		t.Errorf("反代胶囊与删除按钮重叠：%+v vs %+v", mitm0.Rect, del0.Rect)
-	}
-	if l.SiteRows[0].TextRight > mitm0.Rect.Left {
-		t.Errorf("域名文字压到了反代胶囊：%+v vs %+v", l.SiteRows[0], mitm0.Rect)
+	// 行内控件：域名文字不能压到删除按钮上
+	if l.SiteRows[0].TextRight > del0.Rect.Left {
+		t.Errorf("域名文字压到了删除按钮：%+v vs %+v", l.SiteRows[0], del0.Rect)
 	}
 	if del0.Rect.Right != l.Card.Right-1-inset {
 		t.Errorf("「删除」应贴右侧内边距：right=%d 期望 %d", del0.Rect.Right, l.Card.Right-1-inset)
@@ -363,7 +349,7 @@ func TestUILayoutSitePanel(t *testing.T) {
 		t.Errorf("底部说明应贴下内边距：bottom=%d 期望 %d", l.SiteHint.Bottom, 500-pad-inset)
 	}
 
-	// 命中判定与几何同源：每行的两个动作都能点中
+	// 命中判定与几何同源：每个动作都能点中
 	for _, r := range l.Regions {
 		if r.Kind != uiGhost && r.Kind != uiChip {
 			continue
@@ -427,7 +413,7 @@ func TestUILayoutSitePanelDropsOverflowRows(t *testing.T) {
 	}
 }
 
-// TestUILayoutProbePanel 诊断面板：输入框 + 诊断按钮在工具条位置，下面是固定 6 行，
+// TestUILayoutProbePanel 诊断面板：输入框 + 诊断按钮在工具条位置，下面是固定 5 行，
 // 再下面是建议与底部说明；日志区与过滤框让位。
 func TestUILayoutProbePanel(t *testing.T) {
 	panel := uiPanelState{Open: true, Kind: uiPanelProbe, ProbeHost: "github.com"}
@@ -459,7 +445,7 @@ func TestUILayoutProbePanel(t *testing.T) {
 		t.Errorf("「诊断」应贴右侧内边距：right=%d 期望 %d", run.Rect.Right, l.Card.Right-1-inset)
 	}
 
-	// 固定 6 行：诊断前、诊断中、诊断后位置都不变，面板不会跳动。
+	// 固定 5 行：诊断前、诊断中、诊断后位置都不变，面板不会跳动。
 	if len(l.ProbeRows) != len(uiProbeLabels) {
 		t.Fatalf("应固定显示 %d 行，实际 %d", len(uiProbeLabels), len(l.ProbeRows))
 	}
@@ -523,7 +509,7 @@ func TestUILayoutProbePanelNarrow(t *testing.T) {
 }
 
 // TestUILayoutProbeActions 诊断面板底部的动作行：有结果时按钮排一行，
-// 6 行数据不被挤掉，动作行落在建议与底部说明之间；窄窗口可以先放弃按钮，
+// 5 行数据不被挤掉，动作行落在建议与底部说明之间；窄窗口可以先放弃按钮，
 // 但绝不能压到建议或说明。
 func TestUILayoutProbeActions(t *testing.T) {
 	row := selfcheck.Row{Host: "blocked.example", Verdict: selfcheck.VerdictFail}
@@ -543,7 +529,7 @@ func TestUILayoutProbeActions(t *testing.T) {
 	if l.ProbeHint.Top < l.ProbeActionRow.Bottom {
 		t.Errorf("底部说明压到了动作行：hint=%+v actions=%+v", l.ProbeHint, l.ProbeActionRow)
 	}
-	for _, id := range []string{uiIDProbeCopy, uiIDProbeAdd, uiIDProbeMITM, uiIDProbeConfig, uiIDProbeTodo} {
+	for _, id := range []string{uiIDProbeCopy, uiIDProbeAdd, uiIDProbeConfig, uiIDProbeTodo} {
 		r, ok := regionByID(l, id)
 		if !ok {
 			t.Errorf("动作行里缺少 %q：%+v", id, l.Regions)

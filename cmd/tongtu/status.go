@@ -64,15 +64,7 @@ func printStatus(st *app.Status) {
 	if st.ProxyNote != "" {
 		sysTag += "（" + st.ProxyNote + "）"
 	}
-	fmt.Printf("系统代理: %s    Hosts: %s\n", sysTag, onOff(st.Hosts))
-	mitmTag := onOff(st.MITM)
-	switch {
-	case st.MITM && !st.MITMLocal:
-		mitmTag += "（仅系统代理路径）"
-	case !st.MITM && st.MITMNote != "":
-		mitmTag += "（" + st.MITMNote + "）"
-	}
-	fmt.Printf("无SNI反代: %s\n", mitmTag)
+	fmt.Printf("系统代理: %s\n", sysTag)
 	fmt.Printf("服务组:   %v\n", st.Services)
 	fmt.Printf("流量:     请求 %d | 隧道 %d (活跃 %d) | 上传 %s 下载 %s\n",
 		st.Proxy.Requests, st.Proxy.Tunnels, st.Proxy.Active,

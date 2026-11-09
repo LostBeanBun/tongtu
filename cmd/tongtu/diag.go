@@ -15,7 +15,6 @@ import (
 	"tongtu/internal/app"
 	"tongtu/internal/autostart"
 	"tongtu/internal/config"
-	"tongtu/internal/mitm"
 )
 
 // diagLogLines 是诊断信息里附带的近期日志行数：足够看到一次操作的来龙去脉，
@@ -36,8 +35,7 @@ func buildDiagnostics(a *app.App, cfg *config.Config) string {
 	} else {
 		b.WriteString("日志: 未启用文件日志（log.file: off）\n")
 	}
-	fmt.Fprintf(&b, "监听: %s（系统代理=%v · hosts=%v · 反代=%v）\n",
-		st.Listen, st.SystemProxy, st.Hosts, st.MITM)
+	fmt.Fprintf(&b, "监听: %s（系统代理=%v）\n", st.Listen, st.SystemProxy)
 	fmt.Fprintf(&b, "健康度: %s%s · 自愈 %d 次 · 网络恢复 %d 次\n",
 		healthWord(st.Health), healthReasonWord(st.Health), st.Health.HealCount, st.Health.RecoverCount)
 	if st.Running {
@@ -47,22 +45,9 @@ func buildDiagnostics(a *app.App, cfg *config.Config) string {
 		// 「我的站点没加速」第一件事就是确认规则到底读进去了没有
 		fmt.Fprintf(&b, "自定义站点: %s\n", strings.Join(custom, "、"))
 	}
-	if mitm := cfg.Custom.MITMDomains; len(mitm) > 0 {
-		fmt.Fprintf(&b, "自定义反代: %s\n", strings.Join(mitm, "、"))
-	}
 	if st.ProxyNote != "" {
 		fmt.Fprintf(&b, "系统代理说明: %s\n", st.ProxyNote)
 	}
-	if st.MITMNote != "" {
-		fmt.Fprintf(&b, "反代说明: %s\n", st.MITMNote)
-	}
-	certWord := "未安装"
-	if ok, err := mitm.CertInstalled(config.Dir()); err != nil {
-		certWord = "状态未知（" + err.Error() + "）"
-	} else if ok {
-		certWord = "已安装"
-	}
-	fmt.Fprintf(&b, "根证书: %s\n", certWord)
 	fmt.Fprintf(&b, "服务组: %s\n", strings.Join(st.Services, "、"))
 	fmt.Fprintf(&b, "流量: 请求 %d · 隧道 %d · 活跃 %d · ↓%s ↑%s\n",
 		st.Proxy.Requests, st.Proxy.Tunnels, st.Proxy.Active,

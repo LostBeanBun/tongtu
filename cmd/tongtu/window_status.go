@@ -11,7 +11,7 @@ type windowStateLevel int
 
 const (
 	stateOK       windowStateLevel = iota // 期望接管的都已生效
-	stateDegraded                         // 有开关没生效（例如非管理员下 hosts 接管失败）
+	stateDegraded                         // 有开关没生效（例如系统代理接管失败）
 	stateOff                              // 服务未在运行
 )
 
@@ -23,7 +23,7 @@ type modeWish struct {
 
 // statusLevel 由「是否在跑」与各开关的期望/实际决定健康度。
 //
-// 这样界面能把「部分生效」自己说出来：例如系统代理成功了、hosts 因为不是管理员而失败，
+// 这样界面能把「部分生效」自己说出来：例如系统代理接管失败，
 // 状态词就用降级色，而不是一律显示「运行中」把问题藏起来。
 func statusLevel(running bool, modes ...modeWish) windowStateLevel {
 	if !running {
@@ -112,7 +112,7 @@ type windowStatusItem struct {
 	Tip    string // 悬浮说明（与托盘菜单文案保持一致）
 }
 
-// modeItems 返回状态条上的三个加速模式开关项，状态还没准备好时用默认项：
+// modeItems 返回状态条上的加速开关项，状态还没准备好时用默认项：
 // 窗口一创建就有可点的开关，几何计算也不依赖状态刷新时机。
 func modeItems(items []windowStatusItem) []windowStatusItem {
 	if len(items) > 0 {
@@ -120,8 +120,6 @@ func modeItems(items []windowStatusItem) []windowStatusItem {
 	}
 	return []windowStatusItem{
 		{Label: "系统代理", Action: uiIDSys},
-		{Label: "Hosts", Action: uiIDHosts},
-		{Label: "无SNI反代", Action: uiIDMITM},
 	}
 }
 

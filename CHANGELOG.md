@@ -33,10 +33,6 @@
 
 ### 新增
 
-- **MITM 信任链端到端测试**（`internal/proxy/mitm_test.go`）：客户端把本地 CA 放进信任根
-  （不跳过校验）→ CONNECT → 校验本地签发的叶证书 → 发出 HTTPS 请求，断言
-  `VerifiedChains` 非空、响应正确、出站握手不带 SNI；另加反向用例证明没装 CA 时必须握手失败。
-  之前所有 MITM 用例都用了 `InsecureSkipVerify`，无法证明「证书链本身可信」。
 - **`tools/verify-release.ps1`**：发布后核验。从 GitHub API 取 Release，下载线上附件，
   逐项比对大小、`SHA256SUMS.txt`、资产 digest 与 exe 自报版本；任意一项不一致以非零退出。
   只信线上字节，不依赖本地构建产物。Release 流水线在发布完成后会自动跑一次，
@@ -62,7 +58,7 @@
   `Start-Process` 没有重定向，启动失败的原因打在隐藏控制台里直接丢失，只剩一句
   「主进程启动后就退出了」。
 - **浸泡收尾优先走控制端口 `/shutdown`**：不再为了停止实例而再启动一次 exe——
-  副本被杀软隔离时 `Start-Process` 会直接抛错，收尾从此断掉。系统代理、hosts、RunOnce
+  副本被杀软隔离时 `Start-Process` 会直接抛错，收尾从此断掉。系统代理与 RunOnce
   各自独立 `try`，任一步失败都不影响后面的还原。
 - **`start-soak.ps1` 从 `VERSION` 读版本**，不再执行 `tongtu.exe version` 取版本号：
   少一次进程启动，少一次被杀软行为启发式盯上的机会。
@@ -74,11 +70,10 @@
 
 - `verify-release.ps1` 实跑 v0.11.0：Release 存在、latest 指向本版本、附件大小、
   资产 digest、`SHA256SUMS.txt`、exe 自报版本共 7 项全部一致。
-- `tools/crash-test.ps1` 通过：`taskkill /F` 强杀主进程后，系统代理与 hosts 由监护进程还原，
+- `tools/crash-test.ps1` 通过：`taskkill /F` 强杀主进程后，系统代理由监护进程还原，
   无 `guard.json` 与进程残留。
 - `tools/recover-test.ps1` 通过：模拟断电后 `__recover` 还原系统代理、清除 RunOnce、
   回收 `guard.json`；重复执行幂等。
-- `go test ./internal/proxy -run TestMITM` 全部通过（含新增的正 / 反向信任链用例）。
 - CI 实跑全绿：`41755180661`（`689a9bb`）、`41755423346`（`46f0f33`）、
   `41755607636`（`a0219fe`）——格式与静态检查、Linux 测试、Windows 完整测试均通过。
 - 真机界面冒烟（2026-11-04）12 项全部通过，见 `[0.11.0]` 段的说明。
@@ -97,6 +92,57 @@
   会被判成 `Behavior:Win32/Impact.A!ml`（ID `2147776683`，严重），未签名的 exe 在接管瞬间可能被隔离。
   本机验收已通过 Defender 排除项绕开；面向用户的发布仍需提交误报并向用户说明处理方式，
   详细步骤见 README「故障排查」。
+
+## [0.12.0] - 2026-11-08
+
+> 主题：**做减法——只留一种开启方式**。删掉一切需要管理员、需要装证书、需要用户改配置的加速路径，
+> 只保留「系统代理接管」：开启即用、关闭即走，全程不需要任何权限、不改写任何系统文件。
+
+### 移除
+
+- **Hosts 模式整体下线**：`internal/hosts`（托管块写入与还原）、`hosts` / `hosts_refresh_minutes`
+  配置键、窗口与托盘的 `Hosts` 开关、启动标志 `--no-hosts`、启动摘要与状态里的 hosts 行、
+  以及「hosts 残留需以管理员身份运行一次」这类提示。接管系统代理不再需要写系统文件。
+- **无 SNI 反代（本地 MITM）整体下线**：`internal/mitm`（本地 CA）、`internal/proxy/mitm.go`
+  （解密与出站剥离 SNI）、`mitm` 配置节（`enabled` / `auto_cert` / `domains`）、`custom.mitm_domains`、
+  窗口站点行的 `反代` 胶囊、诊断面板的「无SNI反代」第 6 行与 `打开反代` 动作、`--no-mitm` 标志。
+  由此也不再生成 / 安装任何证书。
+- **`cert` 子命令**（`install` / `status` / `uninstall`）与卸载脚本的 `-KeepCert`：
+  没有 MITM 就没有 CA，`%APPDATA%\tongtu` 里不再出现 `ca.crt` / `ca.key`。
+- **提权自启**：`tongtu autostart on --elevated` 与 `internal/autostart.EnableTask` 删除。
+  自启只有 HKCU Run 键一种（当前用户、无需管理员）；`DisableTask` / `TaskCommand` 保留，
+  用于识别并清理旧版残留的计划任务——`autostart status` 会提示「旧版计划任务」并建议 `off` → `on` 迁移一次。
+- **管理员重启入口**：托盘「以管理员身份重启」删除；通途全程不再需要管理员。
+- **`--no-hosts` / `--no-mitm` 之外的提权路径**：`tools/add-defender-exclusion.ps1` 仍保留
+  （仅本机开发验收用），但产品本身不再有任何需要提权的行为。
+
+### 变更
+
+- **配置版本升到 `5`**（`config.CurrentVersion = 5`）：v5 没有额外的迁移逻辑，
+  `hosts` / `mitm` / `mitm_domains` 等旧键在下次保存时自然丢弃；升级前照旧备份为 `config.yaml.vN.bak`。
+- **控制 API**：`API.SetMode(sys bool)`，`/mode` 只解析 `sysproxy`；`/status` 不再返回
+  `hosts` / `mitm` 字段。
+- **窗口**：状态条第一行只剩一个 `系统代理` 胶囊（`assertHeaderPixels` 拆成开 / 关两次绘制断言）；
+  站点面板每行只剩「域名 + 删除」（`CustomSite` / `uiSite` 只有 `Pattern`）；
+  诊断面板固定 5 行（结论 / 解析 / TCP:443 / 直连 HTTPS / 经代理），动作只剩
+  `复制` / `加入站点` / `打开配置` /（有待办时）`查看待办`；
+  `待办` 只剩「开启开机自启」与「重新接管系统代理」两条。
+- **托盘**：右键菜单里的开关项只剩 `系统代理`，外加 `加速 Steam` / `加速 GitHub` /
+  `开机自启` 三个与权限无关的项。
+- **文案与注释**：`root.go` 的 Long 描述、启动摘要、状态条悬浮提示、`自检` / `诊断` / `暂停`
+  的说明、README / USAGE 全部按「只有系统代理」重写；「仅供个人学习使用」声明与
+  `THIRD-PARTY.md` 原样保留。
+- **验收脚本**：`crash-test.ps1` / `recover-test.ps1` / `soak-test.ps1` / `start-soak.ps1` /
+  `ui-smoke.ps1` / `uninstall.ps1` 去掉 hosts 快照与断言、证书步骤、`-NoHosts` / `-NoMITM` /
+  `-KeepCert` 参数；断言项从 4~7 项收成 3~5 项（系统代理、RunOnce、guard.json、进程残留）。
+
+### 验证
+
+- `go build ./...`、`go vet ./...`、`go test ./...` 全部通过（无 FAIL）。
+- `.\build.ps1` 构建通过，`dist\tongtu.exe version` 输出 `tongtu 0.12.0`。
+- `tools/crash-test.ps1`：强杀主进程后系统代理由监护进程还原，无 `guard.json` 与进程残留。
+- `tools/recover-test.ps1`：模拟断电后 `__recover` 还原系统代理、清除 RunOnce、回收 `guard.json`；重复执行幂等。
+- `tools/ui-smoke.ps1`：暂停 / 恢复、右键复制代理地址、热加载、诊断面板、× 只隐藏全部符合预期。
 
 ## [0.11.0] - 2026-11-02
 

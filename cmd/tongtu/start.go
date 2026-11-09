@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -17,8 +15,6 @@ import (
 	"tongtu/internal/app"
 	"tongtu/internal/config"
 	"tongtu/internal/control"
-	"tongtu/internal/hosts"
-	"tongtu/internal/mitm"
 	"tongtu/internal/rules"
 	"tongtu/internal/selfcheck"
 	"tongtu/internal/tray"
@@ -27,8 +23,6 @@ import (
 var (
 	flagNoTray     bool
 	flagNoSysProxy bool
-	flagNoHosts    bool
-	flagNoMITM     bool
 	flagHidden     bool
 )
 
@@ -73,8 +67,8 @@ var startCmd = &cobra.Command{
 		foreignPID, foreignLive := foreignLiveSession()
 		claimGuard()
 		// 清理上次崩溃/强杀遗留的系统状态。
-		// 但如果还有别的实例活着（例如用另一份配置、换了控制端口的第二个实例），系统代理与
-		// hosts 归它管：这里必须收手，否则会把它的接管清掉。
+		// 但如果还有别的实例活着（例如用另一份配置、换了控制端口的第二个实例），系统代理
+		// 归它管：这里必须收手，否则会把它的接管清掉。
 		if foreignLive {
 			log.Warn("检测到另一个通途实例仍在运行，已跳过遗留状态清理", "pid", foreignPID)
 		} else {
@@ -82,36 +76,21 @@ var startCmd = &cobra.Command{
 		}
 
 		wantSys := cfg.SystemProxy && !flagNoSysProxy
-		// 默认只接管系统代理；Hosts 与反代默认关闭，由用户在托盘 / 窗口里显式打开
-		// （会写回配置，下次启动沿用）。--no-hosts / --no-mitm 只做本次的临时减法。
-		wantHosts := cfg.Hosts && !flagNoHosts
+		// 只有一种加速方式：接管系统代理（用户可以在托盘 / 窗口里关掉，会写回配置）。
 		// 崩溃防护第二步：**在真正接管之前**就把监护进程拉起来。
-		// 接管发生在 a.Start() 里（写状态文件 + 改注册表 / hosts），如果等启动流程走完
+		// 接管发生在 a.Start() 里（写状态文件 + 改注册表），如果等启动流程走完
 		// 再拉监护，中间这段时间崩溃就没人还原了。此刻可能还什么都没接管：监护进程醒来
 		// 走的 RecoverStale 是幂等的，没有待还原状态时它什么都不会做。
-		if wantSys || wantHosts {
+		if wantSys {
 			// 断电自愈项也要在接管之前登记：万一刚写进注册表就掉电，__recover 是幂等的。
 			armRunOnce(log)
 			startGuard(log)
 		}
 
-		var mitmCA *mitm.CA
-		mitmNote := ""
-		switch {
-		case flagNoMITM:
-			if cfg.MITM.Enabled {
-				mitmNote = "本次按 --no-mitm 跳过"
-			}
-		case cfg.MITM.Enabled:
-			mitmCA, mitmNote = ensureMITMCert(cfg, log, !flagHidden)
-		}
 		a := app.New(app.Options{
 			Config:     cfg,
 			Rules:      rs,
 			SysProxy:   wantSys,
-			HostsMode:  wantHosts,
-			MITMCA:     mitmCA,
-			MITMNote:   mitmNote,
 			Warmup:     true,
 			ConfigPath: flagConfig,
 			Log:        log,
@@ -122,8 +101,6 @@ var startCmd = &cobra.Command{
 
 		quit := make(chan struct{}, 1)
 		shutdownDone := make(chan struct{})
-		// restartElevated 由托盘菜单写入（见下方 tray.Run 的回调），在主流程退出后读取。
-		restartElevated := false
 		signalQuit := func() {
 			select {
 			case quit <- struct{}{}:
@@ -135,20 +112,8 @@ var startCmd = &cobra.Command{
 		// 因此这里主要在「没有自绘窗口可依赖」时兜底。
 		installConsoleCloseHandler(signalQuit)
 
-		// restartElevatedAsk 是「以管理员身份重启」的统一入口（窗口的待办按钮用它）。
-		// 与托盘菜单一致：先确认（说明会短暂断网），再记下意图并请求退出；
-		// 真正拉起提权实例在下面主流程退出后（见 tray.RelaunchElevated）。
-		restartElevatedAsk := func() bool {
-			if !tray.ConfirmRestartElevated() {
-				return false
-			}
-			restartElevated = true
-			signalQuit()
-			return true
-		}
-
 		// 窗口收到注销/关机通知（WM_QUERYENDSESSION）时：先发退出信号，再等主流程
-		// 把系统代理与 hosts 还原完（最多等 4 秒），然后才放行会话结束。
+		// 把系统代理还原完（最多等 4 秒），然后才放行会话结束。
 		setSessionEndHandler(func() {
 			signalQuit()
 			select {
@@ -157,7 +122,7 @@ var startCmd = &cobra.Command{
 			}
 		})
 
-		// 睡眠/休眠恢复：窗口消息只负责投递，真正的清缓存 / 重写 hosts / 预热
+		// 睡眠/休眠恢复：窗口消息只负责投递，真正的清缓存 / 预热
 		// 在后台做（RecoverNetwork 自带串行化与防抖）。换网由 app 里的网络指纹轮询兜底。
 		setPowerResumeHandler(func(reason string) {
 			go func() {
@@ -188,42 +153,19 @@ var startCmd = &cobra.Command{
 			startGuard(log)
 		}
 
-		// 改完 config.yaml 保存即生效：只热更新服务组 / 自定义站点 / 反代域名。
+		// 改完 config.yaml 保存即生效：只热更新服务组 / 自定义站点。
 		// 放在这里而不是界面就绪之后：--no-tray 或窗口创建失败时同样需要它。
 		watchCtx, stopWatch := context.WithCancel(context.Background())
 		defer stopWatch()
 		go watchConfigFile(watchCtx, a, configPath(), log)
 
 		st := a.Status()
-		// 上一轮（提权运行时）留下的 hosts 托管块，如果这一轮没能清掉、也没有接管 hosts，
-		// 那些域名会指向一个没人监听的本地端口——必须让用户看见，而不是只躺在日志里。
-		leftoverHosts := !st.Hosts && hosts.Managed(hosts.DefaultPath())
-		if leftoverHosts {
-			log.Warn("检测到上次遗留的 hosts 托管块，需要管理员权限才能清理；相关域名当前不可用",
-				"建议", "以管理员身份运行一次 tongtu（或 tongtu stop）让它清理")
-		}
 		// 启动摘要：控制台印纯文本（renderSummaryText），窗口里印同一份内容但带颜色，
 		// 因此这里只描述「事实」，两种呈现都从 rows 生成，不会出现两处说法不一致。
 		title := "通途已启动"
-		mitm := modeRow("无SNI反代", cfg.MITM.Enabled, st.MITM, "已启用", "未启用", "未生效（详见日志）")
-		switch {
-		case !st.MITM && mitmNote != "":
-			// 未启用就把「为什么」直接写进摘要，别让用户去翻日志猜
-			mitm.Mark = markWarn
-			mitm.Value = mitmNote
-		case st.MITM && wantHosts && !st.MITMLocal:
-			mitm.Mark = markWarn // 本地 :443 没起来时反代只对系统代理路径有效
-			mitm.Value = "仅系统代理路径可用（本地 :443 未就绪）"
-		}
 		rows := []summaryRow{
 			{Mark: markInfo, Label: "代理监听", Value: st.Listen},
 			modeRow("系统代理", wantSys, st.SystemProxy, "已接管", "未启用", "未接管（接管失败，详见日志）"),
-			modeRow("Hosts", wantHosts, st.Hosts, "已生效", "未启用", "未生效（需要以管理员身份运行）"),
-			mitm,
-		}
-		if leftoverHosts {
-			rows = append(rows, summaryRow{Mark: markWarn, Label: "Hosts 残留",
-				Value: "上次写入的托管块没清掉，需以管理员身份运行一次（相关域名当前不可用）"})
 		}
 		if row, ok := guardRow(guardBreakawayFailed()); ok {
 			rows = append(rows, row)
@@ -241,7 +183,7 @@ var startCmd = &cobra.Command{
 		// 窗口顶部状态条：跟随运行状态刷新（还没显示窗口时也照常更新缓存）
 		if hasLogWindow {
 			setWindowStatus(windowStatusOf(a, cfg))
-			wireWindowActions(a, cfg, signalQuit, restartElevatedAsk)
+			wireWindowActions(a, cfg, signalQuit)
 			// 状态刷新与待办清单都用 watchStop（退出时关闭）而不是 quit：
 			// quit 是容量 1 的缓冲通道，只够一个接收者拿到信号——多一个 goroutine 抢，
 			// 主流程就可能永远等不到退出信号（托盘点了「退出」却还在跑）。
@@ -256,17 +198,12 @@ var startCmd = &cobra.Command{
 				toggleWindow = toggleLogWindow
 			}
 			ready := make(chan struct{}, 1)
-			// restartElevated 由托盘菜单写入、在主流程退出后读取：
-			// 中间隔着 quit 通道的收发，天然有 happens-before，不需要额外加锁。
 			go tray.Run(a, signalQuit, func() {
 				select {
 				case ready <- struct{}{}:
 				default:
 				}
 			}, toggleWindow, func() {
-				restartElevated = true
-				signalQuit()
-			}, func() {
 				checkUpdateDialog(log)
 			})
 			fmt.Println("  托盘图标已就绪（右键可退出并还原系统设置）")
@@ -314,20 +251,6 @@ var startCmd = &cobra.Command{
 		}
 		// 通知「注销/关机」路径：还原已经完成，可以放行会话结束了。
 		close(shutdownDone)
-		// 「以管理员身份重启」放在最后一步：此时系统状态已还原、控制端口也已释放，
-		// 提权后的新实例才不会因为「tongtu 已在运行」而立刻退出。
-		if restartElevated {
-			switch err := tray.RelaunchElevated(); {
-			case err == nil:
-				log.Info("已请求以管理员身份重启通途")
-			case errors.Is(err, tray.ErrElevationCancelled):
-				log.Info("已取消以管理员身份重启")
-			default:
-				log.Error("以管理员身份重启失败", "err", err)
-				messageBox("通途 Tongtu — 提权重启失败",
-					err.Error()+"\n\n请手动用「以管理员身份运行」重新打开通途。", mbOK|mbIconError)
-			}
-		}
 		if len(errs) > 0 {
 			return errs[0]
 		}
@@ -343,7 +266,7 @@ var startCmd = &cobra.Command{
 // 这里主要处理「从终端启动」的情形：终端里照常看到启动信息，之后进程脱离出去独自运行。
 //
 // show 为 false（--hidden，开机自启）时仍然会创建一个隐藏窗口：注销 / 关机时它负责
-// 收到 WM_QUERYENDSESSION，让通途有机会把系统代理与 hosts 还原干净。
+// 收到 WM_QUERYENDSESSION，让通途有机会把系统代理还原干净。
 func bringUpUI(ready <-chan struct{}, log *slog.Logger, show bool) {
 	select {
 	case <-ready:
@@ -377,71 +300,6 @@ func bringUpUI(ready <-chan struct{}, log *slog.Logger, show bool) {
 	log.Debug("界面窗口已就绪", "可见", show)
 }
 
-// ensureMITMCert 确保本地根证书可用：加载/生成 CA，未安装时（交互启动下）提示安装。
-// interactive 为 false（如开机自启的 --hidden 模式）时不提示，仅记录日志。
-// 返回的 note 在「本次不启用反代」时说明原因（用于启动摘要/状态显示），成功时为空串。
-func ensureMITMCert(cfg *config.Config, log *slog.Logger, interactive bool) (*mitm.CA, string) {
-	ca, err := mitm.LoadOrCreate(config.Dir())
-	if err != nil {
-		log.Error("本地 CA 不可用，本次不启用无 SNI 反代", "err", err)
-		return nil, "根证书加载失败，详见日志"
-	}
-	installed, _ := mitm.Installed(ca)
-	if !installed && cfg.MITM.AutoCert && interactive {
-		certPath, _ := mitm.CertPaths(config.Dir())
-		if askInstallCert(certPath) {
-			if err := mitm.Install(ca); err != nil {
-				log.Error("安装根证书失败，本次不启用无 SNI 反代", "err", err)
-				return nil, "根证书安装失败，详见日志"
-			}
-			installed = true
-			log.Info("已安装本地根证书")
-		}
-	}
-	if !installed {
-		if !interactive {
-			// 开机自启等非交互方式下无人可问，这里必须把「怎么办」说清楚
-			log.Warn("未安装本地根证书，本次不启用无 SNI 反代（非交互启动不会自动安装）",
-				"修复", "执行 tongtu cert install 后重启通途")
-		} else {
-			log.Warn("未安装本地根证书，本次不启用无 SNI 反代（steamcommunity / raw 仍不可用；执行 tongtu cert install 可手动安装）")
-		}
-		return nil, "缺根证书，执行 tongtu cert install 后重启"
-	}
-	return ca, ""
-}
-
-// askInstallCert 询问是否安装本地根证书。
-//
-// 有控制台就在终端里问（说明文字可以完整看到）；GUI 模式（双击启动）下没有终端，
-// 改用系统对话框，避免「配置里开了无 SNI 反代却因为没人回答而静默不生效」。
-func askInstallCert(certPath string) bool {
-	desc := mitm.InstallPrompt(certPath)
-	if !consoleAvailable() {
-		return messageBox("通途 Tongtu — 安装根证书", desc+"\n\n是否现在安装？",
-			mbYesNo|mbIconQuestion) == messageBoxYes
-	}
-	fmt.Println(desc)
-	fmt.Print("是否安装? [y/N]: ")
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-	switch strings.ToLower(strings.TrimSpace(line)) {
-	case "y", "yes":
-		return true
-	}
-	return false
-}
-
-// confirmInstallCert 在窗口里询问是否安装本地根证书。
-//
-// 窗口路径总是 GUI（没有终端可问），因此直接用系统对话框。文案与启动时的询问、
-// 托盘的询问共用 mitm.InstallPrompt，三处说的是同一件事。
-func confirmInstallCert() bool {
-	certPath, _ := mitm.CertPaths(config.Dir())
-	return messageBox("通途 Tongtu — 安装根证书",
-		mitm.InstallPrompt(certPath)+"\n\n是否现在安装？",
-		mbYesNo|mbIconQuestion) == messageBoxYes
-}
-
 // openLogInExplorer 在资源管理器里定位日志文件；文件还没生成时退回到打开数据目录。
 //
 // 两种情况都要给出「东西在哪」这个答案：刚启动就点「打开日志文件」时文件可能还没写，
@@ -467,14 +325,12 @@ func onOff(b bool) string {
 // windowStatusOf 生成窗口顶部状态条的内容：一眼看清开关状态与流量。
 //
 // cfg 与 App 共享同一个配置对象（托盘切换会实时改它），因此「期望开什么」按当前配置判断：
-// 期望接管却没接上（例如非管理员下 hosts 写不进去）时状态词变成「部分生效」并用橙色，
-// 让界面自己把降级说出来，而不是只写在日志里。
+// 期望接管却没接上时状态词变成「部分生效」并用橙色，让界面自己把降级说出来，
+// 而不是只写在日志里。
 func windowStatusOf(a *app.App, cfg *config.Config) windowStatus {
 	st := a.Status()
 	level := statusLevel(st.Running,
-		modeWish{cfg.SystemProxy, st.SystemProxy},
-		modeWish{cfg.Hosts, st.Hosts},
-		modeWish{cfg.MITM.Enabled, st.MITM})
+		modeWish{cfg.SystemProxy, st.SystemProxy})
 	state := "运行中"
 	switch {
 	case st.Paused:
@@ -485,7 +341,7 @@ func windowStatusOf(a *app.App, cfg *config.Config) windowStatus {
 	case level == stateOff:
 		state = "已停止"
 	}
-	// 健康检查发现的降级（例如所有 DoH 端点失败）不一定体现在三个开关上，
+	// 健康检查发现的降级（例如所有 DoH 端点失败）不一定体现在开关上，
 	// 状态词也要跟着变，不能继续显示「运行中」把问题藏起来。
 	if level == stateOK && st.Health.State == app.HealthDegraded {
 		level = stateDegraded
@@ -521,12 +377,10 @@ func windowStatusOf(a *app.App, cfg *config.Config) windowStatus {
 		Level:  level,
 		Paused: st.Paused,
 		Items: []windowStatusItem{
-			{Label: "系统代理", On: st.SystemProxy, Action: uiIDSys, Tip: "系统代理模式：接管浏览器与系统流量（无需管理员）。点击开关"},
-			{Label: "Hosts", On: st.Hosts, Action: uiIDHosts, Tip: "Hosts 模式：覆盖 hosts 解析，供 Steam 客户端等不走代理的程序使用（需管理员）。点击开关"},
-			{Label: "无SNI反代", On: st.MITM, Action: uiIDMITM, Tip: "无 SNI 反代：本地解密被 SNI 封锁的域名，出站剥离 SNI（需先安装根证书）。点击开关"},
+			{Label: "系统代理", On: st.SystemProxy, Action: uiIDSys, Tip: "接管浏览器与系统流量（无需管理员、无需装证书）。点击开关"},
 		},
 		Detail: detail,
-		// 待办数量只读缓存（见 todo.go）：算它要问证书存储与计划任务，不能塞进 3 秒轮询。
+		// 待办数量只读缓存（见 todo.go）：算它要问计划任务，不能塞进 3 秒轮询。
 		TodoN: todos.count(),
 	}
 }
@@ -573,23 +427,14 @@ func refreshWindowStatus(a *app.App, cfg *config.Config, quit <-chan struct{}) {
 
 // wireWindowActions 把窗口界面上的动作接到 app 上。
 //
-// 与托盘菜单走同一套 API（app.SetMode / SetMITM / SetServices），因此两处的行为完全一致：
+// 与托盘菜单走同一套 API（app.SetMode / SetServices），因此两处的行为完全一致：
 // 同样的开关、同样的失败文案。窗口只负责「用户点了什么」，具体怎么做留在这一层。
-//
-// restartElevated 用于「待办 → 以管理员身份重启」，返回 false 表示用户在确认框里取消了。
-func wireWindowActions(a *app.App, cfg *config.Config, quit func(), restartElevated func() bool) {
+func wireWindowActions(a *app.App, cfg *config.Config, quit func()) {
 	setWindowActionsHook(func() windowActions {
-		st := a.Status()
 		return windowActions{
 			ToggleMode: func(id string, on bool) error {
-				// 单项开关要带上另一项的实际状态（SetMode 同时管系统代理与 hosts）
-				switch id {
-				case uiIDSys:
-					return a.SetMode(on, st.Hosts)
-				case uiIDHosts:
-					return a.SetMode(st.SystemProxy, on)
-				case uiIDMITM:
-					return a.SetMITM(on)
+				if id == uiIDSys {
+					return a.SetMode(on)
 				}
 				return fmt.Errorf("未知开关 %q", id)
 			},
@@ -615,14 +460,9 @@ func wireWindowActions(a *app.App, cfg *config.Config, quit func(), restartEleva
 			LogPath:     func() string { return cfg.LogFilePath() },
 			OpenLog:     func() error { return openLogInExplorer(cfg) },
 			Diagnostics: func() string { return buildDiagnostics(a, cfg) },
-			CertReady: func() bool {
-				ok, _ := mitm.CertInstalled(a.DataDir())
-				return ok
-			},
-			InstallCert: func() error { return mitm.InstallIfNeeded(a.DataDir()) },
 			Todos:       todos.list,
 			RunTodo: func(id string) error {
-				err := runTodo(a, cfg, id, restartElevated)
+				err := runTodo(a, cfg, id)
 				// 处理完立刻回读：按钮上的数字要跟着变，不能等下一次兜底刷新
 				todos.refresh(a, cfg)
 				return err
@@ -656,7 +496,7 @@ func wireWindowActions(a *app.App, cfg *config.Config, quit func(), restartEleva
 				list := a.CustomSites()
 				out := make([]uiSite, 0, len(list))
 				for _, s := range list {
-					out = append(out, uiSite{Pattern: s.Pattern, MITM: s.MITM})
+					out = append(out, uiSite{Pattern: s.Pattern})
 				}
 				return out
 			},
@@ -669,13 +509,6 @@ func wireWindowActions(a *app.App, cfg *config.Config, quit func(), restartEleva
 			},
 			RemoveSite: func(pattern string) error {
 				err := a.RemoveCustomSite(pattern)
-				if err == nil {
-					todos.refresh(a, cfg)
-				}
-				return err
-			},
-			SetSiteMITM: func(pattern string, on bool) error {
-				err := a.SetCustomSiteMITM(pattern, on)
 				if err == nil {
 					todos.refresh(a, cfg)
 				}
@@ -695,7 +528,5 @@ func init() {
 	f := rootCmd.PersistentFlags()
 	f.BoolVar(&flagNoTray, "no-tray", false, "不显示系统托盘图标")
 	f.BoolVar(&flagNoSysProxy, "no-sysproxy", false, "本次启动不接管系统代理")
-	f.BoolVar(&flagNoHosts, "no-hosts", false, "本次启动不接管 hosts")
-	f.BoolVar(&flagNoMITM, "no-mitm", false, "本次启动不启用无 SNI 反代")
 	f.BoolVar(&flagHidden, "hidden", false, "不显示界面窗口（供开机自启使用）")
 }

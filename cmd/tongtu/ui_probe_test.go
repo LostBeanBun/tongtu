@@ -48,7 +48,7 @@ func TestUIProbeLinesOK(t *testing.T) {
 		TCP: "31ms", TCPOK: true,
 		Direct: "HTTP 200", DirectOK: true,
 		Proxy: "HTTP 200", ProxyOK: true, ProxyTested: true,
-		MITM: "✓", Verdict: selfcheck.VerdictOK,
+		Verdict: selfcheck.VerdictOK,
 	}
 	lines := uiProbeLines(&row, false, "")
 	want := map[int]string{
@@ -57,7 +57,6 @@ func TestUIProbeLinesOK(t *testing.T) {
 		2: "31ms",
 		3: "HTTP 200",
 		4: "HTTP 200",
-		5: "✓ 命中（本地解密后剥离 SNI）",
 	}
 	for i, w := range want {
 		if lines[i].Value != w {
@@ -78,7 +77,7 @@ func TestUIProbeLinesDirectOnly(t *testing.T) {
 		TCP: "18ms", TCPOK: true,
 		Direct: "HTTP 200", DirectOK: true,
 		Proxy: "失败: 超时", ProxyTested: true,
-		MITM: "–", Verdict: selfcheck.VerdictDirectOnly,
+		Verdict: selfcheck.VerdictDirectOnly,
 	}
 	lines := uiProbeLines(&row, false, "")
 	if lines[0].Value != "仅直连" || lines[0].Tone != probeToneWarn {
@@ -87,22 +86,16 @@ func TestUIProbeLinesDirectOnly(t *testing.T) {
 	if lines[4].Tone != probeToneWarn {
 		t.Errorf("经代理失败应是警告色（站点本身能用）：%+v", lines[4])
 	}
-	if lines[5].Value != "– 不经过（保持隧道）" {
-		t.Errorf("未命中反代应说明保持隧道，实际 %q", lines[5].Value)
-	}
 	got := uiProbeAdvice(&row, false, "", false)
 	if !strings.Contains(got, "能直连但经代理不通") {
 		t.Errorf("仅直连时应给出「检查代理」的下一步，实际 %q", got)
-	}
-	if !strings.Contains(got, "反代") {
-		t.Errorf("仅直连时应提到可以为该站打开反代，实际 %q", got)
 	}
 }
 
 func TestUIProbeLinesDNSFailure(t *testing.T) {
 	row := selfcheck.Row{
 		Host: "bad.example", Direct: "未测（解析失败）", Proxy: "未测（解析失败）",
-		MITM: "未启用", Verdict: selfcheck.VerdictFail,
+		Verdict: selfcheck.VerdictFail,
 	}
 	lines := uiProbeLines(&row, false, "")
 	if lines[1].Value != "失败" || lines[1].Tone != probeToneErr {
@@ -126,7 +119,7 @@ func TestUIProbeLinesTCPFailure(t *testing.T) {
 		Host: "blocked.example", IP: "1.2.3.4", DNSOK: true,
 		TCP: "不可达", TCPOK: false,
 		Direct: "失败: 超时", Proxy: "失败: 超时", ProxyTested: true,
-		MITM: "未启用", Verdict: selfcheck.VerdictFail,
+		Verdict: selfcheck.VerdictFail,
 	}
 	lines := uiProbeLines(&row, false, "")
 	if lines[2].Tone != probeToneErr {
@@ -142,7 +135,7 @@ func TestUIProbeProxyNotTested(t *testing.T) {
 	row := selfcheck.Row{
 		Host: "github.com", IP: "1.2.3.4", DNSOK: true,
 		TCP: "20ms", TCPOK: true, Direct: "HTTP 200", DirectOK: true,
-		MITM: "未启用", Verdict: selfcheck.VerdictOK,
+		Verdict: selfcheck.VerdictOK,
 	}
 	lines := uiProbeLines(&row, false, "")
 	if lines[4].Value != "未测（本地代理未运行）" || lines[4].Tone != probeToneMuted {
@@ -161,7 +154,7 @@ func TestUIProbePausedAdviceIsHonest(t *testing.T) {
 		Host: "github.com", IP: "1.2.3.4", DNSOK: true,
 		TCP: "20ms", TCPOK: true, Direct: "HTTP 200", DirectOK: true,
 		Proxy: "HTTP 200", ProxyOK: true, ProxyTested: true,
-		MITM: "未启用", Verdict: selfcheck.VerdictOK,
+		Verdict: selfcheck.VerdictOK,
 	}
 	got := uiProbeAdvice(&row, false, "", true)
 	if !strings.Contains(got, "已暂停") || !strings.Contains(got, "系统流量并未经过") {
@@ -258,7 +251,7 @@ func TestUIProbeActions(t *testing.T) {
 	}
 
 	got = uiProbeActions(&direct, false, "", 0)
-	want := []string{uiIDProbeCopy, uiIDProbeAdd, uiIDProbeMITM, uiIDProbeConfig}
+	want := []string{uiIDProbeCopy, uiIDProbeAdd, uiIDProbeConfig}
 	if strings.Join(ids(got), ",") != strings.Join(want, ",") {
 		t.Errorf("仅直连时应给出 %v，实际 %v", want, ids(got))
 	}
@@ -286,13 +279,13 @@ func TestUIProbeActions(t *testing.T) {
 	}
 }
 
-// TestUIProbeText 复制出去的文字必须和界面一致：同一个域名、六行结果、同一句建议。
+// TestUIProbeText 复制出去的文字必须和界面一致：同一个域名、五行结果、同一句建议。
 func TestUIProbeText(t *testing.T) {
 	row := selfcheck.Row{
 		Host: "github.com", IP: "1.2.3.4", DNSMs: 42, DNSOK: true,
 		TCP: "31ms", TCPOK: true, Direct: "HTTP 200", DirectOK: true,
 		Proxy: "HTTP 200", ProxyOK: true, ProxyTested: true,
-		MITM: "✓", Verdict: selfcheck.VerdictOK,
+		Verdict: selfcheck.VerdictOK,
 	}
 	got := uiProbeText(&row, false)
 	for _, want := range []string{
@@ -302,7 +295,6 @@ func TestUIProbeText(t *testing.T) {
 		"TCP:443：31ms",
 		"直连 HTTPS：HTTP 200",
 		"经代理：HTTP 200",
-		"无SNI反代：✓ 命中（本地解密后剥离 SNI）",
 		"建议：",
 	} {
 		if !strings.Contains(got, want) {

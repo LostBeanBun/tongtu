@@ -52,12 +52,10 @@ var testCmd = &cobra.Command{
 		}
 
 		p := &selfcheck.Prober{
-			Res:          res,
-			Listen:       cfg.Listen,
-			ProxyUp:      proxyUp,
-			MITMOn:       cfg.MITM.Enabled,
-			MITMPatterns: cfg.MITM.Domains,
-			Timeout:      20 * time.Second,
+			Res:     res,
+			Listen:  cfg.Listen,
+			ProxyUp: proxyUp,
+			Timeout: 20 * time.Second,
 		}
 		// 每个域名最多 20 秒，整体给足余量后收手（而不是让用户无限等）
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -65,7 +63,7 @@ var testCmd = &cobra.Command{
 		rows := p.Run(ctx, hosts)
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(w, "结论\t域名\t解析IP(干净)\tDNS\tTCP:443\t直连HTTPS\t经代理\t无SNI反代")
+		fmt.Fprintln(w, "结论\t域名\t解析IP(干净)\tDNS\tTCP:443\t直连HTTPS\t经代理")
 		for _, r := range rows {
 			ip, dns, tcp, direct, proxy := r.IP, "-", "-", r.Direct, r.Proxy
 			if !r.DNSOK {
@@ -76,8 +74,8 @@ var testCmd = &cobra.Command{
 			if !r.ProxyTested {
 				proxy = "-"
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-				r.Verdict.Word(), r.Host, ip, dns, tcp, direct, proxy, r.MITM)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				r.Verdict.Word(), r.Host, ip, dns, tcp, direct, proxy)
 		}
 		if err := w.Flush(); err != nil {
 			return err

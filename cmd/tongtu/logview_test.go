@@ -19,12 +19,12 @@ func rec(level slog.Level, msg string, attrs ...slog.Attr) slog.Record {
 
 // TestFormatRecordShortStaysOneLine 短记录应当就是一行：时间 + 中文级别 + 正文 + 属性。
 func TestFormatRecordShortStaysOneLine(t *testing.T) {
-	lines := formatRecord(rec(slog.LevelInfo, "hosts 直连 MITM 已就绪", slog.Int("domains", 6)), nil, "")
+	lines := formatRecord(rec(slog.LevelInfo, "系统代理已接管，预热完成", slog.Int("domains", 6)), nil, "")
 	if len(lines) != 1 {
 		t.Fatalf("短记录应当只占一行，实际 %d 行：%v", len(lines), lines)
 	}
 	text := lines[0].plain()
-	if text != "14:37:55  信息  hosts 直连 MITM 已就绪  ·  domains=6" {
+	if text != "14:37:55  信息  系统代理已接管，预热完成  ·  domains=6" {
 		t.Errorf("显示排版不符：%q", text)
 	}
 	if strings.Contains(text, "time=") || strings.Contains(text, "level=") {
@@ -38,12 +38,12 @@ func TestFormatRecordShortStaysOneLine(t *testing.T) {
 
 // TestFormatRecordLongAttrWraps 属性太长时另起续行：正文保持清爽，不糊成一整行。
 func TestFormatRecordLongAttrWraps(t *testing.T) {
-	err := `写入 hosts 需要管理员权限: open C:\WINDOWS\System32\drivers\etc\hosts: Access is denied.`
-	lines := formatRecord(rec(slog.LevelError, "hosts 模式启动失败（系统代理模式不受影响）", slog.String("err", err)), nil, "")
+	err := `接管系统代理失败: open C:\Windows\System32\inetsrv\config\applicationHost.config: Access is denied.`
+	lines := formatRecord(rec(slog.LevelError, "接管系统代理失败（本次启动不接管）", slog.String("err", err)), nil, "")
 	if len(lines) != 2 {
 		t.Fatalf("长属性应换到续行，实际 %d 行", len(lines))
 	}
-	if got := lines[0].plain(); got != "14:37:55  错误  hosts 模式启动失败（系统代理模式不受影响）" {
+	if got := lines[0].plain(); got != "14:37:55  错误  接管系统代理失败（本次启动不接管）" {
 		t.Errorf("第一行应只放时间/级别/正文：%q", got)
 	}
 	if got := lines[1].plain(); !strings.HasPrefix(got, logIndent+"· err="+err[:12]) {
@@ -112,7 +112,7 @@ func TestLevelWordsAndStyles(t *testing.T) {
 func TestRenderSummary(t *testing.T) {
 	rows := []summaryRow{
 		{Mark: markOK, Label: "系统代理", Value: "已接管"},
-		{Mark: markWarn, Label: "Hosts", Value: "未生效（需要以管理员身份运行）"},
+		{Mark: markWarn, Label: "DNS", Value: "DoH 端点全部失败（已回退直连）"},
 		{Mark: markInfo, Label: "服务组", Value: "steam、github"},
 	}
 	lines := renderSummary("通途已启动", rows)
@@ -123,7 +123,7 @@ func TestRenderSummary(t *testing.T) {
 		t.Errorf("标题应当用强调色加粗：%+v", got)
 	}
 	plain := renderSummaryText("通途已启动", rows)
-	for _, want := range []string{"通途已启动\n", "  ✓ 系统代理　已接管", "  ！ Hosts　未生效（需要以管理员身份运行）", "  · 服务组　steam、github"} {
+	for _, want := range []string{"通途已启动\n", "  ✓ 系统代理　已接管", "  ！ DNS　DoH 端点全部失败（已回退直连）", "  · 服务组　steam、github"} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("摘要缺少 %q：\n%s", want, plain)
 		}
@@ -155,10 +155,10 @@ func TestWindowHandlerRendersWindowHandler(t *testing.T) {
 	if len(sink.lines) != 1 || !strings.Contains(sink.lines[0].plain(), "错误  出错了") {
 		t.Errorf("记录没有渲染进显示层：%+v", sink.lines)
 	}
-	// WithAttrs 的参数要出现在后续记录里（例如 logger.With("模块", "hosts")）
-	h2 := h.WithAttrs([]slog.Attr{slog.String("模块", "hosts")})
+	// WithAttrs 的参数要出现在后续记录里（例如 logger.With("模块", "代理")）
+	h2 := h.WithAttrs([]slog.Attr{slog.String("模块", "代理")})
 	_ = h2.Handle(ctx, rec(slog.LevelError, "又出错了"))
-	if got := sink.lines[1].plain(); !strings.Contains(got, "模块=hosts") {
+	if got := sink.lines[1].plain(); !strings.Contains(got, "模块=代理") {
 		t.Errorf("WithAttrs 的属性应当出现在记录里：%q", got)
 	}
 }

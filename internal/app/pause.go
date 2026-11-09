@@ -19,7 +19,7 @@ import (
 
 // pauseExpireHook 是定时暂停到期时执行的恢复动作。
 //
-// 单独抽成变量是为了单测：真机上「恢复」会去改系统代理 / hosts，测试里不能那么做。
+// 单独抽成变量是为了单测：真机上「恢复」会去改系统代理，测试里不能那么做。
 // 生产路径是 resumeLocked（与手动恢复同一套实现，只是日志里写明触发原因）。
 var pauseExpireHook = func(a *App) error {
 	a.mu.Lock()

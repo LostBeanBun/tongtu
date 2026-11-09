@@ -690,7 +690,7 @@ type logWindow struct {
 	// sites 是面板里的行；两者一起参与几何计算（见 panelSnapshot）。
 	sitesOpen bool
 	sites     []uiSite
-	// sitesBusy 表示站点增删正在后台执行（改配置 + 重建规则可能要拉一次 hosts）。
+	// sitesBusy 表示站点增删正在后台执行（改配置 + 重建规则可能要拉一次远程优选 IP 列表）。
 	sitesBusy bool
 	// —— 域名诊断面板 ——
 	// probeOpen 表示卡片区正显示诊断面板（与 sitesOpen 互斥）；probeBusy 表示
@@ -1563,7 +1563,7 @@ func itemFingerprint(items []windowStatusItem) string {
 	return b.String()
 }
 
-// panelFingerprint 把站点面板状态拼成短串（打开与否 + 每一行的域名与反代开关）。
+// panelFingerprint 把站点面板状态拼成短串（打开与否 + 每一行的域名）。
 // 行数变化会改变几何，因此必须进 ensureLayout 的缓存键。
 func panelFingerprint(p uiPanelState) string {
 	var b strings.Builder
@@ -1597,11 +1597,6 @@ func panelFingerprint(p uiPanelState) string {
 	for _, s := range p.Sites {
 		b.WriteByte('|')
 		b.WriteString(s.Pattern)
-		if s.MITM {
-			b.WriteByte('1')
-		} else {
-			b.WriteByte('0')
-		}
 	}
 	return b.String()
 }
@@ -1753,8 +1748,8 @@ func (w *logWindow) paintClient(hdc uintptr, client rectT) {
 
 // paintContent 按固定顺序画一帧的全部自绘内容：卡片底 → 面板行反馈 → 状态条与控件。
 //
-// 顺序是语义的一部分：站点行的整行悬停底色必须铺在「反代」胶囊与「删除」按钮之前，
-// 否则会把它们盖住；而状态条文字在卡片之上，任何面板内容都不会压到它。
+// 顺序是语义的一部分：站点行的整行悬停底色必须铺在「删除」按钮之前，
+// 否则会把它盖住；而状态条文字在卡片之上，任何面板内容都不会压到它。
 func (w *logWindow) paintContent(hdc uintptr, l uiLayout) {
 	w.paintCard(hdc, l)
 	w.paintPanel(hdc, l)
@@ -1864,7 +1859,6 @@ func (w *logWindow) paintHeader(hdc uintptr, l uiLayout) {
 	// 诊断面板同理：输入框为空时不把「诊断」藏起来，只是弱化；诊断中也不可重复点。
 	runDim := probeOpen && (probeBusy || w.probeInputText() == "")
 	for _, r := range l.Regions {
-		// 站点面板每行的「反代」胶囊自带状态（几何层已经算好）；其余胶囊看状态条。
 		on := r.On
 		switch {
 		case r.ID == uiIDOnlyWarn:
@@ -1875,7 +1869,7 @@ func (w *logWindow) paintHeader(hdc uintptr, l uiLayout) {
 			on = sitesOpen // 面板打开时按钮保持选中态（再点一次回到日志）
 		case r.ID == uiIDProbe:
 			on = probeOpen
-		case r.Kind == uiChip && !strings.HasPrefix(r.ID, uiSiteMITMPrefix):
+		case r.Kind == uiChip:
 			on = status.onOf(r.ID)
 		}
 		drawRegion(hdc, theme, font, r, dpi, on, w.hoverID == r.ID, w.pressID == r.ID,
@@ -1909,7 +1903,7 @@ func (w *logWindow) paintHeader(hdc uintptr, l uiLayout) {
 // paintPanel 画「自定义站点」面板的背景与文字：行悬停底色、行间分隔线、
 // 每行的域名、空状态提示与底部说明。
 //
-// 行内的「反代」胶囊与「删除」按钮属于自绘控件，由 paintHeader 的 Regions 循环绘制；
+// 行内的「删除」按钮属于自绘控件，由 paintHeader 的 Regions 循环绘制；
 // 这里只画它们左边那一段域名文字，避免两处重复画同一个像素。
 func (w *logWindow) paintPanel(hdc uintptr, l uiLayout) {
 	panel := w.panelSnapshot()
@@ -1928,12 +1922,12 @@ func (w *logWindow) paintPanel(hdc uintptr, l uiLayout) {
 	}
 	procSetBkMode.Call(hdc, bkTransparent)
 
-	// 行反馈：鼠标停在这一行的「反代」或「删除」上时，整行铺一层交互底色——
-	// 让人看出这两个控件属于同一行，而不是悬空在文字右边。底色在胶囊与按钮之前画
+	// 行反馈：鼠标停在这一行的「删除」上时，整行铺一层交互底色——
+	// 让人看出这个控件属于同一行，而不是悬空在文字右边。底色在按钮之前画
 	// （见 paintContent 的顺序），因此不会盖住它们自己的悬停态。
 	if theme.hoverBrush != 0 {
 		for _, row := range l.SiteRows {
-			if hoverID == uiSiteDelID(row.Pattern) || hoverID == uiSiteMITMID(row.Pattern) {
+			if hoverID == uiSiteDelID(row.Pattern) {
 				procFillRect.Call(hdc, uintptr(unsafe.Pointer(&row.Rect)), theme.hoverBrush)
 			}
 		}
@@ -2112,7 +2106,7 @@ func wndProc(hwnd windows.Handle, msg uint32, wparam uintptr, lparam unsafe.Poin
 		return 0
 
 	case wmQueryEndSession:
-		// 注销 / 关机：先把系统代理与 hosts 还原掉再放行（返回 1 = 同意结束会话）。
+		// 注销 / 关机：先把系统代理还原掉再放行（返回 1 = 同意结束会话）。
 		runSessionEnd()
 		return 1
 
@@ -2125,7 +2119,7 @@ func wndProc(hwnd windows.Handle, msg uint32, wparam uintptr, lparam unsafe.Poin
 
 	case wmPowerBroadcast:
 		// 睡眠/休眠恢复：网络接口往往还没完全就绪，交给 app 做防抖恢复
-		// （清 DNS/优选缓存、重写 hosts、重新预热）。消息处理必须尽快返回，
+		// （清 DNS/优选缓存、重新预热）。消息处理必须尽快返回，
 		// 因此回调里只投递事件，不在这里做网络操作。
 		switch wparam {
 		case pbtAPMResumeAutomatic, pbtAPMResumeSuspend, pbtAPMResumeCritical:
@@ -2184,7 +2178,7 @@ func wndProc(hwnd windows.Handle, msg uint32, wparam uintptr, lparam unsafe.Poin
 
 	case wmAppSitesChanged:
 		// 后台线程完成了站点增删：控件与几何只能在窗口线程上动，这里统一刷新面板。
-		// wparam=1 表示这次要清空输入框（添加成功），删除 / 切换反代时保留用户输入。
+		// wparam=1 表示这次要清空输入框（添加成功），删除时保留用户输入。
 		lw.onSitesChanged(wparam != 0)
 		return 0
 
@@ -2579,7 +2573,7 @@ func showLogWindow() error { return lw.show() }
 // prepareLogWindow 只创建窗口、不显示。
 //
 // --hidden（开机自启）用它换一个「看不见但存在」的窗口：注销 / 关机时系统会给它发
-// WM_QUERYENDSESSION，通途因此能在会话结束前把系统代理与 hosts 还原干净。
+// WM_QUERYENDSESSION，通途因此能在会话结束前把系统代理还原干净。
 func prepareLogWindow() error { return lw.ensure() }
 
 // toggleLogWindow 显示/隐藏日志窗口（供托盘菜单与左键点击使用）。
@@ -2599,7 +2593,7 @@ var (
 // setSessionEndHandler 注册「注销 / 关机」时的清理回调。
 //
 // 窗口线程收到 WM_QUERYENDSESSION / WM_ENDSESSION 时调用它，用来在系统会话结束、
-// 进程被强制结束之前，把系统代理与 hosts 还原成原来的样子。这是「无论怎么退出都
+// 进程被强制结束之前，把系统代理还原成原来的样子。这是「无论怎么退出都
 // 不留错配置」的一环：正常退出靠主流程、崩溃靠监护进程、关机靠这里。
 func setSessionEndHandler(fn func()) {
 	sessionEndMu.Lock()
@@ -2632,7 +2626,7 @@ var (
 // setPowerResumeHandler 注册「系统从睡眠/休眠恢复」时的回调。
 //
 // 窗口线程收到 WM_POWERBROADCAST 的恢复事件时调用它。真正的网络恢复要清缓存、
-// 重写 hosts、重新预热，可能耗时，因此回调只负责投递（见 start.go）。
+// 重新预热，可能耗时，因此回调只负责投递（见 start.go）。
 func setPowerResumeHandler(fn func(string)) {
 	powerResumeMu.Lock()
 	powerResumeFn = fn

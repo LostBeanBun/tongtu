@@ -40,12 +40,10 @@ func runSelfCheck(ctx context.Context, a *app.App, cfg *config.Config) []selfche
 		StaticHosts: cfg.DNS.StaticHosts,
 	}, quiet)
 	p := &selfcheck.Prober{
-		Res:          res,
-		Listen:       listen,
-		ProxyUp:      control.Running(listen),
-		MITMOn:       st.MITM,
-		MITMPatterns: cfg.MITM.Domains,
-		Timeout:      20 * time.Second,
+		Res:     res,
+		Listen:  listen,
+		ProxyUp: control.Running(listen),
+		Timeout: 20 * time.Second,
 	}
 	ctx, cancel := context.WithTimeout(ctx, selfCheckTimeout)
 	defer cancel()

@@ -95,7 +95,7 @@ func TestUILayoutSnapshotSitesPanel(t *testing.T) {
 	})
 
 	st := layoutStatus()
-	panel := uiPanelState{Open: true, Sites: []uiSite{{Pattern: "a.com", MITM: true}, {Pattern: "b.com"}}}
+	panel := uiPanelState{Open: true, Sites: []uiSite{{Pattern: "a.com"}, {Pattern: "b.com"}}}
 	l := computeUILayout(855, 481, 96, st, panel, fixedMeasure, fixedMeasure)
 	recordUILayout(l, 855, 481, st)
 

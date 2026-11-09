@@ -33,10 +33,10 @@ type uiProbeLine struct {
 }
 
 // uiProbeLabels 是诊断面板的固定行序（几何层据此算固定行数，内容随状态变化）。
-var uiProbeLabels = []string{"结论", "解析", "TCP:443", "直连 HTTPS", "经代理", "无SNI反代"}
+var uiProbeLabels = []string{"结论", "解析", "TCP:443", "直连 HTTPS", "经代理"}
 
 const (
-	uiProbeTip = "诊断：检查单个域名的干净解析、直连、经代理与反代命中，失败时给出下一步；再点一次回到日志"
+	uiProbeTip = "诊断：检查单个域名的干净解析、直连与经代理，失败时给出下一步；再点一次回到日志"
 	// uiProbeHint 是面板底部的一行说明：把「只读」与「动作按钮」的边界说清楚。
 	uiProbeHint = "诊断只读；下面的按钮只有点了才会改配置。结果按当前运行状态计算。"
 	// uiProbeInputCue 是输入框的占位提示。
@@ -57,11 +57,10 @@ type uiProbeAction struct {
 }
 
 const (
-	uiProbeCopyTip   = "复制结果：把这次诊断的六行结果与下一步建议复制到剪贴板"
+	uiProbeCopyTip   = "复制结果：把这次诊断的结果与下一步建议复制到剪贴板"
 	uiProbeAddTip    = "加入站点：把这个域名加入自定义加速白名单（立即生效）"
-	uiProbeMITMTip   = "打开反代：为该站开启无 SNI 反代（会先加入站点；需要本地根证书）"
 	uiProbeConfigTip = "打开配置：用记事本打开 config.yaml"
-	uiProbeTodoTip   = "查看待办：还有没配置好的事情（安装证书、以管理员重启…），点开可一键处理"
+	uiProbeTodoTip   = "查看待办：还有没配置好的事情（例如开机自启），点开可一键处理"
 )
 
 // uiProbeActions 决定诊断面板底部显示哪些动作。
@@ -79,7 +78,6 @@ func uiProbeActions(row *selfcheck.Row, busy bool, errMsg string, todoN int) []u
 	}
 	out = append(out,
 		uiProbeAction{ID: uiIDProbeAdd, Label: "加入站点", Tip: uiProbeAddTip},
-		uiProbeAction{ID: uiIDProbeMITM, Label: "打开反代", Tip: uiProbeMITMTip},
 		uiProbeAction{ID: uiIDProbeConfig, Label: "打开配置", Tip: uiProbeConfigTip},
 	)
 	if todoN > 0 {
@@ -91,7 +89,7 @@ func uiProbeActions(row *selfcheck.Row, busy bool, errMsg string, todoN int) []u
 // uiProbeText 把一次诊断摊成可粘贴的纯文本（「复制结果」用）。
 //
 // 与界面共用 uiProbeLines / uiProbeAdvice：复制出去的内容和屏幕上看到的一致，
-// 不会出现「界面说建议打开反代、剪贴板却是另一套说法」。
+// 不会出现「界面说的和剪贴板里的不是一套说法」。
 func uiProbeText(row *selfcheck.Row, paused bool) string {
 	if row == nil {
 		return ""
@@ -104,7 +102,7 @@ func uiProbeText(row *selfcheck.Row, paused bool) string {
 	return strings.Join(lines, "\r\n")
 }
 
-// uiProbeLines 把一次诊断结果摊成固定 6 行。
+// uiProbeLines 把一次诊断结果摊成固定 5 行。
 //
 // 固定行数让几何不随结果跳动：诊断前、诊断中、诊断后，输入框与各行位置都不变，
 // 用户不会看到面板「长高」或「缩短」。没有数据的格子写「—」，不是留空。
@@ -172,23 +170,12 @@ func uiProbeLines(row *selfcheck.Row, busy bool, errMsg string) []uiProbeLine {
 			proxyTone = probeToneOK
 		}
 	}
-	mitm := "—"
-	switch row.MITM {
-	case "✓":
-		mitm = "✓ 命中（本地解密后剥离 SNI）"
-	case "–":
-		mitm = "– 不经过（保持隧道）"
-	case "未启用":
-		mitm = "未启用"
-	}
-
 	return []uiProbeLine{
 		blank(uiProbeLabels[0], row.Verdict.Word(), verdictTone),
 		blank(uiProbeLabels[1], ip, ipTone),
 		blank(uiProbeLabels[2], tcp, tcpTone),
 		blank(uiProbeLabels[3], direct, probeToneText),
 		blank(uiProbeLabels[4], proxy, proxyTone),
-		blank(uiProbeLabels[5], mitm, probeToneMuted),
 	}
 }
 
@@ -219,24 +206,16 @@ func uiProbeAdvice(row *selfcheck.Row, busy bool, errMsg string, paused bool) st
 			advice = "本地代理未运行，只验证了直连；启动通途后再诊断可确认加速效果。"
 			break
 		}
-		if row.MITM == "✓" {
-			advice = "加速已生效：该域名命中无 SNI 反代，经本地代理返回 " + row.Proxy + "。"
-			break
-		}
 		advice = "加速已生效：经本地代理返回 " + row.Proxy + "。"
 	case selfcheck.VerdictDirectOnly:
-		advice = "能直连但经代理不通：检查通途是否在运行、端口是否被占用，并查看日志；" +
-			"若该站确实被 SNI 封锁，可在「站点」里为它打开反代。"
+		advice = "能直连但经代理不通：检查通途是否在运行、端口是否被占用，并查看日志。"
 	default:
 		if !row.DNSOK {
 			advice = "解析失败：检查网络与 DNS 端点（dns.endpoints）；本地代理未运行时也能诊断解析。"
 		} else if !row.TCPOK {
 			advice = "干净解析出了 IP，但 TCP:443 不可达：换一个优选 IP（dns.static_hosts）或稍后重试。"
-		} else if row.MITM == "✓" {
-			advice = "两条路都不通：该域名已配置反代，检查根证书是否已安装、状态条里的反代是否真的启用。"
 		} else {
-			advice = "两条路都不通：若该站确实被 SNI 封锁，可在「站点」里把它加入并打开反代；" +
-				"否则先查看日志里的失败原因。"
+			advice = "两条路都不通：先查看日志里的失败原因，或稍后重试。"
 		}
 	}
 	if paused {

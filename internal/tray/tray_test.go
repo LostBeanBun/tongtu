@@ -13,8 +13,6 @@ func TestTooltipText(t *testing.T) {
 	running := app.Status{
 		Running:     true,
 		SystemProxy: true,
-		Hosts:       false, // 未以管理员运行时 hosts 不生效，提示里要如实体现
-		MITM:        true,
 		Proxy:       proxy.Snapshot{BytesIn: 1572864, BytesOut: 348160},
 	}
 	got := tooltipText(running)
@@ -22,8 +20,6 @@ func TestTooltipText(t *testing.T) {
 		"通途",
 		"运行中",
 		"系统代理✓",
-		"Hosts✗",
-		"反代✓",
 		"↓1.5M",
 		"↑340K",
 	} {
@@ -39,10 +35,8 @@ func TestTooltipText(t *testing.T) {
 	if !strings.Contains(stopped, "已停止") {
 		t.Errorf("未运行时应写「已停止」: %s", stopped)
 	}
-	for _, want := range []string{"系统代理✗", "Hosts✗", "反代✗"} {
-		if !strings.Contains(stopped, want) {
-			t.Errorf("未运行时 %q 也要如实标出: %s", want, stopped)
-		}
+	if !strings.Contains(stopped, "系统代理✗") {
+		t.Errorf("未运行时也要如实标出系统代理: %s", stopped)
 	}
 }
 

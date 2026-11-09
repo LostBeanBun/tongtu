@@ -130,8 +130,6 @@ func TestStatusBarPaints(t *testing.T) {
 		Level: stateOK,
 		Items: []windowStatusItem{
 			{Label: "系统代理", On: true, Action: uiIDSys},
-			{Label: "Hosts", On: false, Action: uiIDHosts},
-			{Label: "无SNI反代", On: true, Action: uiIDMITM},
 		},
 		Detail: []string{"服务组 steam", "活跃隧道 3", "↓1.2 MB ↑340 KB"},
 	})
@@ -162,13 +160,34 @@ func TestStatusBarPaints(t *testing.T) {
 			}
 			defer m.close()
 			lw.paintHeader(m.dc, headerLayoutFor(t, w, h))
-			assertHeaderPixels(t, m, tc.th, w, h)
+			assertHeaderPixels(t, m, tc.th, w, h, true)
+
+			// 关掉开关再画一遍：灰色状态点要能独立出现（开 / 关两种状态都锁住）
+			lw.mu.Lock()
+			savedStatus := lw.status
+			off := lw.status
+			if len(off.Items) > 0 {
+				off.Items = append([]windowStatusItem(nil), off.Items...)
+				off.Items[0].On = false
+			}
+			lw.status = off
+			lw.mu.Unlock()
+			defer func() { lw.mu.Lock(); lw.status = savedStatus; lw.mu.Unlock() }()
+
+			m2 := newMemDC(w, h)
+			if m2 == nil {
+				t.Fatal("无法创建内存 DC")
+			}
+			defer m2.close()
+			lw.paintHeader(m2.dc, headerLayoutFor(t, w, h))
+			assertHeaderPixels(t, m2, tc.th, w, h, false)
 		})
 	}
 }
 
 // assertHeaderPixels 逐像素检查状态条的配色分工是否真的画出来了。
-func assertHeaderPixels(t *testing.T, m *memDC, theme uiTheme, w, h int32) {
+// wantOn 决定该断言「开」还是「关」的状态点（一次只画一种状态）。
+func assertHeaderPixels(t *testing.T, m *memDC, theme uiTheme, w, h int32, wantOn bool) {
 	t.Helper()
 
 	count := map[uint32]int{}
@@ -189,18 +208,12 @@ func assertHeaderPixels(t *testing.T, m *memDC, theme uiTheme, w, h int32) {
 
 	// 状态点是实心圆（GDI 不做抗锯齿），因此颜色应当精确出现且数量够多
 	// （胶囊里半径 4 DIP → 直径 8 DIP，面积约 50 像素；文字抗锯齿最多蹭到几个）
-	for _, want := range []struct {
-		name string
-		c    uint32
-		min  int
-	}{
-		{"开启项的状态点（绿）", okRGB, 20},
-		{"关闭项的状态点（灰）", offRGB, 20},
-	} {
-		if got := count[want.c]; got < want.min {
-			t.Errorf("%s 只用 %d 个像素画出（颜色 %#06x），至少要 %d 个",
-				want.name, got, want.c, want.min)
+	if wantOn {
+		if got := count[okRGB]; got < 20 {
+			t.Errorf("开启项的状态点（绿）只用 %d 个像素画出（颜色 %#06x），至少要 20 个", got, okRGB)
 		}
+	} else if got := count[offRGB]; got < 20 {
+		t.Errorf("关闭项的状态点（灰）只用 %d 个像素画出（颜色 %#06x），至少要 20 个", got, offRGB)
 	}
 
 	// 分隔线：一条铺满「卡片宽度」的 1 像素发丝线，位于状态条最后一行
@@ -333,13 +346,13 @@ func TestDrawRegionFocusRing(t *testing.T) {
 }
 
 // TestSitePanelRowFeedback 站点行要读成「一条一条」：悬停时整行铺底色，
-// 行间与底部说明上方各有一条发丝线；且行底色不能盖住胶囊的状态点
+// 行间与底部说明上方各有一条发丝线；且行底色不能盖住行内按钮
 // （绘制顺序：卡片 → 面板 → 状态条与控件）。
 func TestSitePanelRowFeedback(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	sites := []uiSite{{Pattern: "a.example.com", MITM: true}, {Pattern: "b.example.com"}}
+	sites := []uiSite{{Pattern: "a.example.com"}, {Pattern: "b.example.com"}}
 
 	lw.mu.Lock()
 	dpi, th := lw.dpi, lw.themeDarkSet
@@ -380,9 +393,10 @@ func TestSitePanelRowFeedback(t *testing.T) {
 	if got := countColorIn(m, hoverRGB, row2); got != 0 {
 		t.Errorf("未悬停的行不该有交互底色：实际 %d 像素", got)
 	}
-	// 状态点必须还在：面板先画行底色、状态条后画胶囊，顺序反了就会盖掉它。
-	if got := countColorIn(m, colorRefToRGB(th.ok), row1); got < 20 {
-		t.Errorf("行底色盖住了「反代」胶囊的状态点：绿色像素只有 %d 个", got)
+	// 行内的「删除」按钮由 paintHeader 绘制：行底色先画，因此按钮文字仍要能落到像素上
+	// （这里只断言按钮几何存在，文字是否被盖由上面的底色断言覆盖）。
+	if _, ok := regionByID(l, uiSiteDelID(sites[0].Pattern)); !ok {
+		t.Fatalf("第一行应有「删除」按钮：%+v", l.Regions)
 	}
 
 	hairRGB := colorRefToRGB(th.hairline)
@@ -610,7 +624,6 @@ func TestWindowHeader(t *testing.T) {
 		State: "运行中",
 		Items: []windowStatusItem{
 			{Label: "系统代理", On: true},
-			{Label: "Hosts", On: false},
 		},
 		Detail: []string{"服务组 steam", "活跃隧道 2"},
 	}
@@ -674,8 +687,6 @@ func TestNarrowHeaderKeepsDetail(t *testing.T) {
 		Level: stateOK,
 		Items: []windowStatusItem{
 			{Label: "系统代理", On: true},
-			{Label: "Hosts", On: false},
-			{Label: "无SNI反代", On: true},
 		},
 		Detail: []string{"服务组 steam、github", "活跃隧道 3", "↓1.2 MB ↑340 KB"},
 	})
@@ -1021,7 +1032,6 @@ func TestWindowPrintsToDC(t *testing.T) {
 		Level: stateDegraded,
 		Items: []windowStatusItem{
 			{Label: "系统代理", On: true},
-			{Label: "Hosts", On: false},
 		},
 		Detail: []string{"服务组 steam"},
 	})

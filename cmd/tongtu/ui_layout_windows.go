@@ -23,7 +23,7 @@ type uiRegion struct {
 	Label string
 	Kind  uiRegionKind
 	Tip   string // 悬浮说明；空表示不给提示
-	// On 是几何层给出的初始开关态：站点面板每行的「反代」胶囊直接由列表数据决定。
+	// On 是几何层给出的初始开关态。
 	// 其余控件（模式胶囊、只看警告…）由窗口状态决定，这里保持零值。
 	On bool
 	// Dim 是布局层已经确定的不可用态（诊断面板的动作按钮）：保留按钮、弱化显示，
@@ -57,7 +57,7 @@ type uiLayout struct {
 
 	// —— 域名诊断面板（panel.Kind == uiPanelProbe 时有效）——
 	ProbeInput  rectT   // 域名输入框（子控件）
-	ProbeRows   []rectT // 固定 6 行的矩形（结论 / 解析 / TCP / 直连 / 经代理 / 反代）
+	ProbeRows   []rectT // 固定 5 行的矩形（结论 / 解析 / TCP / 直连 / 经代理）
 	ProbeLabelW int32   // 左侧标签列的宽度（右侧值从这里开始）
 	ProbeAdvice rectT   // 「下一步做什么」的多行说明
 	ProbeHint   rectT   // 底部一行说明
@@ -92,16 +92,16 @@ type uiPanelState struct {
 	// 真机脚本靠它们判断一次诊断何时结束、结论是什么（toast 会消失，日志里也没有）。
 	ProbeBusy    bool
 	ProbeVerdict string
-	// ProbeActions 是这一帧诊断面板底部的动作按钮（复制 / 加入站点 / 打开反代…）。
+	// ProbeActions 是这一帧诊断面板底部的动作按钮（复制 / 加入站点 / 打开配置…）。
 	// 由窗口按结果算好：几何、绘制与命中必须用同一份，避免按钮显示与行为不一致。
 	ProbeActions []uiProbeAction
 }
 
-// uiSiteRow 是面板里的一行：域名文字在左，「反代」胶囊与「删除」按钮在右。
+// uiSiteRow 是面板里的一行：域名文字在左，「删除」按钮在右。
 type uiSiteRow struct {
 	Pattern   string
 	Rect      rectT
-	TextRight int32 // 域名文字的右边界（再往右是「反代」胶囊）
+	TextRight int32 // 域名文字的右边界（再往右是「删除」按钮）
 }
 
 // uiActionButtons 返回第二行的动作按钮：从右到左摆放，顺序即显示顺序。
@@ -116,7 +116,7 @@ func uiActionButtons(st windowStatus) []uiRegion {
 		pauseLabel, pauseTip = "恢复", uiResumeTip
 	}
 	out := []uiRegion{
-		{ID: uiIDQuit, Label: "退出", Kind: uiGhost, Tip: "退出：停止加速并还原系统代理与 hosts（点窗口的 × 只是隐藏窗口）"},
+		{ID: uiIDQuit, Label: "退出", Kind: uiGhost, Tip: "退出：停止加速并还原系统代理（点窗口的 × 只是隐藏窗口）"},
 		{ID: uiIDLog, Label: "日志", Kind: uiGhost, Tip: uiLogTip},
 		{ID: uiIDConfig, Label: "打开配置", Kind: uiGhost, Tip: "打开配置文件：用记事本打开 config.yaml"},
 		{ID: uiIDServices, Label: "服务组", Kind: uiGhost, Tip: "加速服务组：选择要为哪些站点加速（至少保留一个）"},
@@ -135,22 +135,19 @@ func uiActionButtons(st windowStatus) []uiRegion {
 
 // 胶囊的悬浮说明：与托盘菜单里的文案保持一致，用户在哪边看都是同一句话。
 var uiModeTips = map[string]string{
-	uiIDSys:   "系统代理模式：接管浏览器与系统流量（无需管理员）。点击开关",
-	uiIDHosts: "Hosts 模式：覆盖 hosts 解析，供 Steam 客户端等不走代理的程序使用（需管理员）。点击开关",
-	uiIDMITM:  "无 SNI 反代：本地解密被 SNI 封锁的域名，出站剥离 SNI（需先安装根证书）。点击开关",
+	uiIDSys: "系统代理：接管浏览器与系统流量（无需管理员、无需装证书）。点击开关",
 }
 
 const uiOnlyWarnTip = "只看警告：只显示警告与错误级别的日志（便于快速定位失败原因）"
 const uiFilterTip = "过滤日志：输入关键字（不区分大小写），只显示命中的行"
 const uiSelfTestTip = "自检：逐个测试加速域名的解析、直连与经代理访问，确认加速是否真的生效（约 10 秒）"
 const uiLogTip = "日志：打开日志文件 / 复制诊断信息 / 清空窗口日志"
-const uiTodoTip = "待办：还有没配置好的事情（安装证书、以管理员重启、开机自启…），点开可一键处理"
+const uiTodoTip = "待办：还有没配置好的事情（例如开机自启），点开可一键处理"
 const uiPauseTip = "暂停：选一个暂停时长（15 分钟 / 30 分钟 / 1 小时 / 2 小时，或一直停到手动恢复）；进程继续运行，随时可点「恢复」"
 const uiResumeTip = "恢复：把暂停前开着的加速项原样打开"
-const uiSitesTip = "站点：管理自定义加速域名（例如 huggingface.co），可为单个站点打开无 SNI 反代；再点一次回到日志"
+const uiSitesTip = "站点：管理自定义加速域名（例如 huggingface.co）；再点一次回到日志"
 const uiSiteAddTip = "添加：把输入框里的域名加入加速白名单（粘贴完整网址也可以）"
 const uiSiteDelTip = "删除：从加速白名单里移除这个域名"
-const uiSiteMITMTip = "反代：这个域名同时走无 SNI 反代（本地解密、出站剥离 SNI，需已安装根证书）"
 
 // uiSitesEmptyHint 是面板里没有站点时显示的话：告诉用户下一步做什么，而不是一片空白。
 const uiSitesEmptyHint = "还没有自定义站点。\n在上面的输入框里填一个域名（例如 huggingface.co），点「添加」即可。"
@@ -289,7 +286,7 @@ func computeUILayout(clientW, clientH int32, dpi uint32, st windowStatus, panel 
 
 // layoutSitePanel 计算「自定义站点」面板的几何（computeUILayout 的面板分支）。
 //
-// 从上到下：输入框 + 添加按钮 / 发丝线 / 站点行（域名 + 反代胶囊 + 删除）/ 底部说明。
+// 从上到下：输入框 + 添加按钮 / 发丝线 / 站点行（域名 + 删除）/ 底部说明。
 // 行数放不下时只画能放下的部分，并让最后一行后面留出说明的位置——面板不做滚动：
 // 自定义站点通常只有几条，滚动条会引入一整套额外的交互与几何状态。
 func layoutSitePanel(l *uiLayout, panel uiPanelState, contentL, contentR, ctrlY, sepY, bottom int32,
@@ -331,25 +328,11 @@ func layoutSitePanel(l *uiLayout, panel uiPanelState, contentL, contentR, ctrlY,
 		row := rectT{Left: contentL, Top: y, Right: contentR, Bottom: y + rowH}
 		delW := 2*btnPad + measure("删除")
 		delX := contentR - delW
-		mitmW := 2*chipPad + 2*dot + scaleDPI(6, dpi) + measure("反代")
-		mitmX := delX - gap - mitmW
-		if mitmX < contentL {
-			// 窗口太窄：先放弃「反代」胶囊，保住域名与删除（删除是每行必须能做的事）。
-			mitmX = delX
-			mitmW = 0
-		}
-		if mitmW > 0 {
-			l.Regions = append(l.Regions, uiRegion{
-				ID: uiSiteMITMID(s.Pattern), Label: "反代", Kind: uiChip, Tip: uiSiteMITMTip,
-				On:   s.MITM,
-				Rect: rectT{Left: mitmX, Top: y, Right: mitmX + mitmW, Bottom: y + rowH},
-			})
-		}
 		l.Regions = append(l.Regions, uiRegion{
 			ID: uiSiteDelID(s.Pattern), Label: "删除", Kind: uiGhost, Tip: uiSiteDelTip,
 			Rect: rectT{Left: delX, Top: y, Right: delX + delW, Bottom: y + rowH},
 		})
-		textRight := mitmX - gap
+		textRight := delX - gap
 		if textRight < contentL {
 			textRight = contentL
 		}
@@ -360,7 +343,7 @@ func layoutSitePanel(l *uiLayout, panel uiPanelState, contentL, contentR, ctrlY,
 
 // layoutProbePanel 计算「域名诊断」面板的几何（computeUILayout 的面板分支）。
 //
-// 从上到下：输入框 + 诊断按钮 / 发丝线 / 固定 6 行（标签 + 值）/ 下一步建议 / 底部说明。
+// 从上到下：输入框 + 诊断按钮 / 发丝线 / 固定 5 行（标签 + 值）/ 下一步建议 / 底部说明。
 // 行数与位置不随结果变化，因此诊断前后面板不会「长高」或「缩短」；窗口不够高时
 // 只画放得下的行（与站点面板一样不做滚动），保证建议与底部说明始终可见。
 func layoutProbePanel(l *uiLayout, panel uiPanelState, contentL, contentR, ctrlY, sepY, bottom int32,
@@ -385,7 +368,7 @@ func layoutProbePanel(l *uiLayout, panel uiPanelState, contentL, contentR, ctrlY
 		})
 	}
 
-	// 从下往上摆：底部说明 → 动作行 → 建议区 → 6 行数据。
+	// 从下往上摆：底部说明 → 动作行 → 建议区 → 5 行数据。
 	// 动作行即使还没有结果也占位（「复制结果」只是弱化），诊断前 / 中 / 后行位置不变。
 	hintH := scaleDPI(uiSiteHintDIP, dpi)
 	l.ProbeHint = rectT{Left: contentL, Top: bottom - hintH, Right: contentR, Bottom: bottom}

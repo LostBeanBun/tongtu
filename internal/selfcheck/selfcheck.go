@@ -3,7 +3,7 @@
 // 每个域名依次回答四个问题：
 //   - 干净解析能不能拿到 IP（走 DoH，绕开被污染的本地 DNS）
 //   - 解析出来的 IP 上 TCP 443 通不通
-//   - 带真 SNI 直连 HTTPS 通不通（反代名单里的域名，直连本来就该不通）
+//   - 直连 HTTPS 通不通
 //   - 经通途本地代理请求 HTTPS 通不通
 //
 // 命令行（tongtu test）与窗口里的「自检」按钮共用这一份逻辑，只是呈现方式不同：
@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"tongtu/internal/resolver"
-	"tongtu/internal/rules"
 )
 
 // DefaultHosts 是默认的体检域名：Steam 与 GitHub 及其主要附属站点。
@@ -82,7 +81,6 @@ type Row struct {
 	ProxyOK  bool
 	// ProxyTested 报告「经代理」这一列是否真的测了（本地代理没跑时为 false）。
 	ProxyTested bool
-	MITM        string // "✓" / "–" / "未启用"
 	Verdict     Verdict
 }
 
@@ -98,9 +96,6 @@ func (r Row) Describe() string {
 	parts = append(parts, "直连 "+r.Direct)
 	if r.ProxyTested {
 		parts = append(parts, "经代理 "+r.Proxy)
-	}
-	if r.MITM != "" && r.MITM != "未启用" {
-		parts = append(parts, "反代 "+r.MITM)
 	}
 	return strings.Join(parts, " · ")
 }
@@ -139,12 +134,10 @@ func Summary(rows []Row) string {
 
 // Prober 是一次体检所需的全部输入。
 type Prober struct {
-	Res          *resolver.Resolver
-	Listen       string // 本地代理地址（经代理测试用）
-	ProxyUp      bool   // 本地代理是否在运行
-	MITMOn       bool   // 无 SNI 反代是否启用
-	MITMPatterns []string
-	Timeout      time.Duration // 单个域名的总超时（<=0 时用 20 秒）
+	Res     *resolver.Resolver
+	Listen  string // 本地代理地址（经代理测试用）
+	ProxyUp bool   // 本地代理是否在运行
+	Timeout time.Duration // 单个域名的总超时（<=0 时用 20 秒）
 }
 
 // Run 逐个域名体检；ctx 取消时立刻收手（已测出的行照常返回）。
@@ -167,7 +160,7 @@ func (p *Prober) probe(ctx context.Context, host string) Row {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	r := Row{Host: host, MITM: mitmMark(p.MITMOn, p.MITMPatterns, host)}
+	r := Row{Host: host}
 
 	t0 := time.Now()
 	// 用 LookupAll：与代理一致（静态/远程优选 + 多端点并查，且不回退系统 DNS，
@@ -194,7 +187,7 @@ func (p *Prober) probe(ctx context.Context, host string) Row {
 		r.TCP = "不可达"
 	}
 
-	// 直连（真 SNI）能不能通：反代名单就是为「不通」的域名准备的。
+	// 直连（真 SNI）能不能通。
 	if s, err := httpsDirect(ctx, host); err != nil {
 		r.Direct = "失败: " + shortErr(err)
 	} else {
@@ -220,17 +213,6 @@ func (p *Prober) probe(ctx context.Context, host string) Row {
 		r.Verdict = VerdictFail
 	}
 	return r
-}
-
-// mitmMark 标注该域名会不会走无 SNI 反代：✓ 走、– 直连（配置里没开反代时统一显示「未启用」）。
-func mitmMark(mitmOn bool, patterns []string, host string) string {
-	if !mitmOn {
-		return "未启用"
-	}
-	if rules.MatchPatterns(host, patterns) {
-		return "✓"
-	}
-	return "–"
 }
 
 // httpsDirect 直接（不经代理、带真 SNI）发一次 HTTPS 请求，成功返回 HTTP 状态描述。

@@ -24,17 +24,13 @@ func (a *App) Probe(ctx context.Context, host string) selfcheck.Row {
 	if a.ln != nil {
 		listen = a.ln.Addr().String()
 	}
-	mitmOn := a.mitmCa != nil
-	patterns := append([]string(nil), a.cfg.MITMPatterns()...)
 	a.mu.Unlock()
 
 	p := &selfcheck.Prober{
-		Res:          res,
-		Listen:       listen,
-		ProxyUp:      running,
-		MITMOn:       mitmOn,
-		MITMPatterns: patterns,
-		Timeout:      20 * time.Second,
+		Res:     res,
+		Listen:  listen,
+		ProxyUp: running,
+		Timeout: 20 * time.Second,
 	}
 	rows := p.Run(ctx, []string{host})
 	if len(rows) == 0 {

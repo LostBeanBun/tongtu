@@ -52,9 +52,9 @@ func TestFilterLinesKeyword(t *testing.T) {
 func TestFilterLinesContinuationFollowsHead(t *testing.T) {
 	// 一条记录的正文行 + 两条缩进续行；关键字只出现在续行上。
 	lines := []logLine{
-		{Spans: []logSpan{{Style: styleText, Text: "写入 hosts 需要管理员权限"}}},
+		{Spans: []logSpan{{Style: styleText, Text: "接管系统代理失败"}}},
 		{Spans: []logSpan{{Style: styleMuted, Text: logIndent}, {Style: styleText, Text: "err=Access is denied."}}},
-		{Spans: []logSpan{{Style: styleMuted, Text: logIndent}, {Style: styleText, Text: "path=C:\\Windows\\hosts"}}},
+		{Spans: []logSpan{{Style: styleMuted, Text: logIndent}, {Style: styleText, Text: "key=ProxyEnable"}}},
 		{Spans: []logSpan{{Style: styleText, Text: "隧道已建立"}}},
 	}
 	// 关键字命中第一条的续行：正文行没命中 → 整条都不该留下（否则会看到孤立的属性行）
@@ -63,7 +63,7 @@ func TestFilterLinesContinuationFollowsHead(t *testing.T) {
 		t.Errorf("正文行没命中时，续行不该单独留下：%v", lineTexts(got))
 	}
 	// 关键字命中正文行：续行要跟着留下
-	got = filterLines(lines, "hosts 需要", false)
+	got = filterLines(lines, "接管系统", false)
 	if len(got) != 3 {
 		t.Errorf("正文行命中时续行应跟随，得到 %d 行：%v", len(got), lineTexts(got))
 	}
@@ -73,9 +73,9 @@ func TestFilterLinesOnlyWarn(t *testing.T) {
 	lines := []logLine{
 		{Spans: []logSpan{{Style: styleText, Text: "已启用系统代理模式"}}},
 		{Spans: []logSpan{{Style: styleMuted, Text: "· "}, {Style: styleText, Text: "listen=127.0.0.1:19180"}}},
-		{Spans: []logSpan{{Style: styleWarn, Text: "警告"}, {Style: styleText, Text: " 写入 hosts 需要管理员权限"}}},
+		{Spans: []logSpan{{Style: styleWarn, Text: "警告"}, {Style: styleText, Text: " 接管系统代理失败"}}},
 		{Spans: []logSpan{{Style: styleMuted, Text: logIndent}, {Style: styleDanger, Text: "err="}, {Style: styleText, Text: "Access is denied."}}},
-		{Spans: []logSpan{{Style: styleDanger, Text: "错误"}, {Style: styleText, Text: " 提权后仍未成功"}}},
+		{Spans: []logSpan{{Style: styleDanger, Text: "错误"}, {Style: styleText, Text: " 重试后仍未成功"}}},
 	}
 	got := filterLines(lines, "", true)
 	if len(got) != 3 {
@@ -92,12 +92,12 @@ func TestFilterLinesOnlyWarn(t *testing.T) {
 func TestFilterLinesOnlyWarnAndKeyword(t *testing.T) {
 	lines := []logLine{
 		{Spans: []logSpan{{Style: styleText, Text: "信息 已启用系统代理模式"}}},
-		{Spans: []logSpan{{Style: styleWarn, Text: "警告"}, {Style: styleText, Text: " 写入 hosts 失败"}}},
-		{Spans: []logSpan{{Style: styleWarn, Text: "警告"}, {Style: styleText, Text: " 反代证书未安装"}}},
+		{Spans: []logSpan{{Style: styleWarn, Text: "警告"}, {Style: styleText, Text: " 接管系统代理失败"}}},
+		{Spans: []logSpan{{Style: styleWarn, Text: "警告"}, {Style: styleText, Text: " DoH 端点全部失败"}}},
 	}
-	got := filterLines(lines, "hosts", true)
-	if len(got) != 1 || !strings.Contains(lineTexts(got)[0], "hosts") {
-		t.Errorf("两个条件应同时生效（只看警告 + 关键字 hosts）：%v", lineTexts(got))
+	got := filterLines(lines, "系统代理", true)
+	if len(got) != 1 || !strings.Contains(lineTexts(got)[0], "系统代理") {
+		t.Errorf("两个条件应同时生效（只看警告 + 关键字 系统代理）：%v", lineTexts(got))
 	}
 }
 

@@ -14,7 +14,11 @@ import (
 
 // CurrentVersion 是配置文件版本：低于该版本的配置会先备份，再在**保留用户设置**的
 // 前提下升级到新版本（见 Load 与 migrate）。
-const CurrentVersion = 4
+//
+// v5：移除 hosts 模式与无 SNI 反代（MITM）——两种都需要管理员权限或安装根证书。
+// 旧文件里的 hosts / hosts_refresh_minutes / mitm / custom.mitm_domains 会在升级时
+// 被新结构自然丢弃（yaml 不再有对应字段），其余用户设置原样保留。
+const CurrentVersion = 5
 
 // LogFileOff 是 log.file 的特殊值：不写日志文件，只在控制台与窗口里输出。
 // 留空表示用默认值（%APPDATA%\tongtu\tongtu.log）。
@@ -34,13 +38,6 @@ type DNSConfig struct {
 	StaticHosts map[string][]string `yaml:"static_hosts"`
 }
 
-// MITMConfig 控制「无 SNI 反代」（本地解密 + 出站剥离 SNI）行为。
-type MITMConfig struct {
-	Enabled  bool     `yaml:"enabled"`   // 是否启用无 SNI 反代
-	AutoCert bool     `yaml:"auto_cert"` // 首次启动时提示安装本地根证书
-	Domains  []string `yaml:"domains"`   // 需要反代的域名（支持 "*.example.com" 通配）
-}
-
 // LogConfig 控制日志输出。
 type LogConfig struct {
 	Level string `yaml:"level"` // debug / info / warn / error
@@ -57,24 +54,18 @@ type LogConfig struct {
 type CustomConfig struct {
 	// Domains 追加到代理白名单：写 my.site.com（含裸域）或 *.my.site.com。
 	Domains []string `yaml:"domains"`
-	// MITMDomains 追加到「无 SNI 反代」名单：只给确实被 SNI 阻断的域名加。
-	// 这些域名同时会进入白名单——否则反代根本没有流量经过。
-	MITMDomains []string `yaml:"mitm_domains"`
 }
 
 // Config 是 tongtu 的完整配置。
 type Config struct {
-	Version         int          `yaml:"version"`               // 配置文件版本
-	Listen          string       `yaml:"listen"`                // 本地代理监听地址
-	Control         string       `yaml:"control"`               // 控制 API 监听地址（仅回环）
-	SystemProxy     bool         `yaml:"system_proxy"`          // 启动时接管系统代理
-	Hosts           bool         `yaml:"hosts"`                 // 启动时接管 hosts
-	Services        []string     `yaml:"services"`              // 启用的服务组 id
-	HostsRefreshMin int          `yaml:"hosts_refresh_minutes"` // hosts IP 刷新周期
-	DNS             DNSConfig    `yaml:"dns"`
-	MITM            MITMConfig   `yaml:"mitm"`
-	Custom          CustomConfig `yaml:"custom"`
-	Log             LogConfig    `yaml:"log"`
+	Version     int          `yaml:"version"`      // 配置文件版本
+	Listen      string       `yaml:"listen"`       // 本地代理监听地址
+	Control     string       `yaml:"control"`      // 控制 API 监听地址（仅回环）
+	SystemProxy bool         `yaml:"system_proxy"` // 启动时接管系统代理
+	Services    []string     `yaml:"services"`     // 启用的服务组 id
+	DNS         DNSConfig    `yaml:"dns"`
+	Custom      CustomConfig `yaml:"custom"`
+	Log         LogConfig    `yaml:"log"`
 
 	// UpgradedFrom 记录本次加载触发配置升级前的旧版本号（0 表示未升级）。
 	UpgradedFrom int `yaml:"-"`
@@ -82,18 +73,16 @@ type Config struct {
 
 // Default 返回内置默认配置。
 //
-// 默认只开「系统代理模式」——它不需要管理员权限、不需要安装根证书，装好就能用；
-// Hosts 模式（要写系统 hosts、需管理员）与无 SNI 反代（要先装本地根证书）
-// 都属于「需要用户额外准备」的接管方式，默认关闭，由用户在托盘 / 窗口里按需打开。
+// 只有一种加速方式：接管系统代理。它不需要管理员权限、不需要安装根证书、
+// 不需要用户改任何东西——启动即生效，退出即还原。hosts 模式与无 SNI 反代
+// 因为分别需要管理员与装证书，已从产品中移除。
 func Default() *Config {
 	return &Config{
-		Version:         CurrentVersion,
-		Listen:          "127.0.0.1:19180",
-		Control:         "127.0.0.1:19181",
-		SystemProxy:     true,
-		Hosts:           false,
-		Services:        []string{"steam", "github"},
-		HostsRefreshMin: 10,
+		Version:     CurrentVersion,
+		Listen:      "127.0.0.1:19180",
+		Control:     "127.0.0.1:19181",
+		SystemProxy: true,
+		Services:    []string{"steam", "github"},
 		DNS: DNSConfig{
 			// 境内可达的端点在前（1.1.1.1/8.8.8.8 在境内常被拒连，仅作后备）；
 			// 223.5.5.5 的 DoH 路径是 /resolve（旧版误用 /dns-query 导致 400）。
@@ -118,29 +107,9 @@ func Default() *Config {
 				"steamcommunity.com": {"104.89.103.51", "184.30.89.225"},
 				"github.com":         {"140.82.112.3", "140.82.113.3", "140.82.114.3"},
 				// www/help 的干净 DoH 答案实测落在不可达机房（TCP:443 全超时），
-				// 不带兜底就是「反代竞速全部失败 → 15 秒后 502」，与主域同机房 IP 实测可用。
+				// 不带兜底就是「代理直连全部超时 → 打不开」，与主域同机房 IP 实测可用。
 				"www.steamcommunity.com":  {"104.89.103.51", "184.30.89.225"},
 				"help.steamcommunity.com": {"104.89.103.51", "184.30.89.225"},
-			},
-		},
-		MITM: MITMConfig{
-			// 默认关闭：反代要先安装本地根证书，属于用户显式选择才开启的能力。
-			// 名单仍然预置好，用户打开「无 SNI 反代」后立刻可用。
-			Enabled:  false,
-			AutoCert: true,
-			// 只列实测「真 SNI 被阻断、剥离 SNI 后按 Host 头仍能正常响应」的域名。
-			//
-			// 两条必须同时成立：store.steampowered.com 直连实测超时（或只收到十几 KB 就断流），
-			// 反代后 200；avatars.steamstatic.com 直连 RST，反代后正常。
-			// 而 login.steampowered.com 剥离 SNI 后握手直接失败，因此**不能**图省事写
-			// *.steampowered.com——那会把登录页一起拖下水。
-			Domains: []string{
-				"*.steamcommunity.com",
-				"store.steampowered.com",
-				"avatars.steamstatic.com",
-				"raw.githubusercontent.com",
-				"gist.github.com",
-				"github.com",
 			},
 		},
 		Log: LogConfig{Level: "info", File: "tongtu.log"},
@@ -239,6 +208,9 @@ func migrate(cfg *Config, from int) {
 			}
 		}
 	}
+	// v5 不写额外的迁移代码：hosts / hosts_refresh_minutes / mitm / custom.mitm_domains
+	// 在新的 Config 结构里已经没有对应字段，Save 重写文件时自然消失。
+	// 用户真正自己选的东西（监听端口、服务组、自定义域名、日志、DNS 端点）全部保留。
 }
 
 // Save 将配置写入 path。
@@ -306,55 +278,22 @@ func (c *Config) Validate() error {
 	if c.DNS.CacheMaxSec <= c.DNS.CacheMinSec {
 		c.DNS.CacheMaxSec = c.DNS.CacheMinSec * 10
 	}
-	if c.HostsRefreshMin <= 0 {
-		c.HostsRefreshMin = 10
-	}
 	if strings.TrimSpace(c.Log.File) == "" {
 		// 日志默认落盘：出问题时要能翻到「刚才发生了什么」，而不是关了窗口就没了。
 		c.Log.File = Default().Log.File
-	}
-	if len(c.MITM.Domains) == 0 {
-		c.MITM.Domains = Default().MITM.Domains
-	} else {
-		// 合并新增的内置默认反代域名，保留用户已有配置
-		have := make(map[string]bool, len(c.MITM.Domains))
-		for _, d := range c.MITM.Domains {
-			have[d] = true
-		}
-		for _, d := range Default().MITM.Domains {
-			if !have[d] {
-				c.MITM.Domains = append(c.MITM.Domains, d)
-			}
-		}
 	}
 	// 自定义站点：规范化并检查写法。写错时直接报错比「静默不生效」好得多。
 	domains, err := normalizePatterns("custom.domains", c.Custom.Domains)
 	if err != nil {
 		return err
 	}
-	mitmDomains, err := normalizePatterns("custom.mitm_domains", c.Custom.MITMDomains)
-	if err != nil {
-		return err
-	}
-	c.Custom.Domains, c.Custom.MITMDomains = domains, mitmDomains
+	c.Custom.Domains = domains
 	return nil
 }
 
-// ProxyPatterns 返回要追加到代理白名单的自定义域名：
-// custom.domains 加上 custom.mitm_domains（反代域名也必须先进白名单，否则流量根本不会经过本地代理）。
+// ProxyPatterns 返回要追加到代理白名单的自定义域名。
 func (c *Config) ProxyPatterns() []string {
-	out := make([]string, 0, len(c.Custom.Domains)+len(c.Custom.MITMDomains))
-	out = append(out, c.Custom.Domains...)
-	out = append(out, c.Custom.MITMDomains...)
-	return dedupePatterns(out)
-}
-
-// MITMPatterns 返回实际生效的反代域名：内置/配置里的 mitm.domains + 自定义 mitm_domains。
-func (c *Config) MITMPatterns() []string {
-	out := make([]string, 0, len(c.MITM.Domains)+len(c.Custom.MITMDomains))
-	out = append(out, c.MITM.Domains...)
-	out = append(out, c.Custom.MITMDomains...)
-	return dedupePatterns(out)
+	return dedupePatterns(c.Custom.Domains)
 }
 
 // NormalizePattern 规范化用户输入的一个域名，供界面「添加自定义站点」使用。
@@ -452,9 +391,4 @@ func (c *Config) LogFilePath() string {
 		return f
 	}
 	return filepath.Join(Dir(), f)
-}
-
-// HostsRefresh 返回 hosts 刷新周期。
-func (c *Config) HostsRefresh() time.Duration {
-	return time.Duration(c.HostsRefreshMin) * time.Minute
 }

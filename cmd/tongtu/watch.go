@@ -2,7 +2,7 @@ package main
 
 // 配置文件热生效：改完 config.yaml 保存，正在运行的实例自动用上新规则。
 //
-// 只热更新「服务组 / 自定义站点 / 反代域名」（见 app.ReloadRules）；端口、DNS 端点、
+// 只热更新「服务组 / 自定义站点」（见 app.ReloadRules）；端口、DNS 端点、
 // 日志级别这些要重建组件或重开进程的字段，改了仍需重启——文档里写清楚了，界面不撒谎。
 
 import (
@@ -62,7 +62,7 @@ func watchConfigFile(ctx context.Context, a *app.App, path string, log *slog.Log
 			log.Warn("重新应用配置失败（继续使用原来的规则）", "err", err)
 		case changed:
 			log.Info("配置已热生效", "services", next.Services,
-				"自定义域名", len(next.ProxyPatterns()), "反代域名", len(next.MITMPatterns()))
+				"自定义域名", len(next.ProxyPatterns()))
 		}
 	}
 }

@@ -11,7 +11,7 @@
 #   .\tools\verify-release.ps1 -Keep               # 保留下载的文件（便于手工复验）
 #
 # 退出码：0 = 全部一致；1 = 有任一项不一致（会逐条列出）。
-# 说明：需要能访问 api.github.com 与附件下载地址；不修改系统代理、证书或任何配置。
+# 说明：需要能访问 api.github.com 与附件下载地址；不修改系统代理或任何配置。
 param(
     [string]$Version = "",
     [string]$Repo = "LostBeanBun/tongtu",

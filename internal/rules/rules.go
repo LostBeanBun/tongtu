@@ -20,7 +20,7 @@ type Service struct {
 	ID      string   `json:"id"`
 	Name    string   `json:"name"`
 	Domains []string `json:"domains"` // 代理白名单，支持 "*.example.com" 通配（含裸域）
-	Hosts   []string `json:"hosts"`   // hosts 模式需要精确覆盖的主机名
+	Hosts   []string `json:"hosts"`   // 需要精确解析的主机名（启动预热直连用；通配域名无法枚举）
 }
 
 var builtin = map[string][]byte{
@@ -31,7 +31,7 @@ var builtin = map[string][]byte{
 // Set 是已启用服务的匹配集合。
 type Set struct {
 	services []Service
-	custom   []string // 自定义域名（来自配置 custom.domains / custom.mitm_domains）
+	custom   []string // 自定义域名（来自配置 custom.domains）
 }
 
 // Load 按 id 列表加载内置规则。
@@ -142,10 +142,11 @@ func MatchPatterns(host string, patterns []string) bool {
 	return false
 }
 
-// Hosts 返回去重后的 hosts 覆盖名单（保持规则内顺序）。
+// Hosts 返回去重后的精确主机名名单（保持规则内顺序）。
 //
-// 自定义域名的精确主机名也会进来（hosts 模式才能覆盖它们）；
-// 通配模式无法枚举，只能靠系统代理模式生效——这一点在文档里写清楚。
+// 它用于启动预热直连与诊断兜底（见 app.warmHosts）：白名单里的具体主机先连一遍，
+// 把握手与优选 IP 提前准备好。自定义域名的精确主机名也会进来；
+// 通配模式无法枚举，靠系统代理的白名单匹配生效——这一点在文档里写清楚。
 func (s *Set) Hosts() []string {
 	seen := make(map[string]bool)
 	var out []string

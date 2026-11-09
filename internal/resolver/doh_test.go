@@ -95,8 +95,8 @@ func TestLookupPublicFiltersPrivate(t *testing.T) {
 	}
 }
 
-// TestPublicV4DropsIPv6AndPrivate 覆盖 hosts 模式取址的口径：只保留公网 IPv4。
-// IPv6 必须被滤掉——写进 hosts 的地址会成为客户端首选，而我们没有干净来源校验 AAAA。
+// TestPublicV4DropsIPv6AndPrivate 覆盖预热直连取址的口径：只保留公网 IPv4。
+// IPv6 必须被滤掉——它会成为客户端首选，而我们没有干净来源校验 AAAA。
 func TestPublicV4DropsIPv6AndPrivate(t *testing.T) {
 	ips := []net.IP{
 		net.ParseIP("140.82.112.3"),        // 公网 v4：保留

@@ -70,7 +70,7 @@ func TestArmRunOnceIdempotent(t *testing.T) {
 	}
 
 	// 断电重启后 Windows 执行过一次 RunOnce，值被系统删掉；巡检要重新登记，
-	// 否则这一轮（比如用户手动又开了 hosts）掉电就没人兜底了。
+	// 否则这一轮（比如用户又把系统代理打开）掉电就没人兜底了。
 	f.cur = ""
 	armRunOnce(nil)
 	if f.cur != want || f.writes != 2 {

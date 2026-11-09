@@ -60,10 +60,9 @@ func TestLoadUpgradesOldConfig(t *testing.T) {
 		t.Errorf("用户保留的端点被删: %v", cfg.DNS.Endpoints)
 	}
 
-	// 缺失字段使用新默认值：默认只开系统代理（Hosts 与反代要用户显式开启）。
-	if !cfg.SystemProxy || cfg.Hosts || cfg.MITM.Enabled || len(cfg.MITM.Domains) == 0 {
-		t.Errorf("缺失字段没有取新默认值: system_proxy=%v hosts=%v mitm=%+v",
-			cfg.SystemProxy, cfg.Hosts, cfg.MITM)
+	// 缺失字段使用新默认值：默认接管系统代理。
+	if !cfg.SystemProxy {
+		t.Errorf("缺失字段没有取新默认值: system_proxy=%v", cfg.SystemProxy)
 	}
 	if _, err := os.Stat(path + ".v0.bak"); err != nil {
 		t.Fatalf("缺少旧配置备份: %v", err)
@@ -83,15 +82,16 @@ func TestLoadUpgradesOldConfig(t *testing.T) {
 	}
 }
 
-// TestLoadUpgradeKeepsVersionedConfig 带版本号的旧配置：保留设置，备份名带旧版本号。
+// TestLoadUpgradeKeepsVersionedConfig 带版本号的旧配置：保留设置，备份名带旧版本号，
+// 已移除的 hosts / mitm 配置在重写时自然消失。
 func TestLoadUpgradeKeepsVersionedConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	old := "version: 3\n" +
 		"listen: 127.0.0.1:18080\n" +
-		"hosts: false\n" +
+		"hosts: true\n" +
 		"services: [steam]\n" +
-		"mitm:\n  enabled: false\n" +
-		"custom:\n  mitm_domains: ['blocked.site.com']\n"
+		"mitm:\n  enabled: true\n" +
+		"custom:\n  domains: ['my.site.com']\n  mitm_domains: ['blocked.site.com']\n"
 	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -103,11 +103,28 @@ func TestLoadUpgradeKeepsVersionedConfig(t *testing.T) {
 	if cfg.UpgradedFrom != 3 {
 		t.Errorf("UpgradedFrom = %d，期望 3", cfg.UpgradedFrom)
 	}
-	if cfg.Listen != "127.0.0.1:18080" || cfg.Hosts || cfg.MITM.Enabled {
-		t.Errorf("用户开关被改写: listen=%s hosts=%v mitm=%v", cfg.Listen, cfg.Hosts, cfg.MITM.Enabled)
+	// 用户设置必须保留。
+	if cfg.Listen != "127.0.0.1:18080" {
+		t.Errorf("用户端口被改写: %s", cfg.Listen)
 	}
-	if len(cfg.Custom.MITMDomains) != 1 || cfg.Custom.MITMDomains[0] != "blocked.site.com" {
-		t.Errorf("用户反代域名丢失: %v", cfg.Custom.MITMDomains)
+	if len(cfg.Services) != 1 || cfg.Services[0] != "steam" {
+		t.Errorf("用户服务组被改写: %v", cfg.Services)
+	}
+	if len(cfg.Custom.Domains) != 1 || cfg.Custom.Domains[0] != "my.site.com" {
+		t.Errorf("用户自定义站点丢失: %v", cfg.Custom.Domains)
+	}
+	// 已移除的字段不再写回文件。
+	// 逐行判断（`static_hosts:` 里也含 "hosts:"，整串匹配会误报）。
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, gone := range []string{"hosts:", "mitm:", "mitm_domains:"} {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(strings.TrimLeft(line, " \t"), gone) {
+				t.Errorf("重写后的配置仍含已移除字段 %q（行 %q）:\n%s", gone, line, data)
+			}
+		}
 	}
 	if _, err := os.Stat(path + ".v3.bak"); err != nil {
 		t.Fatalf("缺少 .v3.bak 备份: %v", err)
@@ -172,24 +189,11 @@ func TestDefaultSanity(t *testing.T) {
 }
 
 // TestDefaultOnlySystemProxy 默认加速方式必须是「不需要任何额外准备」的那一种：
-// 系统代理不需要管理员、不需要装根证书；Hosts 与无 SNI 反代都要用户显式开启。
-// 反代名单仍然预置好，用户打开开关后立刻可用（auto_cert 也保留，届时才会提示装证书）。
+// 系统代理不需要管理员、不需要装根证书，启动即生效。
 func TestDefaultOnlySystemProxy(t *testing.T) {
 	cfg := Default()
 	if !cfg.SystemProxy {
-		t.Error("默认应开启系统代理模式（无需管理员、无需证书）")
-	}
-	if cfg.Hosts {
-		t.Error("Hosts 模式需要管理员并改写系统 hosts，默认应关闭")
-	}
-	if cfg.MITM.Enabled {
-		t.Error("无 SNI 反代需要先安装根证书，默认应关闭")
-	}
-	if len(cfg.MITM.Domains) == 0 {
-		t.Error("反代域名名单应保持预置：用户打开开关后不必再补配置")
-	}
-	if !cfg.MITM.AutoCert {
-		t.Error("用户显式打开反代时仍应提示安装根证书（auto_cert 默认开启）")
+		t.Error("默认应开启系统代理（无需管理员、无需证书）")
 	}
 }
 
@@ -244,53 +248,10 @@ func TestValidateFillsLogFile(t *testing.T) {
 	}
 }
 
-// matchAny 判断 host 是否命中任一通配模式（与 rules.matchPattern 同规则：*.a.com 含裸域 a.com）。
-func matchAny(host string, patterns []string) bool {
-	for _, p := range patterns {
-		if strings.HasPrefix(p, "*.") {
-			base := p[2:]
-			if host == base || strings.HasSuffix(host, "."+base) {
-				return true
-			}
-			continue
-		}
-		if p == host {
-			return true
-		}
-	}
-	return false
-}
-
-// TestDefaultReverseProxyCoversBlockedHosts 是「必须走无 SNI 反代」名单的契约测试。
-//
-// 名单来自实测（见 CHANGELOG 0.0.1）：这些域名真 SNI 直连会被阻断，
-// 少写一个的后果就是用户打开 Steam 商店/社区一直转圈，所以在这里钉死。
-func TestDefaultReverseProxyCoversBlockedHosts(t *testing.T) {
+// TestDefaultStaticHosts 锁住「干净 DoH 答案不可达时的兜底 IP」：
+// 这几个域名没有兜底就只有超时，系统代理路径也依赖它们。
+func TestDefaultStaticHosts(t *testing.T) {
 	cfg := Default()
-	for _, host := range []string{
-		"store.steampowered.com",  // 直连超时/断流，反代实测 200
-		"avatars.steamstatic.com", // 直连 RST，反代实测正常
-		"steamcommunity.com",      // 通配要覆盖裸域
-		"www.steamcommunity.com",
-		"help.steamcommunity.com",
-		"github.com",
-		"raw.githubusercontent.com",
-		"gist.github.com",
-	} {
-		if !matchAny(host, cfg.MITM.Domains) {
-			t.Errorf("默认反代名单缺少 %s", host)
-		}
-	}
-	// 反向断言：绝不能写成 *.steampowered.com。
-	// login.steampowered.com 剥离 SNI 后握手直接失败（实测 tls: internal error），
-	// 用通配会把本来正常的登录页一起弄坏。
-	if matchAny("login.steampowered.com", cfg.MITM.Domains) {
-		t.Error("默认反代名单不该把 login.steampowered.com 卷进来（别写 *.steampowered.com）")
-	}
-	if matchAny("checkout.steampowered.com", cfg.MITM.Domains) {
-		t.Error("checkout.steampowered.com 直连可用，不该反代")
-	}
-	// 兜底 IP：这几个域名的干净 DoH 答案不可达，没有兜底就只有超时。
 	for _, host := range []string{
 		"steamcommunity.com",
 		"www.steamcommunity.com",
@@ -304,12 +265,11 @@ func TestDefaultReverseProxyCoversBlockedHosts(t *testing.T) {
 	}
 }
 
-// TestCustomPatterns 自定义站点：规范化（小写 / 去空白 / 去重）与两套模式列表的合并。
+// TestCustomPatterns 自定义站点：规范化（小写 / 去空白 / 去重）。
 func TestCustomPatterns(t *testing.T) {
 	cfg := Default()
 	cfg.Custom = CustomConfig{
-		Domains:     []string{"  My.Site.com ", "my.site.com", "*.Example.COM", ""},
-		MITMDomains: []string{"blocked.site.com", "MY.SITE.COM"},
+		Domains: []string{"  My.Site.com ", "my.site.com", "*.Example.COM", ""},
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
@@ -317,13 +277,9 @@ func TestCustomPatterns(t *testing.T) {
 	if got := cfg.Custom.Domains; len(got) != 2 || got[0] != "my.site.com" || got[1] != "*.example.com" {
 		t.Fatalf("custom.domains 未规范化/去重: %v", got)
 	}
-	if got := cfg.Custom.MITMDomains; len(got) != 2 || got[0] != "blocked.site.com" || got[1] != "my.site.com" {
-		t.Fatalf("custom.mitm_domains 未规范化/去重: %v", got)
-	}
 
-	// 反代域名必须同时进白名单，否则流量根本不会经过本地代理。
 	proxy := cfg.ProxyPatterns()
-	wantProxy := map[string]bool{"my.site.com": true, "*.example.com": true, "blocked.site.com": true}
+	wantProxy := map[string]bool{"my.site.com": true, "*.example.com": true}
 	if len(proxy) != len(wantProxy) {
 		t.Fatalf("白名单应为 %d 项，实际 %v", len(wantProxy), proxy)
 	}
@@ -331,25 +287,6 @@ func TestCustomPatterns(t *testing.T) {
 		if !wantProxy[p] {
 			t.Errorf("白名单多了 %q", p)
 		}
-	}
-
-	// 反代名单 = 配置里的 mitm.domains + 自定义 mitm_domains（且不含纯白名单域名）。
-	mitm := cfg.MITMPatterns()
-	seen := make(map[string]bool, len(mitm))
-	for _, p := range mitm {
-		seen[p] = true
-	}
-	for _, want := range []string{"blocked.site.com", "my.site.com", "*.steamcommunity.com"} {
-		if !seen[want] {
-			t.Errorf("反代名单缺少 %s（实际 %v）", want, mitm)
-		}
-	}
-	if seen["*.example.com"] {
-		t.Error("只加进 custom.domains 的域名不该被反代")
-	}
-	if len(mitm) != len(cfg.MITM.Domains)+2 {
-		t.Errorf("反代名单应为内置 %d 项 + 自定义 2 项，实际 %d 项：%v",
-			len(cfg.MITM.Domains), len(mitm), mitm)
 	}
 }
 

@@ -3,8 +3,8 @@ package app
 // health.go 实现「假活自愈」与睡眠/换网恢复。
 //
 // 假活：进程还在、界面还显示「运行中」，但对外已经不能正常工作——本地监听没了、
-// hosts 托管块被别的程序改掉了、所有 DoH 端点都失败了。这里用一个小状态机定期检查，
-// 发现**可自愈**的问题就当场修：重绑本地监听、重写 hosts、重置 DNS 缓存并重新预热。
+// 所有 DoH 端点都失败了。这里用一个小状态机定期检查，发现**可自愈**的问题就当场修：
+// 重绑本地监听、重置 DNS 缓存并重新预热。
 //
 // 不抢不覆盖：系统代理如果被别的程序接管，只标记为降级并说明原因，绝不再改注册表。
 //
@@ -24,7 +24,6 @@ import (
 	"strings"
 	"time"
 
-	"tongtu/internal/hosts"
 	"tongtu/internal/resolver"
 	"tongtu/internal/sysproxy"
 )
@@ -58,18 +57,13 @@ const (
 	recoverDebounce = 3 * time.Second
 	// dnsResetCooldown 避免在长时间断网时每 15 秒就重置一次 DNS。
 	dnsResetCooldown = 2 * time.Minute
-	// healCooldown 限制同一种自愈动作的重试频率：:443 被别的程序长期占用、
-	// 或 hosts 因权限问题写不进去时，不该每 15 秒重试并刷一遍日志。
+	// healCooldown 限制同一种自愈动作的重试频率，避免每 15 秒重试并刷一遍日志。
 	healCooldown = time.Minute
-	// healthHostsTimeout 是健康自愈重写 hosts 的上限：比常规 2 分钟短，避免界面长时间等锁。
-	healthHostsTimeout = 20 * time.Second
 )
 
 // 健康问题类型。
 const (
 	issueProxy       = "proxy"
-	issueHosts       = "hosts"
-	issueLocalMITM   = "local_mitm"
 	issueDNS         = "dns"
 	issueSystemProxy = "system_proxy"
 )
@@ -201,26 +195,6 @@ func (a *App) healthIssuesLocked() []healthIssue {
 		out = append(out, healthIssue{kind: issueDNS, reason: "所有 DoH 端点均失败", healable: true})
 	}
 
-	if a.hostsOn {
-		if !hosts.Managed(hosts.DefaultPath()) {
-			// 网络全断时先不重写 hosts：解析会等满超时，把状态查询一起拖住。
-			// 刚失败过也先等一个冷却周期，避免非管理员场景每 15 秒重试一次。
-			out = append(out, healthIssue{
-				kind:     issueHosts,
-				reason:   "hosts 托管块已丢失",
-				healable: !dnsFailed && time.Since(a.lastHostsHeal) >= healCooldown,
-			})
-		}
-		if a.mitmCa != nil && (!a.px.Local443Up() || !addrAlive("127.0.0.1:443")) {
-			// :443 可能被别的程序长期占用：失败后同样等冷却，别每 15 秒刷一条警告。
-			out = append(out, healthIssue{
-				kind:     issueLocalMITM,
-				reason:   "本地 :443 监听已失效",
-				healable: time.Since(a.lastLocalRebind) >= healCooldown,
-			})
-		}
-	}
-
 	if a.sysOn && !a.sysProxyHeld() {
 		// 被别的程序接管：只降级，不抢回来（既有承诺）。
 		out = append(out, healthIssue{kind: issueSystemProxy, reason: "系统代理已被其他程序接管", healable: false})
@@ -233,14 +207,6 @@ func (a *App) healIssueLocked(iss healthIssue) error {
 	switch iss.kind {
 	case issueProxy:
 		return a.restartProxyLocked()
-	case issueHosts:
-		a.lastHostsHeal = time.Now()
-		if !a.applyHostsLockedTimeout("健康自愈：hosts 托管块丢失", healthHostsTimeout) {
-			return fmt.Errorf("hosts 更新失败（可能需要管理员权限）")
-		}
-		return nil
-	case issueLocalMITM:
-		return a.rebindLocalMITMLocked()
 	case issueDNS:
 		a.lastDNSReset = time.Now()
 		a.res.Reset()
@@ -300,29 +266,8 @@ func (a *App) restartProxyLocked() error {
 	return nil
 }
 
-// rebindLocalMITMLocked 重新绑定 hosts 直连用的本地 :443/:80（需持有 a.mu）。
-func (a *App) rebindLocalMITMLocked() error {
-	if a.mitmCa == nil || a.stopped {
-		// 已进入退出流程：不要在 Shutdown 关掉监听之后又把它打开。
-		return nil
-	}
-	// 记下本次尝试：失败时健康检查会等一个冷却周期再试（见 healCooldown）。
-	a.lastLocalRebind = time.Now()
-	a.px.CloseLocal()
-	a.mitmLocal443, a.mitmLocal80 = false, false
-	a.startLocalMITM()
-	if !a.mitmLocal443 {
-		return fmt.Errorf("本地 :443 重新绑定失败（端口可能被占用）")
-	}
-	if a.hostsOn && !a.applyHostsLockedTimeout("健康自愈：本地 :443 重新绑定", healthHostsTimeout) {
-		return fmt.Errorf("hosts 未更新")
-	}
-	a.log.Info("本地 :443 监听已重新绑定")
-	return nil
-}
-
-// RecoverNetwork 在睡眠恢复 / 换网后重建与网络绑定的状态：DNS 缓存、优选 IP、空闲连接、
-// hosts 解析与本地监听。串行执行并防抖，同一次事件重复触发只会真正跑一遍。
+// RecoverNetwork 在睡眠恢复 / 换网后重建与网络绑定的状态：DNS 缓存、优选 IP、空闲连接。
+// 串行执行并防抖，同一次事件重复触发只会真正跑一遍。
 //
 // 不抢系统代理：只在本实例仍持有时确保它指向当前端口；被别的程序接管则只记日志。
 func (a *App) RecoverNetwork(reason string) error {
@@ -345,9 +290,6 @@ func (a *App) RecoverNetwork(reason string) error {
 	a.health.RecoverCount++
 	a.health.LastRecover = now
 
-	hostsOn := a.hostsOn
-	needLocal := hostsOn && a.mitmCa != nil &&
-		(!a.px.Local443Up() || !addrAlive("127.0.0.1:443"))
 	warm := a.warm
 	loopCtx := a.loopCtx
 	warmHosts := a.warmHosts()
@@ -358,29 +300,6 @@ func (a *App) RecoverNetwork(reason string) error {
 	a.px.ResetNetwork()
 
 	var errs []error
-	if needLocal {
-		a.mu.Lock()
-		err := a.rebindLocalMITMLocked()
-		a.mu.Unlock()
-		if err != nil {
-			errs = append(errs, err)
-		}
-	}
-
-	if hostsOn {
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-		if _, err := a.hm.Apply(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("刷新 hosts: %w", err))
-		}
-		cancel()
-		// 恢复期间用户可能按了暂停：别把 hosts 又写回去。
-		a.mu.Lock()
-		stillOn := a.hostsOn
-		a.mu.Unlock()
-		if !stillOn {
-			_, _ = a.hm.Remove()
-		}
-	}
 
 	// 系统代理：仍由我们持有时确保指向当前端口；被别的程序接管则不抢。
 	a.mu.Lock()
@@ -406,7 +325,7 @@ func (a *App) RecoverNetwork(reason string) error {
 	if warm && loopCtx != nil {
 		go a.px.Warm(loopCtx, warmHosts, 4)
 	}
-	a.log.Info("网络恢复完成", "reason", reason, "hosts", hostsOn)
+	a.log.Info("网络恢复完成", "reason", reason)
 	a.CheckHealth()
 	return errors.Join(errs...)
 }

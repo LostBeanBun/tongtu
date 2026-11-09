@@ -8,7 +8,7 @@
 #   所以这里按用户的真实操作走一遍：
 #
 #     定位窗口 → 按控件 ID 取「暂停」按钮矩形 → 点它并在时长菜单里选「暂停 15 分钟」
-#     → 断言系统代理 / hosts / 断电自愈项都已撤回 → 再点「恢复」→ 断言全部回来
+#     → 断言系统代理 / 断电自愈项都已撤回 → 再点「恢复」→ 断言全部回来
 #     → 日志区右键「复制代理地址」→ 校验剪贴板
 #     → 改配置等热生效
 #     → 打开诊断面板诊断 github.com，等快照里出现结论后关闭
@@ -21,8 +21,7 @@
 #
 # 注意：
 #   - 脚本会移动鼠标、切换前台窗口，请在无人使用电脑时运行（交互式桌面必需）。
-#   - 会快照并在结束时还原 config.yaml、hosts 与系统代理，不会留下加速状态。
-#   - 非管理员运行时 hosts 本来就接管不了，相关断言会自动降级为「与启动前一致」。
+#   - 会快照并在结束时还原 config.yaml 与系统代理，不会留下加速状态。
 param(
     [string]$Exe = "",
     [string]$ShotDir = "",
@@ -48,9 +47,7 @@ $runOnceName = "TongtuRecover"
 $runOnceWant = '"{0}" __recover' -f $Exe
 $dataDir = Join-Path $env:APPDATA "tongtu"
 $cfgPath = Join-Path $dataDir "config.yaml"
-$hostsPath = Join-Path $env:WINDIR "System32\drivers\etc\hosts"
 $logFile = Join-Path $dataDir "tongtu.log"
-$beginMark = "# >>> tongtu managed block >>>"
 
 $listen = "127.0.0.1:19180"
 $control = "127.0.0.1:19181"
@@ -147,7 +144,6 @@ $script:failures = New-Object System.Collections.Generic.List[string]
 $script:notes = New-Object System.Collections.Generic.List[string]
 $script:proc = $null
 $script:cfgBackup = $null
-$script:hostsBackup = $null
 $script:cfgChanged = $false
 
 $handler = [System.Net.Http.SocketsHttpHandler]::new()
@@ -175,12 +171,6 @@ function Get-RunOnceValue {
     $k = Get-ItemProperty -Path $runOnceKey -Name $runOnceName -ErrorAction SilentlyContinue
     if ($null -eq $k) { return "" }
     return [string]$k.$runOnceName
-}
-
-function Test-HostsHasManagedBlock {
-    if (-not (Test-Path $hostsPath)) { return $false }
-    return [bool](Get-Content -Path $hostsPath -ErrorAction SilentlyContinue |
-        Where-Object { $_ -like "*$beginMark*" } | Select-Object -First 1)
 }
 
 # 往 config.yaml 的 custom 段里加一个域名（热加载检查用）。
@@ -323,7 +313,6 @@ if (Test-Path $cfgPath) {
 } else {
     throw "找不到配置文件: $cfgPath（先手动启动一次通途）"
 }
-$script:hostsBackup = if (Test-Path $hostsPath) { [IO.File]::ReadAllBytes($hostsPath) } else { $null }
 $snapEnable = Get-ProxyEnable
 $snapServer = [string](Get-ItemProperty $regPath).ProxyServer
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -337,7 +326,7 @@ $ready = Wait-Until {
     $script:st = Get-Status
     if ($null -eq $script:st) { return $false }
     $script:hwnd = [UiSmokeNative]::Main([uint32]$mainPid)
-    return ($script:hwnd -ne [IntPtr]::Zero) -and $script:st.running -and ($script:st.system_proxy -or $script:st.hosts)
+    return ($script:hwnd -ne [IntPtr]::Zero) -and $script:st.running -and $script:st.system_proxy
 } $WaitSec
 $hwnd = $script:hwnd
 $st = $script:st
@@ -346,14 +335,12 @@ if ($script:proc.HasExited) {
     exit 2
 }
 if (-not $ready) {
-    Write-Host "结论：无法测试。没等到「界面 + 接管」就绪（配置里两个接管都关着？）。" -ForegroundColor Yellow
+    Write-Host "结论：无法测试。没等到「界面 + 接管」就绪（配置里系统代理接管关着？）。" -ForegroundColor Yellow
     exit 2
 }
 $beforeProxy = [bool]$st.system_proxy
-$beforeHosts = [bool]$st.hosts
-$beforeHostsBlock = Test-HostsHasManagedBlock
-Write-Host ("      窗口已就绪：系统代理={0} hosts={1}（托管块 {2}）RunOnce={3}" -f `
-    $beforeProxy, $beforeHosts, $beforeHostsBlock, $(if (Get-RunOnceValue) { "已登记" } else { "无" })) -ForegroundColor Gray
+Write-Host ("      窗口已就绪：系统代理={0} RunOnce={1}" -f `
+    $beforeProxy, $(if (Get-RunOnceValue) { "已登记" } else { "无" })) -ForegroundColor Gray
 
 # —— 3. 摆窗口、抢前台、定位「暂停」按钮 ——
 # 固定窗口位置：截图与像素坐标才有可比性（60,60 时客户区原点在 (68,91)）。
@@ -391,18 +378,16 @@ $timedPause = ($stPaused.pause_until -gt 0) -and ($stPaused.pause_remain_sec -gt
 # 撤销接管后要等巡检（1.5s 一轮）把断电自愈项也撤掉——不能只睡固定时长，否则慢一点就误报。
 $disarmed = Wait-Until { (Get-RunOnceValue) -eq "" } 6
 # 再等窗口把这一帧画完（按钮标签翻成「恢复」）才截图：
-# 暂停要还原 hosts，过程中会有一两秒的「正在暂停加速…」过渡帧，截到它看不出暂停后的样子。
+# 暂停要撤回系统代理，过程中会有一两秒的「正在暂停加速…」过渡帧，截到它看不出暂停后的样子。
 $labelPaused = Wait-Until { [string](Get-Region "pause").label -eq "恢复" } 10
 Shot $hwnd (Join-Path $ShotDir "02-paused.png") | Out-Null
 $pauseLabelPaused = [string](Get-Region "pause").label
 $runOncePaused = Get-RunOnceValue
 $enablePaused = Get-ProxyEnable
-$hostsPaused = Test-HostsHasManagedBlock
 
 if (-not $paused) { $script:failures.Add("点了「暂停」但状态没有变成 paused") }
 if (-not $timedPause) { $script:failures.Add("选「暂停 15 分钟」后没有定时：pause_until=$($stPaused.pause_until) pause_remain_sec=$($stPaused.pause_remain_sec)") }
 if ($beforeProxy -and $enablePaused -ne 0) { $script:failures.Add("暂停后系统代理没有撤回：ProxyEnable=$enablePaused") }
-if ($beforeHosts -and $hostsPaused) { $script:failures.Add("暂停后 hosts 托管块没有移除") }
 if (-not $disarmed) { $script:failures.Add("暂停后断电自愈项没有撤掉：'$runOncePaused'") }
 if (-not $labelPaused) { $script:failures.Add("暂停后按钮标签没有变成「恢复」（当前 '$pauseLabelPaused'）") }
 
@@ -413,18 +398,16 @@ Start-Sleep -Milliseconds 300
 [UiSmokeNative]::Click(($org.X + $cx), ($org.Y + $cy))
 $resumed = Wait-Status { param($s) $s.paused -eq $false -and $s.running } 15
 $armed = Wait-Until { (Get-RunOnceValue) -eq $runOnceWant } 10
-# 等窗口把标签翻回「暂停」再截图（恢复要重新接管 hosts，同样有过渡帧）。
+# 等窗口把标签翻回「暂停」再截图（恢复要重新接管系统代理，同样有过渡帧）。
 $labelResumed = Wait-Until { [string](Get-Region "pause").label -eq "暂停" } 10
 Shot $hwnd (Join-Path $ShotDir "03-resumed.png") | Out-Null
 $st = Get-Status
 $pauseLabelResumed = [string](Get-Region "pause").label
 $enableResumed = Get-ProxyEnable
-$hostsResumed = Test-HostsHasManagedBlock
 
 if (-not $resumed) { $script:failures.Add("点了「恢复」但状态没有回到运行中") }
 if ($beforeProxy -and -not $st.system_proxy) { $script:failures.Add("恢复后系统代理没有重新接管") }
 if ($beforeProxy -and $enableResumed -ne 1) { $script:failures.Add("恢复后 ProxyEnable=$enableResumed，期望 1") }
-if ($beforeHosts -and -not $hostsResumed) { $script:failures.Add("恢复后 hosts 托管块没有回来") }
 if (-not $armed) { $script:failures.Add("恢复后断电自愈项没有重新登记：'$(Get-RunOnceValue)'") }
 if (-not $labelResumed) { $script:failures.Add("恢复后按钮标签没有变回「暂停」（当前 '$pauseLabelResumed'）") }
 
@@ -460,9 +443,6 @@ if ($SkipHotReload) {
     Start-Sleep -Milliseconds 600
     Shot $hwnd (Join-Path $ShotDir "05-hot-reload.png") | Out-Null
     if (-not $hot) { $script:failures.Add("改配置后没有出现「配置已热生效」日志") }
-    if ($beforeHosts -and -not (Test-HostsHasManagedBlock)) {
-        $script:failures.Add("热加载后 hosts 托管块消失了")
-    }
 }
 
 # —— 8. 诊断面板：打开 → 输入域名 → 诊断 → 等结论 → 关闭 ——
@@ -510,7 +490,7 @@ if ($null -eq $probeBtn) {
             $script:failures.Add("诊断没有在 50 秒内给出结论（probe_verdict='$probeVerdict'）")
         }
 
-        # 「复制结果」把六行结论与建议写进剪贴板：这是失败后把问题贴给别人排查的入口。
+        # 「复制结果」把 5 行结论与建议写进剪贴板：这是失败后把问题贴给别人排查的入口。
         $copyBtn = Get-Region "probecopy"
         if ($null -eq $copyBtn) {
             $script:failures.Add("诊断面板里没有「复制结果」按钮（id=probecopy）")
@@ -556,15 +536,15 @@ Write-Host ""
 $rows = @(
     @{ Name = "暂停生效";       Ok = $paused;                 Detail = "paused=$($null -ne $paused -and $paused)" },
     @{ Name = "暂停定时生效";   Ok = $timedPause;             Detail = "剩余 $($stPaused.pause_remain_sec) 秒" },
-    @{ Name = "暂停撤销接管";   Ok = ((-not $beforeProxy -or $enablePaused -eq 0) -and (-not $beforeHosts -or -not $hostsPaused)); Detail = "ProxyEnable=$enablePaused hosts 托管块=$hostsPaused" },
+    @{ Name = "暂停撤销接管";   Ok = ((-not $beforeProxy -or $enablePaused -eq 0)); Detail = "ProxyEnable=$enablePaused" },
     @{ Name = "暂停撤销自愈项"; Ok = ($runOncePaused -eq "");  Detail = $(if ($runOncePaused) { $runOncePaused } else { "已撤掉" }) },
-    @{ Name = "恢复生效";       Ok = $resumed;                Detail = "system_proxy=$($st.system_proxy) hosts=$($st.hosts)" },
+    @{ Name = "恢复生效";       Ok = $resumed;                Detail = "system_proxy=$($st.system_proxy)" },
     @{ Name = "恢复重新登记";   Ok = $armed;                  Detail = $(if ($armed) { "已登记" } else { "未登记" }) },
     @{ Name = "按钮标签随状态变"; Ok = (($pauseLabelPaused -eq "恢复") -and ($pauseLabelResumed -eq "暂停")); Detail = "暂停后='$pauseLabelPaused' 恢复后='$pauseLabelResumed'" },
     @{ Name = "复制代理地址";   Ok = ($clip -eq $proxyURL);    Detail = "'$clip'" },
     @{ Name = "诊断面板开关";   Ok = ($probeOpened -and $probeClosed); Detail = "打开=$probeOpened 关闭=$probeClosed" },
     @{ Name = "诊断给出结论";   Ok = $probeDone;              Detail = $(if ($probeVerdict) { $probeVerdict } else { "无结论" }) },
-    @{ Name = "诊断结果可复制"; Ok = $probeCopied;            Detail = $(if ($probeCopied) { "剪贴板已收到六行结果与建议" } else { "剪贴板未更新" }) },
+    @{ Name = "诊断结果可复制"; Ok = $probeCopied;            Detail = $(if ($probeCopied) { "剪贴板已收到诊断结论与建议" } else { "剪贴板未更新" }) },
     @{ Name = "× 只隐藏窗口";   Ok = ($hidden -and -not $script:proc.HasExited); Detail = "hidden=$hidden 进程存活=$(-not $script:proc.HasExited)" }
 )
 foreach ($r in $rows) {
@@ -574,7 +554,7 @@ foreach ($r in $rows) {
 }
 Write-Host ""
 
-# —— 收尾：还原配置 / hosts / 系统代理，停掉实例 ——
+# —— 收尾：还原配置 / 系统代理，停掉实例 ——
 try {
     if ($script:cfgChanged -and -not $KeepConfig) {
         [IO.File]::WriteAllBytes($cfgPath, $script:cfgBackup)
@@ -587,14 +567,6 @@ try {
     if (-not (Wait-Until { (Get-TongtuProcesses).Count -eq 0 } 15)) {
         Get-TongtuProcesses | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
         $script:notes.Add("实例没能在 15 秒内正常退出，已强制结束")
-    }
-    if ($null -ne $script:hostsBackup -and (Test-HostsHasManagedBlock)) {
-        try {
-            [IO.File]::WriteAllBytes($hostsPath, $script:hostsBackup)
-            Write-Host "已还原 hosts。" -ForegroundColor Gray
-        } catch {
-            $script:notes.Add("hosts 还原失败（需要管理员权限）：$($_.Exception.Message)")
-        }
     }
     $curEnable = Get-ProxyEnable
     $curServer = [string](Get-ItemProperty $regPath).ProxyServer
@@ -610,8 +582,8 @@ try {
         $script:notes.Add("收尾时发现 RunOnce 项还在，已手动清除")
     }
 } finally {
-    Write-Host ("收尾: ProxyEnable={0} hosts 托管块={1} 进程={2} RunOnce='{3}'" -f `
-        (Get-ProxyEnable), (Test-HostsHasManagedBlock), (Get-TongtuProcesses).Count, (Get-RunOnceValue)) -ForegroundColor Gray
+    Write-Host ("收尾: ProxyEnable={0} 进程={1} RunOnce='{2}'" -f `
+        (Get-ProxyEnable), (Get-TongtuProcesses).Count, (Get-RunOnceValue)) -ForegroundColor Gray
 }
 
 foreach ($n in $script:notes) { Write-Host "备注：$n" -ForegroundColor DarkYellow }
