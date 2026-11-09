@@ -135,8 +135,8 @@ func Summary(rows []Row) string {
 // Prober 是一次体检所需的全部输入。
 type Prober struct {
 	Res     *resolver.Resolver
-	Listen  string // 本地代理地址（经代理测试用）
-	ProxyUp bool   // 本地代理是否在运行
+	Listen  string        // 本地代理地址（经代理测试用）
+	ProxyUp bool          // 本地代理是否在运行
 	Timeout time.Duration // 单个域名的总超时（<=0 时用 20 秒）
 }
 

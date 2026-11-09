@@ -60,19 +60,19 @@ func Exit() {
 
 // menu 汇总全部菜单项，便于在单一 goroutine 中统一读写。
 type menu struct {
-	pause   *systray.MenuItem
-	pauseAt *systray.MenuItem
-	timed   []pausePreset
-	sys     *systray.MenuItem
-	steam   *systray.MenuItem
-	github  *systray.MenuItem
-	auto    *systray.MenuItem
-	window  *systray.MenuItem
+	pause    *systray.MenuItem
+	pauseAt  *systray.MenuItem
+	timed    []pausePreset
+	sys      *systray.MenuItem
+	steam    *systray.MenuItem
+	github   *systray.MenuItem
+	auto     *systray.MenuItem
+	window   *systray.MenuItem
 	copyAddr *systray.MenuItem
-	openCfg *systray.MenuItem
-	openDir *systray.MenuItem
+	openCfg  *systray.MenuItem
+	openDir  *systray.MenuItem
 	checkUpd *systray.MenuItem
-	quit    *systray.MenuItem
+	quit     *systray.MenuItem
 }
 
 // pausePreset 是「暂停定时」子菜单里的一项：菜单项 + 对应时长。
