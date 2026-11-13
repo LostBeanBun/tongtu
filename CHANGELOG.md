@@ -140,7 +140,19 @@
 
 ### 验证
 
-- （待 0.12.0 发布前补充：全门槛 + 端到端验收结果）
+- 全门槛绿：`gofmt -l .` 空、`go vet ./...`=0、`staticcheck ./...`=0（v0.8.2，GOOS=windows）、
+  `go test ./... -count=1` 全部通过。
+- `tongtu test` 15/15 可用（代理运行时；直连 9/15 属预期，SNI 阻断域名靠反代救回）。
+- `tools/accel-matrix.ps1`：代理回归 0、通途救回 2（steamcommunity / raw.githubusercontent）。
+- `tools/speed-test.ps1`：经代理 5/5 全通、系统代理通道 5/5 全通。
+- 启停还原断言：`stop` 后进程 0、`ProxyEnable=0`、无 `guard.json`、无 RunOnce 残留。
+- `tools/crash-test.ps1` 通过（强杀后监护进程毫秒级还原）；
+  `tools/recover-test.ps1` 通过（模拟断电 `__recover` 还原且幂等）；
+  `tools/ui-smoke.ps1` 12/12 通过（两项胶囊、暂停/恢复、热加载、诊断、× 只隐藏）。
+- 配置迁移实测：本机 `version: 4` + `mitm.enabled: true` 升到 `version: 5`，
+  `hosts` 键丢弃、`mitm` 保留，备份 `config.yaml.v4.bak` 就位。
+- `ui-smoke.ps1` 的剪贴板断言由固定 sleep 改为轮询：`clipboard.Copy` 要起一次 PowerShell
+  写剪贴板（约 0.3 秒，冷启动更久），固定 500ms 在冷启动时会读到旧值。
 
 ## [0.11.0] - 2026-11-02
 
