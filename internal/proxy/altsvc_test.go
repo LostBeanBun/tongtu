@@ -41,7 +41,7 @@ func TestPlainHTTPStripsAltSvc(t *testing.T) {
 }
 
 // TestMITMStripsAltSvc 反代（本地解密）路径同样剥离 Alt-Svc：
-// hosts 模式下域名指向 127.0.0.1，留着它会让浏览器去试注定失败的 QUIC。
+// 本地只监听 TCP，留着它会让浏览器去试注定失败的 QUIC。
 func TestMITMStripsAltSvc(t *testing.T) {
 	up := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Alt-Svc", `h3=":443"; ma=86400`)

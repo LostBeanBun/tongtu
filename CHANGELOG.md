@@ -114,6 +114,34 @@
   本机验收已通过 Defender 排除项绕开；面向用户的发布仍需提交误报并向用户说明处理方式，
   详细步骤见 README「故障排查」。
 
+## [0.12.0] - 2026-11-13
+
+### 变更
+
+- **移除 hosts 模式与提权全链路（A 组减负）**：通途收敛为「系统代理 + 可选无 SNI 反代」的
+  最小侵入形态，**全链路不再需要管理员权限**。删除内容：
+  - 写系统 `hosts` 托管块的整条链路（`internal/hosts` 包、hosts 刷新定时器、
+    `hosts_refresh_minutes` 配置、托管块原子写与还原）；
+  - 提权相关的命令与自启方式：`tongtu start --no-hosts`、`autostart on --elevated`、
+    「最高权限」计划任务（schtasks）创建/删除/查询、`--elevated` 重启提示与
+    窗口「以管理员重启」待办；
+  - 窗口 / 托盘 / 启动摘要 / 状态 JSON 中的 Hosts 开关与 `hosts` 字段：
+    状态条胶囊由三项减为两项（系统代理、无SNI反代），控制端口 `/mode` 只收 `sysproxy`。
+- **配置升 `version: 5`**：migrate 只丢弃 `hosts` / `hosts_refresh_minutes` 两个键，
+  其余设置（含 `mitm`）原样保留；升级前照旧备份为 `config.yaml.vN.bak`。
+- **不走系统代理的程序（如 Steam 客户端）改为显式接入**：在程序自身设置里把代理指向
+  `127.0.0.1:19180` 即可，不再承诺 hosts 覆盖，也不再要求管理员。
+- **保留不变**：系统代理接管与还原、无 SNI 反代（opt-in，根证书装当前用户存储）、
+  监护进程 + RunOnce 断电自愈、DoH 干净解析与优选、健康自愈、HKCU Run 普通自启、
+  窗口 / 托盘 / 自检 / 诊断 / 待办、检查更新。
+- 验收脚本（crash / recover / soak / ui-smoke / uninstall / add-defender-exclusion）与
+  README、USAGE、THIRD-PARTY 文档同步对齐；`uninstall.ps1` **保留** hosts 托管块清理，
+  但明确标注为「0.11 及更早版本残留兜底清理（需管理员）」。
+
+### 验证
+
+- （待 0.12.0 发布前补充：全门槛 + 端到端验收结果）
+
 ## [0.11.0] - 2026-11-02
 
 > 主题：**让诊断可行动**。0.10.0 的 `诊断` 会把问题说清楚，这一版把「说清楚」接到「解决它」：

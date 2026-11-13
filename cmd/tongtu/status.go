@@ -64,12 +64,9 @@ func printStatus(st *app.Status) {
 	if st.ProxyNote != "" {
 		sysTag += "（" + st.ProxyNote + "）"
 	}
-	fmt.Printf("系统代理: %s    Hosts: %s\n", sysTag, onOff(st.Hosts))
+	fmt.Printf("系统代理: %s\n", sysTag)
 	mitmTag := onOff(st.MITM)
-	switch {
-	case st.MITM && !st.MITMLocal:
-		mitmTag += "（仅系统代理路径）"
-	case !st.MITM && st.MITMNote != "":
+	if !st.MITM && st.MITMNote != "" {
 		mitmTag += "（" + st.MITMNote + "）"
 	}
 	fmt.Printf("无SNI反代: %s\n", mitmTag)

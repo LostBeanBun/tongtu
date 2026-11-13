@@ -88,7 +88,7 @@ func TestLogAppendLeavesNoStaleInk(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	lw.clearLog()
 	t.Cleanup(func() { lw.clearLog() }) // 别把长日志留给其它测试（滚动条会改变客户区宽度）
 	edit := lw.editHandle()

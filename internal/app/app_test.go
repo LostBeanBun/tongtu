@@ -12,7 +12,7 @@ import (
 	"tongtu/internal/rules"
 )
 
-// TestAppLifecycle 验证不接管系统代理/hosts 时的生命周期：
+// TestAppLifecycle 验证不接管系统代理时的生命周期：
 // 启动可监听、状态正确、Shutdown 幂等且能真正停止。
 func TestAppLifecycle(t *testing.T) {
 	rs, err := rules.Load([]string{"steam", "github"})
@@ -38,8 +38,8 @@ func TestAppLifecycle(t *testing.T) {
 	if st.Listen == "" || st.Listen == cfg.Listen {
 		t.Fatalf("监听地址应已更新为实际端口: %q", st.Listen)
 	}
-	if st.SystemProxy || st.Hosts {
-		t.Fatalf("未请求接管时不应开启: sys=%v hosts=%v", st.SystemProxy, st.Hosts)
+	if st.SystemProxy {
+		t.Fatalf("未请求接管时不应开启: sys=%v", st.SystemProxy)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -77,7 +77,7 @@ func TestStartTwiceFails(t *testing.T) {
 }
 
 // TestRuntimeTogglesPersist 覆盖托盘菜单用到的运行时开关：
-// 切换服务组会更新状态并持久化；不接管系统代理/hosts 时各项开关也能安全写入配置。
+// 切换服务组会更新状态并持久化；不接管系统代理时各项开关也能安全写入配置。
 func TestRuntimeTogglesPersist(t *testing.T) {
 	rs, err := rules.Load([]string{"steam", "github"})
 	if err != nil {
@@ -85,7 +85,7 @@ func TestRuntimeTogglesPersist(t *testing.T) {
 	}
 	cfg := config.Default()
 	cfg.Listen = "127.0.0.1:0"
-	cfg.SystemProxy, cfg.Hosts, cfg.MITM.Enabled = false, false, false
+	cfg.SystemProxy, cfg.MITM.Enabled = false, false
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -116,7 +116,7 @@ func TestRuntimeTogglesPersist(t *testing.T) {
 	if err := a.SetMITM(false); err != nil { // 未启用时是安全的空操作
 		t.Fatalf("SetMITM(false): %v", err)
 	}
-	if err := a.SetMode(false, false); err != nil {
+	if err := a.SetMode(false); err != nil {
 		t.Fatalf("SetMode: %v", err)
 	}
 
@@ -127,13 +127,12 @@ func TestRuntimeTogglesPersist(t *testing.T) {
 	if len(saved.Services) != 1 || saved.Services[0] != "steam" {
 		t.Fatalf("服务组未持久化: %v", saved.Services)
 	}
-	if saved.SystemProxy || saved.Hosts || saved.MITM.Enabled {
-		t.Fatalf("开关未持久化: sys=%v hosts=%v mitm=%v",
-			saved.SystemProxy, saved.Hosts, saved.MITM.Enabled)
+	if saved.SystemProxy || saved.MITM.Enabled {
+		t.Fatalf("开关未持久化: sys=%v mitm=%v", saved.SystemProxy, saved.MITM.Enabled)
 	}
 }
 
-// TestOneShotFlagsNotPersisted 一次性启动标志（--no-sysproxy / --no-hosts）不应被
+// TestOneShotFlagsNotPersisted 一次性启动标志（--no-sysproxy）不应被
 // 其它托盘开关触发的持久化误写进配置。
 func TestOneShotFlagsNotPersisted(t *testing.T) {
 	rs, err := rules.Load([]string{"steam"})
@@ -141,16 +140,16 @@ func TestOneShotFlagsNotPersisted(t *testing.T) {
 		t.Fatalf("加载规则: %v", err)
 	}
 	cfg := config.Default()
-	// 配置里两项都开着；启动时用 --no-sysproxy / --no-hosts 临时关掉，不能写回配置。
-	cfg.SystemProxy, cfg.Hosts = true, true
+	// 配置里开着；启动时用 --no-sysproxy 临时关掉，不能写回配置。
+	cfg.SystemProxy = true
 	cfg.Listen = "127.0.0.1:0"
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	// 模拟 tongtu start --no-sysproxy --no-hosts
+	// 模拟 tongtu start --no-sysproxy
 	a := New(Options{
 		Config: cfg, Rules: rs, ConfigPath: cfgPath, Log: quiet,
-		SysProxy: false, HostsMode: false,
+		SysProxy: false,
 	})
 	if err := a.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -168,8 +167,8 @@ func TestOneShotFlagsNotPersisted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("重新加载配置: %v", err)
 	}
-	if !saved.SystemProxy || !saved.Hosts {
-		t.Fatalf("一次性标志被误写入配置: sys=%v hosts=%v", saved.SystemProxy, saved.Hosts)
+	if !saved.SystemProxy {
+		t.Fatalf("一次性标志被误写入配置: sys=%v", saved.SystemProxy)
 	}
 }
 
@@ -207,7 +206,7 @@ func TestReloadRules(t *testing.T) {
 	}
 	cfg := config.Default()
 	cfg.Listen = "127.0.0.1:0"
-	cfg.SystemProxy, cfg.Hosts, cfg.MITM.Enabled = false, false, false
+	cfg.SystemProxy, cfg.MITM.Enabled = false, false
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	a := New(Options{Config: cfg, Rules: rs, ConfigPath: cfgPath, Log: quiet})
@@ -221,7 +220,7 @@ func TestReloadRules(t *testing.T) {
 	}()
 
 	next := config.Default()
-	next.SystemProxy, next.Hosts, next.MITM.Enabled = false, false, false
+	next.SystemProxy, next.MITM.Enabled = false, false
 	next.Services = []string{"github"}
 	next.Custom = config.CustomConfig{
 		Domains:     []string{"my.site.com"},
@@ -277,12 +276,12 @@ func TestPauseStateBookkeeping(t *testing.T) {
 	if !(&pauseState{sys: true}).active() {
 		t.Fatal("有一项被暂停就算暂停中")
 	}
-	a := &App{paused: &pauseState{sys: true, hosts: true, mitm: true}}
-	a.unpauseLocked(true, false, false)
+	a := &App{paused: &pauseState{sys: true, mitm: true}}
+	a.unpauseLocked(true, false)
 	if !a.paused.active() || a.paused.sys {
 		t.Fatalf("应只清掉系统代理这一项: %+v", a.paused)
 	}
-	a.unpauseLocked(false, true, true)
+	a.unpauseLocked(false, true)
 	if a.paused != nil {
 		t.Fatalf("全部恢复后应清空暂停记录: %+v", a.paused)
 	}
@@ -296,7 +295,7 @@ func TestStopAllWhenNothingOn(t *testing.T) {
 	}
 	cfg := config.Default()
 	cfg.Listen = "127.0.0.1:0"
-	cfg.SystemProxy, cfg.Hosts, cfg.MITM.Enabled = false, false, false
+	cfg.SystemProxy, cfg.MITM.Enabled = false, false
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	a := New(Options{Config: cfg, Rules: rs, Log: quiet})
 	if err := a.Start(); err != nil {

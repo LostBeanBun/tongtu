@@ -30,12 +30,11 @@ func hasID(list []uiTodoItem, id string) bool {
 func TestTodosRuntimeFix(t *testing.T) {
 	cfg := config.Default()
 	cfg.SystemProxy = true
-	cfg.Hosts = true
 	cfg.MITM.Enabled = true
-	st := app.Status{Running: true, SystemProxy: false, Hosts: false, MITM: false}
+	st := app.Status{Running: true, SystemProxy: false, MITM: false}
 
-	got := compileTodos(st, cfg, false, true, func() bool { return true })
-	for _, want := range []string{uiIDTodoTake, uiIDTodoElev, uiIDTodoCert} {
+	got := compileTodos(st, cfg, true, func() bool { return true })
+	for _, want := range []string{uiIDTodoTake, uiIDTodoCert} {
 		if !hasID(got, want) {
 			t.Errorf("应包含待办 %q，实际 %v", want, statuses(got))
 		}
@@ -53,12 +52,11 @@ func TestTodosRuntimeFix(t *testing.T) {
 func TestTodosPausedIsSilent(t *testing.T) {
 	cfg := config.Default()
 	cfg.SystemProxy = true
-	cfg.Hosts = true
 	cfg.MITM.Enabled = true
 	st := app.Status{Running: true, Paused: true}
 
 	certCalled := false
-	got := compileTodos(st, cfg, false, true, func() bool {
+	got := compileTodos(st, cfg, true, func() bool {
 		certCalled = true
 		return true
 	})
@@ -69,7 +67,7 @@ func TestTodosPausedIsSilent(t *testing.T) {
 		t.Error("暂停中连证书探测都不该做（没必要起 certutil）")
 	}
 
-	if got := compileTodos(st, cfg, false, false, nil); len(got) != 1 || got[0].ID != uiIDTodoAuto {
+	if got := compileTodos(st, cfg, false, nil); len(got) != 1 || got[0].ID != uiIDTodoAuto {
 		t.Fatalf("与暂停无关的自启待办应保留，实际 %v", statuses(got))
 	}
 }
@@ -79,11 +77,10 @@ func TestTodosPausedIsSilent(t *testing.T) {
 func TestTodosOnlyWhenRunning(t *testing.T) {
 	cfg := config.Default()
 	cfg.SystemProxy = true
-	cfg.Hosts = true
 	st := app.Status{Running: false}
 
-	got := compileTodos(st, cfg, false, true, func() bool { return true })
-	if hasID(got, uiIDTodoTake) || hasID(got, uiIDTodoElev) {
+	got := compileTodos(st, cfg, true, func() bool { return true })
+	if hasID(got, uiIDTodoTake) {
 		t.Fatalf("未运行时不该有运行期待办，实际 %v", statuses(got))
 	}
 }

@@ -28,7 +28,7 @@ func buildDiagnostics(a *app.App, cfg *config.Config) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "通途 Tongtu %s 诊断信息\n", Version)
 	fmt.Fprintf(&b, "生成时间: %s\n", time.Now().Format("2006-01-02 15:04:05"))
-	fmt.Fprintf(&b, "系统: %s/%s · 管理员=%v\n", runtime.GOOS, runtime.GOARCH, autostart.IsAdmin())
+	fmt.Fprintf(&b, "系统: %s/%s\n", runtime.GOOS, runtime.GOARCH)
 	fmt.Fprintf(&b, "断电自愈: %s\n", runOnceWord())
 	fmt.Fprintf(&b, "配置: %s\n", a.ConfigPath())
 	if path := cfg.LogFilePath(); path != "" {
@@ -36,8 +36,8 @@ func buildDiagnostics(a *app.App, cfg *config.Config) string {
 	} else {
 		b.WriteString("日志: 未启用文件日志（log.file: off）\n")
 	}
-	fmt.Fprintf(&b, "监听: %s（系统代理=%v · hosts=%v · 反代=%v）\n",
-		st.Listen, st.SystemProxy, st.Hosts, st.MITM)
+	fmt.Fprintf(&b, "监听: %s（系统代理=%v · 反代=%v）\n",
+		st.Listen, st.SystemProxy, st.MITM)
 	fmt.Fprintf(&b, "健康度: %s%s · 自愈 %d 次 · 网络恢复 %d 次\n",
 		healthWord(st.Health), healthReasonWord(st.Health), st.Health.HealCount, st.Health.RecoverCount)
 	if st.Running {

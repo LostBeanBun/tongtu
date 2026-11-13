@@ -58,7 +58,7 @@ func TestNoArgsDefaultsToStart(t *testing.T) {
 // TestStartFlags 启动开关挂在根命令的持久标志上：tongtu --hidden 与
 // tongtu start --hidden 都要能生效（开机自启用的就是根命令这条路径）。
 func TestStartFlags(t *testing.T) {
-	for _, name := range []string{"no-tray", "no-sysproxy", "no-hosts", "no-mitm", "hidden"} {
+	for _, name := range []string{"no-tray", "no-sysproxy", "no-mitm", "hidden"} {
 		f := rootCmd.PersistentFlags().Lookup(name)
 		if f == nil {
 			t.Errorf("缺少启动开关 --%s", name)

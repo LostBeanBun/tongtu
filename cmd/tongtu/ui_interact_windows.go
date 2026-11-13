@@ -603,9 +603,8 @@ func (w *logWindow) clearLog() {
 
 // uiModeNames 是开关项在反馈文案里的名字。
 var uiModeNames = map[string]string{
-	uiIDSys:   "系统代理",
-	uiIDHosts: "Hosts",
-	uiIDMITM:  "无SNI反代",
+	uiIDSys:  "系统代理",
+	uiIDMITM: "无SNI反代",
 }
 
 // invokeAction 执行一次界面动作：成功的给轻量反馈，失败的写日志 + 提示原因。
@@ -622,7 +621,7 @@ func (w *logWindow) invokeAction(hwnd windows.Handle, id string) {
 
 	act := currentWindowActions()
 	switch id {
-	case uiIDSys, uiIDHosts, uiIDMITM:
+	case uiIDSys, uiIDMITM:
 		if act.ToggleMode == nil {
 			w.toast("当前实例没有可用的开关实现", styleWarn)
 			return
@@ -893,7 +892,7 @@ func (w *logWindow) pauseFor(act windowActions, id string) {
 		if choice.D > 0 {
 			w.toast("已暂停，将在 "+humanPause(choice.D)+"后自动恢复", styleOK)
 		} else {
-			w.toast("已暂停加速：系统代理与 hosts 已还原，点「恢复」可再打开", styleOK)
+			w.toast("已暂停加速：系统代理已还原，点「恢复」可再打开", styleOK)
 		}
 		if act.Refresh != nil {
 			act.Refresh()

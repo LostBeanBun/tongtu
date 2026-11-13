@@ -28,7 +28,7 @@ func newHealthTestApp(t *testing.T, cfg *config.Config) *App {
 		cfg = config.Default()
 	}
 	cfg.Listen = "127.0.0.1:0"
-	cfg.SystemProxy, cfg.Hosts, cfg.MITM.Enabled = false, false, false
+	cfg.SystemProxy, cfg.MITM.Enabled = false, false
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	a := New(Options{Config: cfg, Rules: rs, Log: quiet})
 	t.Cleanup(func() {
@@ -235,7 +235,7 @@ func TestFingerprintSnapshots(t *testing.T) {
 }
 
 // TestShouldRecover 指纹变化只在「当前有网且与基线不同」时触发恢复：
-// 断网本身不恢复（否则会在没网时白跑一遍 hosts/DNS），网络回来时再恢复。
+// 断网本身不恢复（否则会在没网时白跑一遍 DNS 探测），网络回来时再恢复。
 func TestShouldRecover(t *testing.T) {
 	cases := []struct {
 		name       string

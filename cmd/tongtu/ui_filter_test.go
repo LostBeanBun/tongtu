@@ -75,7 +75,7 @@ func TestFilterLinesOnlyWarn(t *testing.T) {
 		{Spans: []logSpan{{Style: styleMuted, Text: "· "}, {Style: styleText, Text: "listen=127.0.0.1:19180"}}},
 		{Spans: []logSpan{{Style: styleWarn, Text: "警告"}, {Style: styleText, Text: " 写入 hosts 需要管理员权限"}}},
 		{Spans: []logSpan{{Style: styleMuted, Text: logIndent}, {Style: styleDanger, Text: "err="}, {Style: styleText, Text: "Access is denied."}}},
-		{Spans: []logSpan{{Style: styleDanger, Text: "错误"}, {Style: styleText, Text: " 提权后仍未成功"}}},
+		{Spans: []logSpan{{Style: styleDanger, Text: "错误"}, {Style: styleText, Text: " 重试后仍未成功"}}},
 	}
 	got := filterLines(lines, "", true)
 	if len(got) != 3 {

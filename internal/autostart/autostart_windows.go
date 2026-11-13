@@ -1,8 +1,7 @@
 //go:build windows
 
-// Package autostart 管理 Windows 开机自启，提供两种机制：
-//   - HKCU Run 键：无需管理员，登录时以当前用户权限启动（仅系统代理模式可用）
-//   - 计划任务：需管理员，登录时以最高权限启动（hosts 模式亦可用，且无 UAC 弹窗）
+// Package autostart 管理 Windows 开机自启，只提供一种机制：
+//   - HKCU Run 键：无需管理员，登录时以当前用户权限启动
 //
 // 另外提供「断电自愈」用的 HKCU RunOnce 登记（见 RecoverCommand）：它不是开机自启，
 // 只在通途接管期间存在，用来兜底掉电 / 蓝屏后遗留的错误网络配置。
@@ -10,12 +9,7 @@ package autostart
 
 import (
 	"errors"
-	"fmt"
-	"os/exec"
-	"strings"
-	"syscall"
 
-	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -24,20 +18,13 @@ const (
 	runOnceKeyPath = `Software\Microsoft\Windows\CurrentVersion\RunOnce`
 	runValue       = "Tongtu"
 	runOnceValue   = "TongtuRecover"
-	taskName       = "Tongtu"
 	// recoverSubcommand 是「断电自愈」用的隐藏子命令，由 RunOnce 在登录时调用一次。
 	recoverSubcommand = "__recover"
 )
 
 // Info 描述当前的开机自启配置。
 type Info struct {
-	RunCmd  string `json:"run_cmd"`  // HKCU Run 中的命令行（空=未设置）
-	TaskCmd string `json:"task_cmd"` // 计划任务命令行（空=不存在）
-}
-
-// IsAdmin 报告当前进程是否具备管理员权限。
-func IsAdmin() bool {
-	return windows.GetCurrentProcessToken().IsElevated()
+	RunCmd string `json:"run_cmd"` // HKCU Run 中的命令行（空=未设置）
 }
 
 // CommandLine 生成自启命令行："<exe>" start --hidden。
@@ -62,9 +49,9 @@ func RunCommand() (string, error) {
 
 // RecoverCommand 生成「断电自愈」命令行："<exe>" __recover。
 //
-// 通途接管系统代理 / hosts 期间会在 HKCU\...\RunOnce 里登记这一条：
+// 通途接管系统代理期间会在 HKCU\...\RunOnce 里登记这一条：
 // 掉电 / 蓝屏 / 强杀这类没机会执行任何代码的退出之后，下次登录由 Windows
-// 执行一次，把遗留的系统代理与 hosts 还原掉。优雅退出、暂停或手动关掉接管后
+// 执行一次，把遗留的系统代理还原掉。优雅退出、暂停或手动关掉接管后
 // 会撤掉它（见 cmd/tongtu/recover.go），所以正常情况下系统里不会留下这个条目。
 func RecoverCommand(exe string) string {
 	return `"` + exe + `" ` + recoverSubcommand
@@ -137,39 +124,6 @@ func deleteRunValue(keyPath, name string) error {
 	return nil
 }
 
-// EnableTask 创建登录自启的计划任务（最高权限；需管理员）。
-func EnableTask(cmdLine string) error {
-	out, err := run("schtasks", "/Create", "/TN", taskName, "/SC", "ONLOGON",
-		"/TR", cmdLine, "/RL", "HIGHEST", "/F")
-	if err != nil {
-		return fmt.Errorf("创建计划任务失败（需以管理员身份运行）: %v %s", err, strings.TrimSpace(out))
-	}
-	return nil
-}
-
-// DisableTask 删除计划任务（不存在时无操作）。
-func DisableTask() error {
-	if !taskExists() {
-		return nil
-	}
-	out, err := run("schtasks", "/Delete", "/TN", taskName, "/F")
-	if err != nil {
-		return fmt.Errorf("删除计划任务失败: %v %s", err, strings.TrimSpace(out))
-	}
-	return nil
-}
-
-// TaskCommand 读取计划任务命令行（不存在返回空串）。使用 XML 输出，避免受系统语言影响。
-func TaskCommand() string {
-	out, err := run("schtasks", "/Query", "/TN", taskName, "/XML")
-	if err != nil {
-		return ""
-	}
-	cmd := strings.TrimSpace(xmlTag(out, "Command"))
-	args := strings.TrimSpace(xmlTag(out, "Arguments"))
-	return strings.TrimSpace(cmd + " " + args)
-}
-
 // Query 读取当前开机自启配置。
 func Query() (Info, error) {
 	var info Info
@@ -178,34 +132,5 @@ func Query() (Info, error) {
 		return info, err
 	}
 	info.RunCmd = rc
-	info.TaskCmd = TaskCommand()
 	return info, nil
-}
-
-func taskExists() bool {
-	_, err := run("schtasks", "/Query", "/TN", taskName, "/XML")
-	return err == nil
-}
-
-// run 执行外部命令并返回合并输出（隐藏窗口，避免闪烁）。
-func run(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	out, err := cmd.CombinedOutput()
-	return string(out), err
-}
-
-// xmlTag 提取 XML 中首个 <tag>…</tag> 的内容。
-func xmlTag(s, tag string) string {
-	open := "<" + tag + ">"
-	close := "</" + tag + ">"
-	i := strings.Index(s, open)
-	if i < 0 {
-		return ""
-	}
-	j := strings.Index(s[i:], close)
-	if j < 0 {
-		return ""
-	}
-	return s[i+len(open) : i+j]
 }

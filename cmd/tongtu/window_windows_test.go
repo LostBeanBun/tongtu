@@ -130,8 +130,7 @@ func TestStatusBarPaints(t *testing.T) {
 		Level: stateOK,
 		Items: []windowStatusItem{
 			{Label: "系统代理", On: true, Action: uiIDSys},
-			{Label: "Hosts", On: false, Action: uiIDHosts},
-			{Label: "无SNI反代", On: true, Action: uiIDMITM},
+			{Label: "无SNI反代", On: false, Action: uiIDMITM},
 		},
 		Detail: []string{"服务组 steam", "活跃隧道 3", "↓1.2 MB ↑340 KB"},
 	})
@@ -610,7 +609,6 @@ func TestWindowHeader(t *testing.T) {
 		State: "运行中",
 		Items: []windowStatusItem{
 			{Label: "系统代理", On: true},
-			{Label: "Hosts", On: false},
 		},
 		Detail: []string{"服务组 steam", "活跃隧道 2"},
 	}
@@ -674,7 +672,6 @@ func TestNarrowHeaderKeepsDetail(t *testing.T) {
 		Level: stateOK,
 		Items: []windowStatusItem{
 			{Label: "系统代理", On: true},
-			{Label: "Hosts", On: false},
 			{Label: "无SNI反代", On: true},
 		},
 		Detail: []string{"服务组 steam、github", "活跃隧道 3", "↓1.2 MB ↑340 KB"},
@@ -1021,7 +1018,6 @@ func TestWindowPrintsToDC(t *testing.T) {
 		Level: stateDegraded,
 		Items: []windowStatusItem{
 			{Label: "系统代理", On: true},
-			{Label: "Hosts", On: false},
 		},
 		Detail: []string{"服务组 steam"},
 	})

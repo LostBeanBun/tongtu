@@ -3,7 +3,7 @@ package app
 // custom.go 实现自定义站点的增删与「是否走反代」的切换（窗口「站点」面板的底层）。
 //
 // 为什么放在 app 层：改一个域名要同时做三件事——校验写法、写回配置、重建白名单并
-// 让 hosts / 反代立即跟上（见 applyRulesLocked）。任何一件漏掉，界面就会显示
+// 让反代 / 预热立即跟上（见 applyRulesLocked）。任何一件漏掉，界面就会显示
 // 「已添加」而实际没生效，因此统一收在这里，而不是让界面直接改 config 再自己拼。
 
 import (
@@ -146,7 +146,7 @@ func (a *App) SetCustomSiteMITM(pattern string, on bool) error {
 }
 
 // applyCustomLocked 应用新的自定义站点集合（需持有 a.mu）：
-// 重建规则集、让 hosts / 反代立即跟上，并写回配置文件。
+// 重建规则集、让反代 / 预热立即跟上，并写回配置文件。
 func (a *App) applyCustomLocked(next config.CustomConfig) error {
 	rs, err := rules.Load(a.svcIDs)
 	if err != nil {

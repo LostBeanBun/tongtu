@@ -2,10 +2,10 @@ package main
 
 // 窗口里的「待办」：把「还差点什么才算配好」变成可以一键处理的一条条。
 //
-// 为什么要有它：0.1.x 里「hosts 没生效」「证书没装」只会缩在摘要行里，用户得自己
+// 为什么要有它：0.1.x 里「证书没装」「系统代理被顶掉」只会缩在摘要行里，用户得自己
 // 想明白该去哪个菜单、执行哪条命令。待办把「发现问题 → 解决它」放进同一个入口。
 //
-// 为什么要缓存：判断待办要问系统（证书存储走 certutil、自启走 schtasks），都是起进程的
+// 为什么要缓存：判断待办要问系统（证书存储走 certutil），都是起进程的
 // 开销，不能塞进 3 秒一次的状态刷新里。这里在后台按需刷新，窗口只读缓存（见 runTodoBoard）。
 
 import (
@@ -60,7 +60,7 @@ func (b *todoBoard) count() int {
 
 // runTodoBoard 在后台维持待办清单：启动时算一次，之后定时刷新。stop 关闭时退出。
 //
-// 为什么定时而不是每次状态刷新都算：判断待办要问证书存储与计划任务（起进程），
+// 为什么定时而不是每次状态刷新都算：判断待办要问证书存储与注册表自启项，
 // 30 秒一次的代价可以忽略，3 秒一次就纯属浪费。
 func runTodoBoard(a *app.App, cfg *config.Config, stop <-chan struct{}) {
 	todos.refresh(a, cfg)
@@ -81,7 +81,7 @@ func runTodoBoard(a *app.App, cfg *config.Config, stop <-chan struct{}) {
 // 判定原则：只说**当前配置下**确实没做到的事，并且每一件都能一键解决。
 // 因此不列「建议开启某功能」这类产品建议——那是菜单的事，不是待办。
 func todoItems(a *app.App, cfg *config.Config) []uiTodoItem {
-	return compileTodos(a.Status(), cfg, autostart.IsAdmin(), autoStartEnabled(), func() bool {
+	return compileTodos(a.Status(), cfg, autoStartEnabled(), func() bool {
 		ok, err := mitm.CertInstalled(a.DataDir())
 		return err == nil && !ok
 	})
@@ -89,7 +89,7 @@ func todoItems(a *app.App, cfg *config.Config) []uiTodoItem {
 
 // compileTodos 是 todoItems 的纯函数内核：状态与几个外部探测结果都由调用方给，
 // 这样「暂停中不该催用户重开」这类规则可以直接用假状态测。
-func compileTodos(st app.Status, cfg *config.Config, admin, autostartOn bool, certMissing func() bool) []uiTodoItem {
+func compileTodos(st app.Status, cfg *config.Config, autostartOn bool, certMissing func() bool) []uiTodoItem {
 	var out []uiTodoItem
 
 	// 暂停中「该开却没开」全是用户自己按的，一条都不该报：否则刚点完「暂停」，
@@ -101,14 +101,6 @@ func compileTodos(st app.Status, cfg *config.Config, admin, autostartOn bool, ce
 			out = append(out, uiTodoItem{
 				ID:    uiIDTodoCert,
 				Label: "安装本地根证书（无 SNI 反代需要）",
-			})
-		}
-
-		// 想要 hosts 模式，但当前不是管理员：只能提权重启。
-		if st.Running && cfg.Hosts && !st.Hosts && !admin {
-			out = append(out, uiTodoItem{
-				ID:    uiIDTodoElev,
-				Label: "以管理员身份重启（让 Hosts 模式生效）",
 			})
 		}
 
@@ -131,17 +123,17 @@ func compileTodos(st app.Status, cfg *config.Config, admin, autostartOn bool, ce
 	return out
 }
 
-// autoStartEnabled 报告开机自启是否已经配置（HKCU Run 键或计划任务任一）。
+// autoStartEnabled 报告开机自启是否已经配置（HKCU Run 键）。
 func autoStartEnabled() bool {
 	info, err := autostart.Query()
 	if err != nil {
 		return false
 	}
-	return info.RunCmd != "" || info.TaskCmd != ""
+	return info.RunCmd != ""
 }
 
-// runTodo 执行一条待办；restartElevated 由启动流程注入（它会先确认，再请求优雅退出重启）。
-func runTodo(a *app.App, cfg *config.Config, id string, restartElevated func() bool) error {
+// runTodo 执行一条待办。
+func runTodo(a *app.App, cfg *config.Config, id string) error {
 	switch id {
 	case uiIDTodoCert:
 		if err := mitm.InstallIfNeeded(a.DataDir()); err != nil {
@@ -154,19 +146,10 @@ func runTodo(a *app.App, cfg *config.Config, id string, restartElevated func() b
 			}
 		}
 		return nil
-	case uiIDTodoElev:
-		if restartElevated == nil {
-			return fmt.Errorf("当前启动方式不支持自动提权重启，请右键托盘图标选择「以管理员身份重启」")
-		}
-		if !restartElevated() {
-			return errTodoCancelled
-		}
-		return nil
 	case uiIDTodoAuto:
-		return tray.EnableAutostart(false)
+		return tray.EnableAutostart()
 	case uiIDTodoTake:
-		st := a.Status()
-		return a.SetMode(true, st.Hosts)
+		return a.SetMode(true)
 	}
 	return fmt.Errorf("未知待办 %q", id)
 }

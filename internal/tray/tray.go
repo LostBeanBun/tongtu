@@ -28,28 +28,23 @@ import (
 // errLastService 表示用户试图关闭最后一个加速服务组。
 var errLastService = errors.New("至少要保留一个加速服务")
 
-// ErrElevationCancelled 表示用户在 UAC 弹窗里点了取消（不是失败，不需要报错弹框）。
-var ErrElevationCancelled = errors.New("用户取消了 UAC 授权")
-
 // Run 启动系统托盘（内部 goroutine 阻塞直至 Exit）。
 // onQuit 在用户点击「退出」时触发，由调用方负责停止服务。
 // ready 在托盘菜单就绪后调用一次（可为 nil）；调用方据此确认「托盘真的可用」，
 // 之后才把界面从控制台窗口换成通途自己的窗口，避免既没有界面又没有托盘。
 // onWindow 为「显示/隐藏窗口」（可为 nil，表示当前平台没有独立窗口，菜单项不出现）。
-// onRestartElevated 为「以管理员身份重启」（可为 nil）：调用方应当先优雅还原再退出，
-// 最后在控制端口释放之后拉起提权实例（见 RelaunchElevated 的说明）。
 // onCheckUpdate 为「检查更新」（可为 nil）：调用方负责联网查询与弹框，托盘只转发点击。
 //
 // 注意：fyne.io/systray 的消息循环（创建托盘窗口并 GetMessage）必须始终运行在同一个
 // 操作系统线程上，否则 Windows 收不到鼠标事件——表现为「托盘图标可见，但左右键无反应」。
 // 这里用 LockOSThread 把本 goroutine 钉在其线程上，保证消息循环不会因 Go 调度迁移线程。
-func Run(a *app.App, onQuit func(), ready func(), onWindow func() error, onRestartElevated func(), onCheckUpdate func()) {
+func Run(a *app.App, onQuit func(), ready func(), onWindow func() error, onCheckUpdate func()) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
 	done := make(chan struct{})
 	systray.Run(func() {
-		onReady(a, onQuit, done, onWindow, onRestartElevated, onCheckUpdate)
+		onReady(a, onQuit, done, onWindow, onCheckUpdate)
 		if ready != nil {
 			ready()
 		}
@@ -69,13 +64,10 @@ type menu struct {
 	pauseAt  *systray.MenuItem
 	timed    []pausePreset
 	sys      *systray.MenuItem
-	hosts    *systray.MenuItem
 	mitm     *systray.MenuItem
 	steam    *systray.MenuItem
 	github   *systray.MenuItem
 	auto     *systray.MenuItem
-	autoElev *systray.MenuItem
-	elev     *systray.MenuItem
 	window   *systray.MenuItem
 	copyAddr *systray.MenuItem
 	openCfg  *systray.MenuItem
@@ -90,7 +82,7 @@ type pausePreset struct {
 	d    time.Duration
 }
 
-func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() error, onRestartElevated func(), onCheckUpdate func()) {
+func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() error, onCheckUpdate func()) {
 	systray.SetIcon(icon.ICO)
 	systray.SetTitle("通途")
 	systray.SetTooltip("通途（Tongtu）· 网络加速（Steam / GitHub）")
@@ -101,7 +93,7 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 
 	// 「暂停 / 恢复」放在最上面：一键撤掉全部对外影响，再点一次原样回来。
 	// 它和下面的三个开关是两种粒度：开关调单项，这里是「全都关掉 / 全都开回来」。
-	pause := systray.AddMenuItem("暂停全部加速", "还原系统代理与 hosts、关掉无 SNI 反代；进程继续运行，再点一次原样恢复")
+	pause := systray.AddMenuItem("暂停全部加速", "还原系统代理、关掉无 SNI 反代；进程继续运行，再点一次原样恢复")
 	// 「暂停定时」是子菜单：暂停这件事多了一个「停多久」的维度，摊平成四个菜单项会把
 	// 主菜单撑长；子菜单只在需要时展开。
 	pauseAt := systray.AddMenuItem("暂停定时", "暂停一段时间后自动恢复（也可随时点「恢复全部加速」提前恢复）")
@@ -111,9 +103,8 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 		pause:   pause,
 		pauseAt: pauseAt,
 		// —— 加速模式 ——
-		sys:   systray.AddMenuItemCheckbox("系统代理模式", "接管浏览器与系统流量（无需管理员）", false),
-		hosts: systray.AddMenuItemCheckbox("Hosts 模式", "覆盖 hosts 解析，供 Steam 客户端使用（需管理员）", false),
-		mitm:  systray.AddMenuItemCheckbox("无 SNI 反代", "本地解密被封域名，出站剥离 SNI（需先安装根证书）", false),
+		sys:  systray.AddMenuItemCheckbox("系统代理模式", "接管浏览器与系统流量（无需管理员）", false),
+		mitm: systray.AddMenuItemCheckbox("无 SNI 反代", "本地解密被封域名，出站剥离 SNI（需先安装根证书）", false),
 	}
 	for _, p := range []struct {
 		label string
@@ -136,15 +127,8 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 	m.github = systray.AddMenuItemCheckbox("加速 GitHub", "github.com、raw.githubusercontent.com 等", false)
 	systray.AddSeparator()
 
-	// —— 开机自启 / 权限 ——
+	// —— 开机自启 ——
 	m.auto = systray.AddMenuItemCheckbox("开机自启", "登录时以当前用户身份自动启动（无需管理员）", false)
-	m.autoElev = systray.AddMenuItemCheckbox("开机自启（最高权限）", "登录时以管理员身份启动，hosts 模式亦可用且无 UAC 弹窗", false)
-	m.elev = systray.AddMenuItem("以管理员身份重启", "先还原系统设置并退出，再弹 UAC 以管理员权限重新启动（Hosts 模式随之生效）")
-	if autostart.IsAdmin() {
-		m.autoElev.Disable() // 非管理员无法创建“最高权限”计划任务
-		m.elev.Disable()
-		m.elev.SetTitle("以管理员身份重启（当前已是管理员）")
-	}
 	systray.AddSeparator()
 
 	// —— 其它 ——
@@ -163,7 +147,7 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 	m.copyAddr = systray.AddMenuItem("复制代理地址", "把本地代理地址复制到剪贴板，便于填到别的程序里")
 	m.checkUpd = systray.AddMenuItem("检查更新", "联网查询 GitHub 最新发布版本（只检查，不自动下载）")
 	systray.AddSeparator()
-	m.quit = systray.AddMenuItem("退出", "停止加速并还原系统代理与 hosts")
+	m.quit = systray.AddMenuItem("退出", "停止加速并还原系统代理")
 
 	setCheck := func(item *systray.MenuItem, on bool) {
 		if on {
@@ -174,13 +158,12 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 	}
 
 	// syncState 同步「运行状态」相关勾选。轮询是为了反映控制 API 的变更，
-	// 以及启动时接管失败的实际情况（例如未以管理员身份运行时 hosts 未生效）。
+	// 以及启动时接管失败的实际情况（例如接管系统代理失败）。
 	// 顺带刷新托盘悬停提示：不打开窗口也能看到状态与流量。
 	pauseTitle := "" // 记住当前标题，只在真正变化时才 SetTitle（避免每 3 秒重建一次菜单）
 	syncState := func() {
 		st := a.Status()
 		setCheck(m.sys, st.SystemProxy)
-		setCheck(m.hosts, st.Hosts)
 		setCheck(m.mitm, st.MITM)
 		setCheck(m.steam, contains(st.Services, "steam"))
 		setCheck(m.github, contains(st.Services, "github"))
@@ -195,12 +178,10 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 		systray.SetTooltip(tooltipText(st))
 	}
 
-	// refreshAuto 同步「开机自启」勾选。schtasks 每次查询都要新建进程，开销较大，
-	// 因此只在启动时与用户切换后刷新，不放进轮询。
+	// refreshAuto 同步「开机自启」勾选。只在启动时与用户切换后刷新，不放进轮询。
 	refreshAuto := func() {
 		info, _ := autostart.Query()
 		setCheck(m.auto, info.RunCmd != "")
-		setCheck(m.autoElev, info.TaskCmd != "")
 	}
 
 	// fail 在独立 goroutine 里弹提示框，避免模态框阻塞菜单事件循环。
@@ -220,7 +201,7 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 
 	// pauseReq 把「暂停定时」子菜单的点击转交给 clickLoop（唯一操作菜单的 goroutine）。
 	pauseReq := make(chan time.Duration, len(m.timed))
-	go clickLoop(a, m, done, onQuit, onWindow, onRestartElevated, onCheckUpdate, syncReq, syncState, refreshAuto, fail, pauseReq)
+	go clickLoop(a, m, done, onQuit, onWindow, onCheckUpdate, syncReq, syncState, refreshAuto, fail, pauseReq)
 
 	// 「暂停定时」子菜单的每一项都只做一件事：把时长投递给 clickLoop。
 	// 子菜单项的点击通道各是一个 channel，没法直接放进同一个 select，
@@ -259,17 +240,12 @@ func onReady(a *app.App, onQuit func(), done chan struct{}, onWindow func() erro
 
 // clickLoop 是唯一读写菜单项的 goroutine。
 func clickLoop(a *app.App, m *menu, done chan struct{}, onQuit func(), onWindow func() error,
-	onRestartElevated func(), onCheckUpdate func(), syncReq chan struct{}, syncState, refreshAuto func(), fail func(string),
+	onCheckUpdate func(), syncReq chan struct{}, syncState, refreshAuto func(), fail func(string),
 	pauseReq <-chan time.Duration) {
 	// 没有「显示/隐藏窗口」菜单项时 windowCh 为 nil，对应分支永不触发。
 	var windowCh chan struct{}
 	if m.window != nil {
 		windowCh = m.window.ClickedCh
-	}
-	// 平台不支持提权重启（或调用方没提供回调）时 elevCh 为 nil，分支同样永不触发。
-	var elevCh chan struct{}
-	if m.elev != nil && !m.elev.Disabled() && onRestartElevated != nil {
-		elevCh = m.elev.ClickedCh
 	}
 	for {
 		select {
@@ -298,15 +274,8 @@ func clickLoop(a *app.App, m *menu, done chan struct{}, onQuit func(), onWindow 
 
 		case <-m.sys.ClickedCh:
 			st := a.Status()
-			if err := a.SetMode(!st.SystemProxy, st.Hosts); err != nil {
+			if err := a.SetMode(!st.SystemProxy); err != nil {
 				fail("切换系统代理模式失败：\n" + err.Error())
-			}
-			syncState()
-
-		case <-m.hosts.ClickedCh:
-			st := a.Status()
-			if err := a.SetMode(st.SystemProxy, !st.Hosts); err != nil {
-				fail("切换 Hosts 模式失败：\n" + err.Error())
 			}
 			syncState()
 
@@ -348,18 +317,8 @@ func clickLoop(a *app.App, m *menu, done chan struct{}, onQuit func(), onWindow 
 				if err := autostart.DisableRun(); err != nil {
 					fail("关闭开机自启失败：\n" + err.Error())
 				}
-			} else if err := enableAutostart(false); err != nil {
+			} else if err := enableAutostart(); err != nil {
 				fail("开启开机自启失败：\n" + err.Error())
-			}
-			refreshAuto()
-
-		case <-m.autoElev.ClickedCh:
-			if m.autoElev.Checked() {
-				if err := autostart.DisableTask(); err != nil {
-					fail("删除开机自启计划任务失败：\n" + err.Error())
-				}
-			} else if err := enableAutostart(true); err != nil {
-				fail("创建开机自启计划任务失败：\n" + err.Error())
 			}
 			refreshAuto()
 
@@ -367,14 +326,6 @@ func clickLoop(a *app.App, m *menu, done chan struct{}, onQuit func(), onWindow 
 			if err := onWindow(); err != nil {
 				fail("显示/隐藏窗口失败：\n" + err.Error())
 			}
-
-		case <-elevCh:
-			// 先问一次再退出：UAC 被取消时用户至少是知情同意的，不会「点了菜单程序就没了」。
-			if !confirmRestartElevated() {
-				continue
-			}
-			onRestartElevated()
-			return
 
 		case <-m.copyAddr.ClickedCh:
 			st := a.Status()
@@ -429,9 +380,8 @@ func toggleService(a *app.App, id string) error {
 	return a.SetServices(next)
 }
 
-// enableAutostart 写入开机自启：elevated 为 false 用 HKCU Run 键，true 用最高权限计划任务。
-// 与 CLI 一致：两种方式互斥，开启一种会移除另一种，避免登录时被启动两次。
-func enableAutostart(elevated bool) error {
+// enableAutostart 写入开机自启（HKCU Run 键，以当前用户身份登录时启动，无需管理员）。
+func enableAutostart() error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -439,17 +389,7 @@ func enableAutostart(elevated bool) error {
 	if abs, err := filepath.Abs(exe); err == nil {
 		exe = abs
 	}
-	cmdLine := autostart.CommandLine(exe)
-	if elevated {
-		if err := autostart.EnableTask(cmdLine); err != nil {
-			return err
-		}
-		return autostart.DisableRun()
-	}
-	if err := autostart.EnableRun(cmdLine); err != nil {
-		return err
-	}
-	return autostart.DisableTask()
+	return autostart.EnableRun(autostart.CommandLine(exe))
 }
 
 func contains(list []string, want string) bool {
@@ -481,8 +421,8 @@ func tooltipText(st app.Status) string {
 		// 托盘提示没有宽度压力，把「跑了多久」放在状态词后面：排查「是不是刚重启过」很有用。
 		state += "（已运行 " + humanUptime(st.UptimeSec) + "）"
 	}
-	return fmt.Sprintf("通途 Tongtu · %s · 系统代理%s · Hosts%s · 反代%s · ↓%s ↑%s",
-		state, mark(st.SystemProxy), mark(st.Hosts), mark(st.MITM),
+	return fmt.Sprintf("通途 Tongtu · %s · 系统代理%s · 反代%s · ↓%s ↑%s",
+		state, mark(st.SystemProxy), mark(st.MITM),
 		shortBytes(st.Proxy.BytesIn), shortBytes(st.Proxy.BytesOut))
 }
 

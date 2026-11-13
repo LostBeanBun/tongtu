@@ -198,25 +198,6 @@ func TestNormalizeCandidateKeepsIPv6(t *testing.T) {
 	}
 }
 
-// TestListenLocalIPv6MarksFlag IPv6 回环监听就绪后 LocalIPv6Up 为真——它决定 hosts 里是否写 ::1。
-// 用端口 0 让系统挑空闲端口，避免与真实的 :443/:80 冲突。
-func TestListenLocalIPv6MarksFlag(t *testing.T) {
-	p := NewWithLookup(mustRules(t), failLookup(t, "本测试不应解析"), discardLog())
-	if p.LocalIPv6Up() {
-		t.Fatal("初始不应报告 IPv6 监听就绪")
-	}
-	if !p.listenLocalIPv6(0, true) {
-		t.Skip("本机没有 IPv6 回环，跳过")
-	}
-	if !p.LocalIPv6Up() {
-		t.Fatal("监听成功后应报告就绪")
-	}
-	p.CloseLocal()
-	if p.LocalIPv6Up() {
-		t.Fatal("关闭后不应再报告就绪")
-	}
-}
-
 // TestMITMStripsSNI 验证无 SNI 反代：客户端用真实 SNI 发起 CONNECT，
 // 本地解密后由本代理转发，但出站 TLS 握手不携带 SNI。
 func TestMITMStripsSNI(t *testing.T) {

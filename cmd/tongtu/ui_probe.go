@@ -61,7 +61,7 @@ const (
 	uiProbeAddTip    = "加入站点：把这个域名加入自定义加速白名单（立即生效）"
 	uiProbeMITMTip   = "打开反代：为该站开启无 SNI 反代（会先加入站点；需要本地根证书）"
 	uiProbeConfigTip = "打开配置：用记事本打开 config.yaml"
-	uiProbeTodoTip   = "查看待办：还有没配置好的事情（安装证书、以管理员重启…），点开可一键处理"
+	uiProbeTodoTip   = "查看待办：还有没配置好的事情（安装证书、开机自启…），点开可一键处理"
 )
 
 // uiProbeActions 决定诊断面板底部显示哪些动作。

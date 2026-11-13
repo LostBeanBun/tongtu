@@ -3,7 +3,7 @@ package main
 // 窗口界面能触发的动作与查询，由 start.go 注入（见 setWindowActionsHook）。
 //
 // 为什么走「注入」而不是让窗口直接拿 *app.App：窗口只负责「用户点了什么」，
-// 具体怎么做（切系统代理、写 hosts、提权重启…）留在装配层，两边各自可测。
+// 具体怎么做（切系统代理、开反代…）留在装配层，两边各自可测。
 // 非 Windows 平台没有窗口，这些类型依然要存在（start.go 会用到）。
 
 import (
@@ -18,7 +18,6 @@ import (
 // 命中判定、悬浮说明与动作分发共用这一组常量，避免在三处写错同一个字符串。
 const (
 	uiIDSys       = "sys"       // 系统代理开关
-	uiIDHosts     = "hosts"     // Hosts 开关
 	uiIDMITM      = "mitm"      // 无 SNI 反代开关
 	uiIDServices  = "services"  // 服务组菜单
 	uiIDSelfTest  = "selftest"  // 端到端自检
@@ -49,7 +48,6 @@ const (
 
 	// 待办项的动作 id（由「待办」菜单触发）。
 	uiIDTodoCert = "todocert" // 安装本地根证书
-	uiIDTodoElev = "todoelev" // 以管理员身份重启
 	uiIDTodoAuto = "todoauto" // 开启开机自启
 	uiIDTodoTake = "todotake" // 重新接管系统代理
 )
@@ -96,7 +94,7 @@ func uiSiteFromID(id, prefix string) (string, bool) {
 
 // windowActions 是窗口界面需要的外部动作快照。
 type windowActions struct {
-	// ToggleMode 切换单项加速模式（id 取 uiIDSys / uiIDHosts / uiIDMITM）。
+	// ToggleMode 切换单项加速模式（id 取 uiIDSys / uiIDMITM）。
 	ToggleMode func(id string, on bool) error
 	// SetServices 直接设置启用的服务组（至少保留一个）。
 	SetServices func(ids []string) error
@@ -130,7 +128,7 @@ type windowActions struct {
 	// RunTodo 执行一条待办（id 取 uiIDTodo* 之一）。
 	RunTodo func(id string) error
 
-	// StopAll 一键暂停：还原系统代理与 hosts、关掉反代，但进程继续运行。
+	// StopAll 一键暂停：还原系统代理、关掉反代，但进程继续运行。
 	StopAll func() error
 	// PauseFor 定时暂停：d <= 0 表示一直暂停到手动恢复（与 StopAll 等价）。
 	// 窗口里点「暂停」选时长走这里，到期由 app 层自动恢复（窗口隐藏时也照样恢复）。

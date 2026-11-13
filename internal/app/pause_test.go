@@ -12,7 +12,7 @@ import (
 	"tongtu/internal/rules"
 )
 
-// newPauseTestApp 起一个不接管系统代理 / hosts / 反代的实例（只监听回环随机端口）。
+// newPauseTestApp 起一个不接管系统代理 / 反代的实例（只监听回环随机端口）。
 //
 // 定时暂停的测试只关心「计时与代号」这一层，因此不真的去改系统设置：
 // 到期后的恢复动作由 pauseExpireHook 替换成记录调用（见各用例）。
@@ -24,7 +24,7 @@ func newPauseTestApp(t *testing.T) *App {
 	}
 	cfg := config.Default()
 	cfg.Listen = "127.0.0.1:0"
-	cfg.SystemProxy, cfg.Hosts, cfg.MITM.Enabled = false, false, false
+	cfg.SystemProxy, cfg.MITM.Enabled = false, false
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	a := New(Options{Config: cfg, Rules: rs, Log: quiet})
 	if err := a.Start(); err != nil {
@@ -94,7 +94,7 @@ func TestManualResumeCancelsPauseTimer(t *testing.T) {
 		t.Fatalf("PauseFor: %v", err)
 	}
 	// 用户点了「恢复」：暂停项已经装回去，这里只需要清掉暂停记录，
-	// 与 Resume 的记账一致（不碰系统设置，避免测试去改真实代理 / hosts）。
+	// 与 Resume 的记账一致（不碰系统设置，避免测试去改真实代理）。
 	a.mu.Lock()
 	a.paused = nil
 	a.mu.Unlock()

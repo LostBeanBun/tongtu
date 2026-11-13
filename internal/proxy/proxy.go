@@ -70,14 +70,6 @@ type Proxy struct {
 
 	// warmPort 仅供测试：启动预热拨号的目标端口（生产恒为 443）。
 	warmPort string
-
-	localMu sync.Mutex
-	ln443   net.Listener
-	ln80    net.Listener
-	// ln443v6 / ln80v6 是尽力而为的 `[::1]` 回环监听：IPv6 优先的客户端会先连 ::1。
-	// 绑不上时保持为 nil，hosts 里也就不会写 ::1（见 hosts.Manager.SetLocalIPv6）。
-	ln443v6 net.Listener
-	ln80v6  net.Listener
 }
 
 // LookupFunc 解析主机名到 IP 列表（生产实现为 resolver.Resolver.Lookup）。
@@ -134,8 +126,9 @@ func NewWithLookup(rs *rules.Set, lookup LookupFunc, log *slog.Logger) *Proxy {
 
 // stripAltSvc 删除上游响应里的 Alt-Svc 广告（HTTP/3 提示）。
 //
-// 为什么要删：hosts 模式下反代域名被指向 127.0.0.1，而本地只监听 TCP；浏览器若读到
-// Alt-Svc 会去尝试 QUIC(UDP:443)，白白多一次注定失败的握手（表现为首次加载多等几秒）。
+// 为什么要删：反代路径的本地解密只监听 TCP；浏览器若读到 Alt-Svc 会去尝试
+// QUIC(UDP:443)，而本地并没有对应的 UDP 监听，白白多一次注定失败的握手
+// （表现为首次加载多等几秒）。
 // 经代理的 HTTPS 看不到响应头（端到端加密），那里由浏览器「走代理时不用 QUIC」兜住。
 func stripAltSvc(resp *http.Response) error {
 	resp.Header.Del("Alt-Svc")

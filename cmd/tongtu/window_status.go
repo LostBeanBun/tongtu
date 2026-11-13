@@ -112,7 +112,7 @@ type windowStatusItem struct {
 	Tip    string // 悬浮说明（与托盘菜单文案保持一致）
 }
 
-// modeItems 返回状态条上的三个加速模式开关项，状态还没准备好时用默认项：
+// modeItems 返回状态条上的两个加速模式开关项，状态还没准备好时用默认项：
 // 窗口一创建就有可点的开关，几何计算也不依赖状态刷新时机。
 func modeItems(items []windowStatusItem) []windowStatusItem {
 	if len(items) > 0 {
@@ -120,7 +120,6 @@ func modeItems(items []windowStatusItem) []windowStatusItem {
 	}
 	return []windowStatusItem{
 		{Label: "系统代理", Action: uiIDSys},
-		{Label: "Hosts", Action: uiIDHosts},
 		{Label: "无SNI反代", Action: uiIDMITM},
 	}
 }

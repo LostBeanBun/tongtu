@@ -12,7 +12,7 @@ import (
 	"tongtu/internal/rules"
 )
 
-// newCustomTestApp 起一个不接管系统代理 / hosts / 反代的实例，配置写到临时目录。
+// newCustomTestApp 起一个不接管系统代理 / 反代的实例，配置写到临时目录。
 //
 // 必须指定 ConfigPath：增删自定义站点会写回配置文件，测试绝不能碰真实的
 // %APPDATA%\tongtu\config.yaml。
@@ -24,7 +24,7 @@ func newCustomTestApp(t *testing.T) (*App, string) {
 	}
 	cfg := config.Default()
 	cfg.Listen = "127.0.0.1:0"
-	cfg.SystemProxy, cfg.Hosts, cfg.MITM.Enabled = false, false, false
+	cfg.SystemProxy, cfg.MITM.Enabled = false, false
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := config.Save(path, cfg); err != nil {
 		t.Fatalf("保存初始配置: %v", err)

@@ -2,13 +2,13 @@
 #
 # 为什么要跑这个：
 #   崩溃 / 强杀有监护进程（__guard）兜底；但掉电、蓝屏、长按电源键时没有任何代码有机会执行。
-#   机器再打开时，系统代理还指着 127.0.0.1:19180、hosts 里还写着托管块，而通途并没有在跑——
+#   机器再打开时，系统代理还指着 127.0.0.1:19180，而通途并没有在跑——
 #   表现就是「开机后网页全打不开」。兜底是接管期间登记在
 #   HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce 里的那条命令：
 #
 #       "<exe>" __recover
 #
-#   登录时由 Windows 执行一次，还原系统代理与 hosts，然后把自己清掉。
+#   登录时由 Windows 执行一次，还原系统代理，然后把自己清掉。
 #
 #   这个脚本按最恶劣的顺序模拟断电：
 #     1. 启动通途，等它真正接管（并确认 RunOnce 项已登记）；
@@ -22,9 +22,9 @@
 #   .\tools\recover-test.ps1 -Exe .\dist\tongtu.exe -WaitSec 40
 #
 # 注意：
-#   - 脚本会快照并在结束时还原系统代理与 hosts，不会破坏你原本的网络配置。
-#   - 用 --no-hosts --no-mitm 启动：本项只验证系统代理这条路径（hosts 清理需要管理员权限，
-#     RunOnce 又是以当前用户权限运行的，那是另一条路径，见脚本末尾的说明）。
+#   - 脚本会快照并在结束时还原系统代理，不会破坏你原本的网络配置。
+#   - 用 --no-mitm 启动：本项只验证「系统代理 + 断电自愈（RunOnce）」这条路径；
+#     只接管系统代理（HKCU 注册表），完全不需要管理员权限，也不再动系统其它配置。
 #   - 跑之前若有实例在运行会先让它正常退出；退不掉就中止，不会强杀别人的会话。
 param(
     [string]$Exe = "",
@@ -45,12 +45,10 @@ $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 $runOnceKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
 $runOnceName = "TongtuRecover"
 $runOnceWant = '"{0}" __recover' -f $Exe
-$hostsPath = Join-Path $env:WINDIR "System32\drivers\etc\hosts"
 $dataDir = Join-Path $env:APPDATA "tongtu"
 $cfgPath = Join-Path $dataDir "config.yaml"
 $guardState = Join-Path $dataDir "guard.json"
 $logFile = Join-Path $dataDir "tongtu.log"
-$beginMark = "# >>> tongtu managed block >>>"
 
 $listen = "127.0.0.1:19180"
 $control = "127.0.0.1:19181"
@@ -97,20 +95,11 @@ function Test-PortOpen([string]$addr) {
     try { return $c.ConnectAsync($parts[0], [int]$parts[1]).Wait(600) } catch { return $false } finally { $c.Close() }
 }
 
-function Test-HostsHasManagedBlock {
-    if (-not (Test-Path $hostsPath)) { return $false }
-    $lines = Get-Content -Path $hostsPath -ErrorAction SilentlyContinue
-    return [bool]($lines | Where-Object { $_ -like "*$beginMark*" })
-}
-
 Write-Host "通途断电自愈验收" -ForegroundColor Cyan
 Write-Host "  exe:     $Exe"
 Write-Host "  RunOnce: $runOnceWant"
 Write-Host "  监听:    $listen（控制 $control）"
 Write-Host ""
-
-$admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-    [Security.Principal.WindowsBuiltInRole]::Administrator)
 
 # —— 1. 让已有实例正常退出（不强杀别人的会话）——
 $wasRunning = (Get-TongtuProcesses).Count -gt 0
@@ -138,15 +127,14 @@ if ($staleLeftover) {
     New-ItemProperty -Path $regPath -Name "ProxyEnable" -Value 0 -PropertyType DWord -Force | Out-Null
     $snapProxy = Get-ProxySnapshot
 }
-$snapHosts = if (Test-Path $hostsPath) { [IO.File]::ReadAllBytes($hostsPath) } else { $null }
-Write-Host ("[2/7] 基线: ProxyEnable={0} ProxyServer='{1}'；hosts 托管块={2}；管理员={3}" -f `
-    $snapProxy.Enable, $snapProxy.Server, (Test-HostsHasManagedBlock), $admin)
+Write-Host ("[2/7] 基线: ProxyEnable={0} ProxyServer='{1}'" -f `
+    $snapProxy.Enable, $snapProxy.Server)
 
 $failures = New-Object System.Collections.Generic.List[string]
 
 # —— 3. 启动并等「接管 + RunOnce 已登记」——
 Write-Host "[3/7] 启动并等待接管…" -ForegroundColor Gray
-$proc = Start-Process -FilePath $Exe -ArgumentList 'start', '--no-tray', '--hidden', '--no-hosts', '--no-mitm' -PassThru
+$proc = Start-Process -FilePath $Exe -ArgumentList 'start', '--no-tray', '--hidden', '--no-mitm' -PassThru
 $mainPid = $proc.Id
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $armed = $false
@@ -171,7 +159,7 @@ if (-not $ready) {
     exit 2
 }
 $armed = (Get-RunOnceValue) -eq $runOnceWant
-Write-Host ("[3/7] 主进程 pid={0}；用时 {1}s；系统代理已接管；RunOnce='{2}'" -f `
+Write-Host ("      主进程 pid={0}；用时 {1}s；系统代理已接管；RunOnce='{2}'" -f `
     $mainPid, [math]::Round($sw.Elapsed.TotalSeconds, 1), (Get-RunOnceValue)) -ForegroundColor Gray
 
 # —— 4. 模拟断电：先杀监护进程，再杀主进程 ——
@@ -209,7 +197,6 @@ Start-Sleep -Milliseconds 500
 $now = Get-ProxySnapshot
 $runOnceAfter = Get-RunOnceValue
 $guardLeft = Test-Path $guardState
-$hostsBlock = Test-HostsHasManagedBlock
 $procs = Get-TongtuProcesses
 
 if ($recoverCode -ne 0) { $failures.Add("__recover 退出码 $recoverCode（期望 0）") }
@@ -219,7 +206,6 @@ if (($now.Enable -ne $snapProxy.Enable) -or ($now.Server -ne $snapProxy.Server))
 }
 if ($runOnceAfter -ne "") { $failures.Add("RunOnce 项没被清除: '$runOnceAfter'") }
 if ($guardLeft -and -not $dirtyGuard) { $failures.Add("多出了 guard.json 残留") }
-if ($hostsBlock) { $failures.Add("hosts 里残留托管块（$beginMark）") }
 if ($procs.Count -gt 0) { $failures.Add("__recover 之后还有通途进程没退出: pid $($procs.Id -join ', ')") }
 
 # 再跑一次：没有残留状态时必须幂等（退出码 0、不改动任何东西）
@@ -235,7 +221,6 @@ $rows = @(
     @{ Name = "系统代理已还原";     Want = "ProxyEnable=$($snapProxy.Enable)";        Got = "ProxyEnable=$($now.Enable)"; Ok = (($now.Enable -eq $snapProxy.Enable) -and ($now.Server -eq $snapProxy.Server)) },
     @{ Name = "RunOnce 项已清除";   Want = "无";                                      Got = $(if ($runOnceAfter) { $runOnceAfter } else { "无" }); Ok = ($runOnceAfter -eq "") },
     @{ Name = "guard.json 已回收";  Want = "无";                                      Got = $(if ($guardLeft) { "有" } else { "无" }); Ok = (-not $guardLeft) },
-    @{ Name = "hosts 无托管块";     Want = "无";                                      Got = $(if ($hostsBlock) { "有" } else { "无" }); Ok = (-not $hostsBlock) },
     @{ Name = "无通途进程残留";     Want = "0 个";                                    Got = "$($procs.Count) 个"; Ok = ($procs.Count -eq 0) }
 )
 foreach ($r in $rows) {
@@ -249,7 +234,7 @@ Write-Host ""
 Write-Host "[7/7] 日志取证（$logFile）:" -ForegroundColor Gray
 if (Test-Path $logFile) {
     $tail = Get-Content -Path $logFile -Tail 60 -ErrorAction SilentlyContinue
-    $hit = @($tail | Where-Object { $_ -match "断电自愈|遗留的系统代理|托管块" })
+    $hit = @($tail | Where-Object { $_ -match "断电自愈|开始还原系统代理|已登记断电自愈|遗留的系统代理" })
     if ($hit.Count -eq 0) { Write-Host "    没在日志末尾找到断电自愈相关记录（日志可能被轮转了）" -ForegroundColor DarkYellow }
     $hit | Select-Object -Last 4 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
 } else {
@@ -264,8 +249,6 @@ if ($failures.Count -eq 0) {
     foreach ($f in $failures) { Write-Host "      - $f" -ForegroundColor Red }
 }
 Write-Host ""
-Write-Host "补充说明：RunOnce 以当前用户权限运行，提权会话留下的 hosts 托管块它清不掉；" -ForegroundColor DarkGray
-Write-Host "          那种情况会写警告，并在「以管理员身份启动的下一次通途」启动时清掉。" -ForegroundColor DarkGray
 
 # —— 收尾：还原基线 ——
 if (-not $SkipRestore) {
@@ -273,14 +256,6 @@ if (-not $SkipRestore) {
     if (($cur.Enable -ne $snapProxy.Enable) -or ($cur.Server -ne $snapProxy.Server) -or ($cur.AutoConfig -ne $snapProxy.AutoConfig)) {
         Set-ProxySnapshot $snapProxy
         Write-Host "已把系统代理还原为启动之前的状态。" -ForegroundColor Gray
-    }
-    if ($snapHosts -and (Test-HostsHasManagedBlock)) {
-        try {
-            [IO.File]::WriteAllBytes($hostsPath, $snapHosts)
-            Write-Host "已把 hosts 还原为启动之前的内容。" -ForegroundColor Gray
-        } catch {
-            Write-Host "hosts 还原失败（需要管理员权限）：$($_.Exception.Message)" -ForegroundColor Yellow
-        }
     }
 }
 

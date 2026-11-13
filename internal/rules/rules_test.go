@@ -74,10 +74,10 @@ func TestLoadUnknownService(t *testing.T) {
 	}
 }
 
-// TestHostsCoverSteamStoreHosts 提醒：hosts 名单要覆盖到「必须走反代」的主机。
+// TestHostsCoverSteamStoreHosts 提醒：预热名单要覆盖到「必须走反代」的主机。
 //
-// 反代域名在 hosts 模式下会写 127.0.0.1（见 app.mitmLocalNamesFor），
-// 名单里少了某个主机，Steam 客户端走 hosts 时就绕不过 SNI 封锁。
+// 0.12 起不再写系统 hosts（hosts 模式已移除），这份名单用于连接预热（见 proxy.Warm），
+// 名单里少了某个主机，Steam 客户端首次访问就要多等一次冷解析。
 func TestHostsCoverSteamStoreHosts(t *testing.T) {
 	set, err := Load([]string{"steam"})
 	if err != nil {
@@ -130,7 +130,7 @@ func TestAddPatterns(t *testing.T) {
 	}
 }
 
-// TestCustomHosts 精确主机名进 hosts 覆盖；通配无法枚举，只靠系统代理模式（不进 hosts）。
+// TestCustomHosts 精确主机名进预热名单；通配无法枚举，只靠系统代理模式（不进名单）。
 func TestCustomHosts(t *testing.T) {
 	set, err := Load([]string{"github"})
 	if err != nil {

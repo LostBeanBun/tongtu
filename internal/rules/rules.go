@@ -20,7 +20,7 @@ type Service struct {
 	ID      string   `json:"id"`
 	Name    string   `json:"name"`
 	Domains []string `json:"domains"` // 代理白名单，支持 "*.example.com" 通配（含裸域）
-	Hosts   []string `json:"hosts"`   // hosts 模式需要精确覆盖的主机名
+	Hosts   []string `json:"hosts"`   // 连接预热用的精确主机名（规则内顺序）
 }
 
 var builtin = map[string][]byte{
@@ -142,9 +142,9 @@ func MatchPatterns(host string, patterns []string) bool {
 	return false
 }
 
-// Hosts 返回去重后的 hosts 覆盖名单（保持规则内顺序）。
+// Hosts 返回去重后的预热主机名（保持规则内顺序）。
 //
-// 自定义域名的精确主机名也会进来（hosts 模式才能覆盖它们）；
+// 自定义域名的精确主机名也会进来；
 // 通配模式无法枚举，只能靠系统代理模式生效——这一点在文档里写清楚。
 func (s *Set) Hosts() []string {
 	seen := make(map[string]bool)

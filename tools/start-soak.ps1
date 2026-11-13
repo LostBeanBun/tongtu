@@ -10,7 +10,7 @@
 # 用法：
 #   .\tools\start-soak.ps1                         # 用 dist\tongtu.exe，跑满 24 小时（计划任务）
 #   .\tools\start-soak.ps1 -Hours 0.05             # 3 分钟快速验证脚本本身
-#   .\tools\start-soak.ps1 -NoHosts -NoMITM        # 只浸泡系统代理路径
+#   .\tools\start-soak.ps1 -NoMITM                 # 只浸泡系统代理路径（不启动反代）
 #   .\tools\start-soak.ps1 -Stop                   # 停止正在跑的浸泡实例并还原状态
 #   .\tools\start-soak.ps1 -ViaProcess             # 旧方式：WMI 直接拉进程（调试脚本用）
 #
@@ -20,13 +20,12 @@
 #   - 计划任务名固定为 TongtuSoak，每次启动都会先删掉旧的再注册；浸泡结束后任务留在
 #     「就绪」状态，不会自己再跑（触发器是一次性的）。
 #   - 启动后会等第一份 CSV 样本落盘再返回，失败时直接打印错误日志。
-#   - 结束时（24 小时到点）由 soak-test.ps1 正常停止实例并还原系统代理 / hosts。
+#   - 结束时（24 小时到点）由 soak-test.ps1 正常停止实例并还原系统代理。
 param(
     [string]$Exe = "",
     [string]$Version = "",
     [double]$Hours = 24,
     [int]$IntervalSec = 60,
-    [switch]$NoHosts,
     [switch]$NoMITM,
     [switch]$ViaProcess,
     [switch]$Stop
@@ -61,7 +60,7 @@ if ($Stop) {
         $csv = (Get-Content $csvHint -Raw).Trim()
         Write-Host "停止浸泡：$csv" -ForegroundColor Yellow
     }
-    # 先让通途正常退出：它会自己还原系统代理 / hosts / RunOnce。
+    # 先让通途正常退出：它会自己还原系统代理 / RunOnce。
     # 顺序不能反：先停任务会把浸泡脚本直接杀掉，它的 finally 就来不及收尾。
     $copy = Join-Path $dir "tongtu.exe"
     if (Test-Path $copy) {
@@ -78,7 +77,7 @@ if ($Stop) {
             Get-Process -Id ([int]$old) -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
         }
     }
-    Write-Host "已请求停止；系统代理与 hosts 由通途的退出流程还原。" -ForegroundColor Gray
+    Write-Host "已请求停止；系统代理与 RunOnce 由通途的退出流程还原。" -ForegroundColor Gray
     exit 0
 }
 
@@ -98,7 +97,6 @@ $soakArgs = @(
     "-Exe", "`"$(Join-Path $dir 'tongtu.exe')`"",
     "-Hours", "$Hours", "-IntervalSec", "$IntervalSec", "-CsvPath", "`"$csv`""
 )
-if ($NoHosts) { $soakArgs += "-NoHosts" }
 if ($NoMITM) { $soakArgs += "-NoMITM" }
 
 # 把「pwsh + 重定向」写进一个 .cmd：比在计划任务里拼多层引号可靠得多，
@@ -164,7 +162,7 @@ Write-Host "  PID:    $(if ($soakPid) { $soakPid } else { '未知' })"
 Write-Host "  CSV:    $csv"
 Write-Host "  日志:   $out"
 Write-Host "  时长:   $Hours 小时（每 $IntervalSec 秒采样）"
-Write-Host "  接管:   系统代理=开，hosts=$(if ($NoHosts) { '关' } else { '开' })，反代=$(if ($NoMITM) { '关' } else { '开' })"
+Write-Host "  接管:   系统代理=开，反代=$(if ($NoMITM) { '关' } else { '开' })"
 Write-Host ""
 
 # 等到第一份样本 + 启动行落盘，确认不是“启动即失败”。

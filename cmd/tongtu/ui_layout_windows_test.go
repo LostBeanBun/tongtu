@@ -21,7 +21,6 @@ func layoutStatus() windowStatus {
 		Level: stateOK,
 		Items: []windowStatusItem{
 			{Label: "系统代理", On: true, Action: uiIDSys},
-			{Label: "Hosts", On: false, Action: uiIDHosts},
 			{Label: "无SNI反代", On: true, Action: uiIDMITM},
 		},
 		Detail: []string{"服务组 Steam", "活跃隧道 2", "↓1.2 MB ↑340 KB"},
@@ -40,8 +39,8 @@ func TestUILayoutRightAlignsControls(t *testing.T) {
 			chips = append(chips, r)
 		}
 	}
-	if len(chips) != 3 {
-		t.Fatalf("应有三项开关胶囊，实际 %d 项：%+v", len(chips), l.Regions)
+	if len(chips) != 2 {
+		t.Fatalf("应有两项开关胶囊，实际 %d 项：%+v", len(chips), l.Regions)
 	}
 	rightmost := chips[0] // Regions 是按从右往左的顺序追加的
 	if rightmost.ID != uiIDMITM {
@@ -164,7 +163,7 @@ func TestUILayoutNarrowWindowDropsFilter(t *testing.T) {
 func TestUILayoutTitleGivesWayToStateWord(t *testing.T) {
 	// 第一行挤不下时先压缩标题（状态词是健康度，比品牌名重要）
 	st := layoutStatus()
-	l := computeUILayout(430, 300, 96, st, uiPanelState{}, fixedMeasure, fixedMeasure)
+	l := computeUILayout(380, 300, 96, st, uiPanelState{}, fixedMeasure, fixedMeasure)
 	titleW := l.Title.Right - l.Title.Left
 	fullW := fixedMeasure(st.Title)
 	if titleW >= fullW {
@@ -180,7 +179,7 @@ func TestUILayoutTitleGivesWayToStateWord(t *testing.T) {
 
 func TestUILayoutWithoutItemsUsesDefaultModes(t *testing.T) {
 	// 状态项还没填（窗口刚建好）时不能算出负数或崩溃；
-	// 而且此时仍要摆出三个默认开关胶囊——否则窗口起来的第一帧会「少一排按钮」，随后突然跳出来。
+	// 而且此时仍要摆出两个默认开关胶囊——否则窗口起来的第一帧会「少一排按钮」，随后突然跳出来。
 	l := computeUILayout(700, 400, 96, windowStatus{}, uiPanelState{}, fixedMeasure, fixedMeasure)
 	if l.Edit.Right <= l.Edit.Left {
 		t.Errorf("没有状态项时日志区仍应可用：%+v", l.Edit)
@@ -194,7 +193,7 @@ func TestUILayoutWithoutItemsUsesDefaultModes(t *testing.T) {
 			}
 		}
 	}
-	for _, id := range []string{uiIDSys, uiIDHosts, uiIDMITM} {
+	for _, id := range []string{uiIDSys, uiIDMITM} {
 		if !got[id] {
 			t.Errorf("默认状态项应包含 %q，实际 %v", id, got)
 		}

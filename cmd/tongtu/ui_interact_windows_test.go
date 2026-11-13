@@ -368,15 +368,14 @@ func clickRegion(t *testing.T, id string) {
 	sendRegionMouse(t, id, wmLButtonUp, 0)
 }
 
-// setStatusForInteraction 摆一份「三项都在、可直接点」的状态条内容。
-func setStatusForInteraction(hosts, sys, mitm bool) {
+// setStatusForInteraction 摆一份「两个开关都在、可直接点」的状态条内容。
+func setStatusForInteraction(sys, mitm bool) {
 	setWindowStatus(windowStatus{
 		Title: "通途 Tongtu " + Version,
 		State: "运行中",
 		Level: stateOK,
 		Items: []windowStatusItem{
 			{Label: "系统代理", On: sys, Action: uiIDSys, Tip: uiModeTips[uiIDSys]},
-			{Label: "Hosts", On: hosts, Action: uiIDHosts, Tip: uiModeTips[uiIDHosts]},
 			{Label: "无SNI反代", On: mitm, Action: uiIDMITM, Tip: uiModeTips[uiIDMITM]},
 		},
 		Detail: []string{"服务组 Steam", "活跃隧道 1"},
@@ -394,19 +393,19 @@ func TestClickToggleModeInvokesAction(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, true, true)
+	setStatusForInteraction(true, false)
 	f := &fakeActions{}
 	useFakeActions(t, f)
 	noToast(t)
 
-	// Hosts 当前是关的：点一下应该请求「打开」，并给出「已开启」的反馈
-	clickRegion(t, uiIDHosts)
-	waitFor(t, "发出开启 hosts 的请求", func() bool { return len(f.calls()) == 1 })
-	if c := f.calls(); c[0].ID != uiIDHosts || !c[0].On {
-		t.Fatalf("点 Hosts 胶囊应请求开启 hosts，实际 %+v", c)
+	// 无 SNI 反代当前是关的：点一下应该请求「打开」，并给出「已开启」的反馈
+	clickRegion(t, uiIDMITM)
+	waitFor(t, "发出开启反代的请求", func() bool { return len(f.calls()) == 1 })
+	if c := f.calls(); c[0].ID != uiIDMITM || !c[0].On {
+		t.Fatalf("点反代胶囊应请求开启反代，实际 %+v", c)
 	}
 	// 切换跑在后台：窗口线程先给「正在切换」，做完再换成结果文案
-	waitFor(t, "切换完成的反馈", func() bool { return toastText() == "Hosts已开启" })
+	waitFor(t, "切换完成的反馈", func() bool { return toastText() == "无SNI反代已开启" })
 	if got := lw.activeToast(); got.Style != styleOK {
 		t.Errorf("成功反馈应带成功样式，实际 %+v", got)
 	}
@@ -427,19 +426,19 @@ func TestToggleWhilePendingIsIgnored(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, true, true)
+	setStatusForInteraction(true, false)
 	f := &fakeActions{gate: make(chan struct{})}
 	useFakeActions(t, f)
 	noToast(t)
 
-	clickRegion(t, uiIDHosts)
+	clickRegion(t, uiIDMITM)
 	waitFor(t, "发起第一次切换", func() bool { return len(f.calls()) == 1 })
 	// 后台被 gate 卡住：此刻界面必须仍然有反馈，而且不能卡住窗口线程
-	if got := toastText(); got != "Hosts正在切换…" {
+	if got := toastText(); got != "无SNI反代正在切换…" {
 		t.Errorf("切换期间应显示进行中的提示，实际 %q", got)
 	}
 
-	clickRegion(t, uiIDHosts)
+	clickRegion(t, uiIDMITM)
 	if n := len(f.calls()); n != 1 {
 		t.Errorf("切换期间再点不该发起新请求，实际 %d 次", n)
 	}
@@ -448,14 +447,14 @@ func TestToggleWhilePendingIsIgnored(t *testing.T) {
 	}
 
 	close(f.gate)
-	waitFor(t, "切换完成", func() bool { return toastText() == "Hosts已开启" })
+	waitFor(t, "切换完成", func() bool { return toastText() == "无SNI反代已开启" })
 	waitFor(t, "pendingMode 清空", func() bool {
 		lw.mu.Lock()
 		defer lw.mu.Unlock()
 		return lw.pendingMode == ""
 	})
 	// 完成之后再点：又能正常发请求了
-	clickRegion(t, uiIDHosts)
+	clickRegion(t, uiIDMITM)
 	waitFor(t, "完成后可以再次切换", func() bool { return len(f.calls()) == 2 })
 }
 
@@ -464,7 +463,7 @@ func TestClickToggleModeKeepsOtherModeIntact(t *testing.T) {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
 	// 反转开关时不能把另一项一起改了：这里只要断言「只发一次请求、只针对被点的那一项」。
-	setStatusForInteraction(true, false, false)
+	setStatusForInteraction(false, false)
 	f := &fakeActions{}
 	useFakeActions(t, f)
 
@@ -479,7 +478,7 @@ func TestClickCancelWhenReleasedOutside(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	f := &fakeActions{}
 	useFakeActions(t, f)
 
@@ -505,7 +504,7 @@ func TestClickBlankAreaDoesNothing(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	f := &fakeActions{}
 	useFakeActions(t, f)
 
@@ -527,13 +526,13 @@ func TestToggleFailureReportsInToast(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, true, true)
-	f := &fakeActions{toggleErr: errors.New("需要管理员权限")}
+	setStatusForInteraction(true, true)
+	f := &fakeActions{toggleErr: errors.New("系统代理被其他程序占用")}
 	useFakeActions(t, f)
 	noToast(t)
 
-	clickRegion(t, uiIDHosts)
-	waitFor(t, "失败反馈", func() bool { return toastText() == "需要管理员权限" })
+	clickRegion(t, uiIDMITM)
+	waitFor(t, "失败反馈", func() bool { return toastText() == "系统代理被其他程序占用" })
 	if got := lw.activeToast(); got.Style != styleWarn {
 		t.Errorf("失败反馈应带警告样式，实际 %+v", got)
 	}
@@ -546,7 +545,7 @@ func TestClickQuitAndConfig(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	f := &fakeActions{}
 	useFakeActions(t, f)
 
@@ -564,7 +563,7 @@ func TestQuitWithoutActionsDoesNothing(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	setWindowActionsHook(nil) // 未注入动作（例如窗口独立运行时）
 	clickRegion(t, uiIDQuit)  // 不应崩
 }
@@ -573,7 +572,7 @@ func TestClearLogMenuEntryClearsEdit(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	useFakeActions(t, &fakeActions{})
 
 	_, _ = lw.Write([]byte("清空之前的一行日志\n"))
@@ -613,7 +612,7 @@ func TestHoverAndLeave(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	lw.mu.Lock()
 	hwnd := lw.hwnd
 	lw.hoverID = ""
@@ -665,7 +664,6 @@ func TestFocusStopsOrder(t *testing.T) {
 		Title: "通途 Tongtu " + Version, State: "运行中", Level: stateOK,
 		Items: []windowStatusItem{
 			{Label: "系统代理", Action: uiIDSys},
-			{Label: "Hosts", Action: uiIDHosts},
 			{Label: "无SNI反代", Action: uiIDMITM},
 		},
 	}
@@ -754,7 +752,7 @@ func TestKeyboardTabCyclesFocus(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	lw.mu.Lock()
 	hwnd := lw.hwnd
 	lw.focusID, lw.keyFocus = "", true
@@ -786,7 +784,7 @@ func TestKeyboardEnterActivatesFocus(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	f := &fakeActions{}
 	useFakeActions(t, f)
 	lw.mu.Lock()
@@ -810,7 +808,7 @@ func TestClickRegionTakesKeyboardFocus(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	lw.setFocusID("")
 	t.Cleanup(func() { lw.setFocusID("") })
 
@@ -833,7 +831,7 @@ func TestEditTabForwardsToWindow(t *testing.T) {
 	if !subclassReady {
 		t.Skip("当前环境没有可用的 SetWindowSubclass")
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	lw.mu.Lock()
 	filter := lw.filter
 	lw.focusID = ""
@@ -853,18 +851,18 @@ func TestOnlyWarnButtonFiltersLog(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	useFakeActions(t, &fakeActions{})
 	lw.setOnlyWarn(false)
 	_, _ = lw.Write([]byte("普通信息一行\n"))
-	emitWarnLog(t, "写入 hosts 失败")
+	emitWarnLog(t, "接管系统代理失败")
 
 	clickRegion(t, uiIDOnlyWarn)
 	if !lw.onlyWarnValue() {
 		t.Fatal("点一次「只看警告」应打开过滤")
 	}
 	got := editText(t)
-	if !strings.Contains(got, "写入 hosts 失败") {
+	if !strings.Contains(got, "接管系统代理失败") {
 		t.Errorf("只看警告时应保留警告行：%q", got)
 	}
 	if strings.Contains(got, "普通信息一行") {
@@ -885,7 +883,7 @@ func TestOnlyWarnWithNoMatchesShowsHint(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	useFakeActions(t, &fakeActions{})
 	lw.clearLog()
 	lw.setOnlyWarn(false)
@@ -903,7 +901,7 @@ func TestFilterBoxDebounceAppliesFilter(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	useFakeActions(t, &fakeActions{})
 	lw.setOnlyWarn(false)
 	filter := lw.filterHandle()
@@ -1019,7 +1017,7 @@ func TestServicesMenuPointIsScreenCoords(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	lw.mu.Lock()
 	hwnd := lw.hwnd
 	lw.mu.Unlock()
@@ -1055,7 +1053,7 @@ func TestSelfTestWritesResultsToCard(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, true)
+	setStatusForInteraction(false, true)
 	f := &fakeActions{selfTest: []selfcheck.Row{
 		{Host: "github.com", DNSOK: true, ProxyOK: true, ProxyTested: true, Verdict: selfcheck.VerdictOK},
 		{Host: "raw.githubusercontent.com", DNSOK: true, DirectOK: true, ProxyTested: true,
@@ -1100,7 +1098,7 @@ func TestSelfTestIgnoredWhileRunning(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, true)
+	setStatusForInteraction(false, true)
 	gate := make(chan struct{})
 	f := &fakeActions{selfTest: []selfcheck.Row{{Host: "a", Verdict: selfcheck.VerdictOK}}}
 	f.mu.Lock()
@@ -1130,7 +1128,7 @@ func TestSelfTestIgnoredWhileRunning(t *testing.T) {
 	}
 }
 
-// pausedStatus 摆一份「已暂停」的状态条：三个开关都是关的，暂停按钮变成「恢复」。
+// pausedStatus 摆一份「已暂停」的状态条：两个开关都是关的，暂停按钮变成「恢复」。
 func pausedStatus(paused bool) {
 	setWindowStatus(windowStatus{
 		Title:  "通途 Tongtu " + Version,
@@ -1139,7 +1137,6 @@ func pausedStatus(paused bool) {
 		Paused: paused,
 		Items: []windowStatusItem{
 			{Label: "系统代理", On: !paused, Action: uiIDSys},
-			{Label: "Hosts", On: false, Action: uiIDHosts},
 			{Label: "无SNI反代", On: !paused, Action: uiIDMITM},
 		},
 		Detail: []string{"服务组 steam"},
@@ -1244,7 +1241,7 @@ func TestPauseFailureReported(t *testing.T) {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
 	pausedStatus(false)
-	f := &fakeActions{pauseErr: errors.New("hosts 被别的程序改写了")}
+	f := &fakeActions{pauseErr: errors.New("系统代理被别的程序改写")}
 	useFakeActions(t, f)
 	waitFor(t, "窗口拿到状态", func() bool {
 		lw.mu.Lock()
@@ -1253,7 +1250,7 @@ func TestPauseFailureReported(t *testing.T) {
 	})
 
 	lw.pauseFor(currentWindowActions(), "pause:15m")
-	waitFor(t, "失败反馈", func() bool { return strings.Contains(toastText(), "hosts 被别的程序改写了") })
+	waitFor(t, "失败反馈", func() bool { return strings.Contains(toastText(), "系统代理被别的程序改写") })
 	// 失败后不应该卡在「切换中」
 	waitFor(t, "允许重试", func() bool {
 		lw.mu.Lock()
@@ -1286,7 +1283,7 @@ func TestSitesPanelToggle(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	f := &fakeActions{sites: []uiSite{{Pattern: "huggingface.co", MITM: true}}}
 	useFakeActions(t, f)
 	lw.mu.Lock()
@@ -1325,7 +1322,7 @@ func TestSitesAddFromInput(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	f := &fakeActions{}
 	useFakeActions(t, f)
 	lw.mu.Lock()
@@ -1366,7 +1363,7 @@ func TestSitesEnterKeyAdds(t *testing.T) {
 	if !subclassReady {
 		t.Skip("当前环境没有可用的 SetWindowSubclass")
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	f := &fakeActions{}
 	useFakeActions(t, f)
 	lw.mu.Lock()
@@ -1393,7 +1390,7 @@ func TestSitesAddEmptyInputWarns(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	f := &fakeActions{}
 	useFakeActions(t, f)
 	lw.mu.Lock()
@@ -1415,7 +1412,7 @@ func TestSitesDuplicateAddWarns(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	f := &fakeActions{sites: []uiSite{{Pattern: "my.site.com"}}}
 	useFakeActions(t, f)
 	lw.mu.Lock()
@@ -1437,7 +1434,7 @@ func TestSitesRemoveRow(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	f := &fakeActions{sites: []uiSite{{Pattern: "my.site.com"}}}
 	useFakeActions(t, f)
 	lw.mu.Lock()
@@ -1462,7 +1459,7 @@ func TestSitesToggleMITM(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	f := &fakeActions{sites: []uiSite{{Pattern: "my.site.com", MITM: false}}}
 	useFakeActions(t, f)
 	lw.mu.Lock()
@@ -1499,7 +1496,7 @@ func TestSitesPanelIgnoresRepeatClicks(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	f := &fakeActions{sites: []uiSite{{Pattern: "my.site.com"}}, siteGate: make(chan struct{})}
 	useFakeActions(t, f)
 	lw.mu.Lock()
@@ -1534,7 +1531,7 @@ func TestSitesFailureReported(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	f := &fakeActions{siteErr: errors.New("不是合法的域名")}
 	useFakeActions(t, f)
 	lw.mu.Lock()
@@ -1594,7 +1591,7 @@ func TestProbePanelToggleAndRun(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	f := &fakeActions{probeRow: probeStatusRow()}
 	useFakeActions(t, f)
 	lw.mu.Lock()
@@ -1647,7 +1644,7 @@ func TestProbeActionsRunAfterFailure(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, true, false)
+	setStatusForInteraction(true, false)
 	row := selfcheck.Row{
 		Host: "blocked.example", IP: "1.2.3.4", DNSMs: 10, DNSOK: true,
 		TCP: "20ms", TCPOK: true,
@@ -1706,7 +1703,7 @@ func TestProbeCopyWithoutResult(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, true, false)
+	setStatusForInteraction(true, false)
 	f := &fakeActions{}
 	useFakeActions(t, f)
 	lw.mu.Lock()
@@ -1736,7 +1733,7 @@ func TestProbeEnterKeyRuns(t *testing.T) {
 	if !subclassReady {
 		t.Skip("当前环境没有可用的 SetWindowSubclass")
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	f := &fakeActions{probeRow: probeStatusRow()}
 	useFakeActions(t, f)
 	lw.mu.Lock()
@@ -1764,7 +1761,7 @@ func TestProbePanelExclusiveWithSites(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	f := &fakeActions{sites: []uiSite{{Pattern: "my.site.com"}}, probeRow: probeStatusRow()}
 	useFakeActions(t, f)
 	lw.mu.Lock()
@@ -1804,7 +1801,7 @@ func TestProbeBusyIgnored(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	gate := make(chan struct{})
 	f := &fakeActions{probeGate: gate, probeRow: probeStatusRow()}
 	useFakeActions(t, f)
@@ -1841,7 +1838,7 @@ func TestProbeInputErrorsReported(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	f := &fakeActions{probeRow: probeStatusRow()}
 	useFakeActions(t, f)
 	lw.mu.Lock()
@@ -1874,7 +1871,7 @@ func TestProbeWithoutImplementation(t *testing.T) {
 	if err := showLogWindow(); err != nil {
 		t.Skipf("当前会话无法创建窗口: %v", err)
 	}
-	setStatusForInteraction(false, false, false)
+	setStatusForInteraction(false, false)
 	// 只注入其余动作，故意不提供 Probe。
 	f := &fakeActions{}
 	act := f.actions()

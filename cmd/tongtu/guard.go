@@ -22,8 +22,8 @@ import (
 
 // 崩溃 / 强杀防护（「监护进程」）。
 //
-// 问题：通途会接管系统代理（注册表指向 127.0.0.1:19180）与 hosts（若干域名指向
-// 127.0.0.1）。如果通途被强杀、崩溃或断电，这些设置会留在系统里指向一个已经
+// 问题：通途会接管系统代理（注册表指向 127.0.0.1:19180）。如果通途被强杀、崩溃或断电，
+// 这些设置会留在系统里指向一个已经
 // 不存在的本地代理——表现就是「浏览器上不了网」。优雅退出时通途会自己还原，
 // 但崩溃时没有机会执行任何代码。
 //
@@ -32,7 +32,7 @@ import (
 //	tongtu.exe __guard --guard-pid <主进程 PID> --guard-token <本轮令牌>
 //
 //	1. 监护进程只做一件事：等待主进程退出（等它的进程句柄），
-//	   醒来后调用 app.RecoverStale —— 还原系统代理、移除 hosts 托管块；
+//	   醒来后调用 app.RecoverStale —— 还原系统代理；
 //	2. RecoverStale 是幂等的：主进程若已优雅还原（状态文件已删除），它就是空操作；
 //	3. 令牌文件 guard.json 记录「当前这轮接管」的令牌。若期间已有新实例接管
 //	   （令牌被改写），旧监护进程什么都不做，避免把新实例的状态清掉；
@@ -80,7 +80,7 @@ func readGuardInfo() (guardInfo, error) {
 	return gi, nil
 }
 
-// foreignLiveSession 报告「系统代理 / hosts 是否正被另一个仍在运行的实例持有」，并返回它的 pid。
+// foreignLiveSession 报告「系统代理是否正被另一个仍在运行的实例持有」，并返回它的 pid。
 //
 // guard.json 里的 pid 是那一轮实例的主进程：它还活着，就说明系统状态由它负责。此时绝不能做
 // 「遗留清理」（app.RecoverStale）——那会把别人刚接管好的系统代理还原掉，而对方界面照旧显示
@@ -199,7 +199,7 @@ func (g *guardRunner) markBreakawayFailed() {
 	g.mu.Unlock()
 }
 
-// startGuard 在确实接管了系统状态（系统代理 / hosts）时拉起监护进程。
+// startGuard 在确实接管了系统状态（系统代理）时拉起监护进程。
 // 可重复调用：同一轮只拉起一个，监护进程若已退出会重新拉起。
 func startGuard(log *slog.Logger) {
 	guard.mu.Lock()
@@ -252,9 +252,9 @@ func startGuard(log *slog.Logger) {
 				breakawayErr, inJobObject())
 			if log != nil {
 				log.Warn("崩溃防护受限：当前启动方式下监护进程无法脱离作业对象，"+
-					"异常退出（崩溃/强杀）后系统代理与 hosts 要等下次启动才还原",
+					"异常退出（崩溃/强杀）后系统代理要等下次启动才还原",
 					"原因", breakawayErr,
-					"建议", "从资源管理器双击启动，或改用「开机自启（最高权限）」")
+					"建议", "从资源管理器双击启动")
 			}
 		}
 	}
@@ -284,12 +284,11 @@ func guardNeeded(a *app.App) bool {
 	if a == nil {
 		return false
 	}
-	st := a.Status()
-	return st.SystemProxy || st.Hosts
+	return a.Status().SystemProxy
 }
 
 // watchGuard 轮询「是否已接管系统状态」，一旦发生就确保监护进程在跑。
-// 托盘里手动打开系统代理 / hosts 之后也由它补上监护。
+// 托盘里手动打开系统代理之后也由它补上监护。
 //
 // 同一轮里顺带维护「断电自愈项」（见 recover.go）：监护进程管「进程死了」，
 // RunOnce 管「机器死了」（掉电 / 蓝屏）——两者都只在接管期间存在。
@@ -322,7 +321,7 @@ var (
 
 var guardCmd = &cobra.Command{
 	Use:    guardSubcommand,
-	Short:  "内部命令：等待主进程退出后还原系统代理与 hosts（崩溃防护）",
+	Short:  "内部命令：等待主进程退出后还原系统代理（崩溃防护）",
 	Hidden: true,
 	Args:   cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -359,7 +358,7 @@ func runGuard(pid int, token string) {
 		guardLog("令牌已更换（新实例已接管：pid=%d），跳过还原", gi.PID)
 		return
 	}
-	guardLog("开始还原系统代理与 hosts")
+	guardLog("开始还原系统代理")
 	app.RecoverStale(nil)
 	// 状态已经还原：撤掉「下次登录还原」项，别在系统里留下指向本程序的常驻命令。
 	// （如果这期间又有实例接管，它会在下一轮巡检里重新登记。）

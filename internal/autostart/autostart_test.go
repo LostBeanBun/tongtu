@@ -18,19 +18,6 @@ func TestCommandLine(t *testing.T) {
 	}
 }
 
-func TestXMLTag(t *testing.T) {
-	xml := `<?xml version="1.0"?><Task><Actions><Exec><Command>D:\app\tongtu.exe</Command><Arguments>start --hidden</Arguments></Exec></Actions></Task>`
-	if got := xmlTag(xml, "Command"); got != `D:\app\tongtu.exe` {
-		t.Fatalf("Command = %q", got)
-	}
-	if got := xmlTag(xml, "Arguments"); got != "start --hidden" {
-		t.Fatalf("Arguments = %q", got)
-	}
-	if got := xmlTag(xml, "Missing"); got != "" {
-		t.Fatalf("缺失标签应返回空串，得到 %q", got)
-	}
-}
-
 // TestRecoverCommand 覆盖断电自愈命令行：带空格的路径必须整体加引号，
 // 否则 RunOnce 会把 "C:\Program Files\..." 拆成两个参数而根本起不来。
 func TestRecoverCommand(t *testing.T) {

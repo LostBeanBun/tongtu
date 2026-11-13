@@ -60,10 +60,10 @@ func TestLoadUpgradesOldConfig(t *testing.T) {
 		t.Errorf("用户保留的端点被删: %v", cfg.DNS.Endpoints)
 	}
 
-	// 缺失字段使用新默认值：默认只开系统代理（Hosts 与反代要用户显式开启）。
-	if !cfg.SystemProxy || cfg.Hosts || cfg.MITM.Enabled || len(cfg.MITM.Domains) == 0 {
-		t.Errorf("缺失字段没有取新默认值: system_proxy=%v hosts=%v mitm=%+v",
-			cfg.SystemProxy, cfg.Hosts, cfg.MITM)
+	// 缺失字段使用新默认值：默认只开系统代理（反代要用户显式开启）。
+	if !cfg.SystemProxy || cfg.MITM.Enabled || len(cfg.MITM.Domains) == 0 {
+		t.Errorf("缺失字段没有取新默认值: system_proxy=%v mitm=%+v",
+			cfg.SystemProxy, cfg.MITM)
 	}
 	if _, err := os.Stat(path + ".v0.bak"); err != nil {
 		t.Fatalf("缺少旧配置备份: %v", err)
@@ -103,8 +103,8 @@ func TestLoadUpgradeKeepsVersionedConfig(t *testing.T) {
 	if cfg.UpgradedFrom != 3 {
 		t.Errorf("UpgradedFrom = %d，期望 3", cfg.UpgradedFrom)
 	}
-	if cfg.Listen != "127.0.0.1:18080" || cfg.Hosts || cfg.MITM.Enabled {
-		t.Errorf("用户开关被改写: listen=%s hosts=%v mitm=%v", cfg.Listen, cfg.Hosts, cfg.MITM.Enabled)
+	if cfg.Listen != "127.0.0.1:18080" || cfg.MITM.Enabled {
+		t.Errorf("用户开关被改写: listen=%s mitm=%v", cfg.Listen, cfg.MITM.Enabled)
 	}
 	if len(cfg.Custom.MITMDomains) != 1 || cfg.Custom.MITMDomains[0] != "blocked.site.com" {
 		t.Errorf("用户反代域名丢失: %v", cfg.Custom.MITMDomains)
@@ -172,15 +172,12 @@ func TestDefaultSanity(t *testing.T) {
 }
 
 // TestDefaultOnlySystemProxy 默认加速方式必须是「不需要任何额外准备」的那一种：
-// 系统代理不需要管理员、不需要装根证书；Hosts 与无 SNI 反代都要用户显式开启。
+// 系统代理不需要管理员、不需要装根证书；无 SNI 反代要用户显式开启。
 // 反代名单仍然预置好，用户打开开关后立刻可用（auto_cert 也保留，届时才会提示装证书）。
 func TestDefaultOnlySystemProxy(t *testing.T) {
 	cfg := Default()
 	if !cfg.SystemProxy {
 		t.Error("默认应开启系统代理模式（无需管理员、无需证书）")
-	}
-	if cfg.Hosts {
-		t.Error("Hosts 模式需要管理员并改写系统 hosts，默认应关闭")
 	}
 	if cfg.MITM.Enabled {
 		t.Error("无 SNI 反代需要先安装根证书，默认应关闭")

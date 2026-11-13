@@ -2,12 +2,12 @@
 #
 # 为什么要单独一个脚本：
 #   通途是绿色单文件，但它在系统里动过这些地方（都可能是「卸载后才发现还在」的）：
-#     1. 运行中的进程（接管着系统代理 / hosts）
-#     2. 开机自启（HKCU Run 值，或「最高权限」计划任务）
+#     1. 运行中的进程（接管着系统代理）
+#     2. 开机自启（HKCU Run 值；0.11 及更早版本建过的「最高权限」计划任务也一并删）
 #     3. 断电自愈项（HKCU RunOnce 的 TongtuRecover）
 #     4. 本地根证书（无 SNI 反代用，装在当前用户 Root 存储）
 #     5. 系统代理（万一上次是强杀，可能还指着已经不存在的本地端口）
-#     6. hosts 托管块（同上，需要管理员权限才能清）
+#     6. hosts 托管块（0.11 及更早版本可能留下的残留，兜底清掉）
 #   手工逐项检查容易漏；这个脚本按顺序做完并逐条报告结果。
 #
 # 用法：
@@ -20,7 +20,7 @@
 #
 # 注意：
 #   - 默认**不删** exe 与配置，只撤销系统层面的改动——误删配置的代价比多点一次高。
-#   - 清 hosts 托管块需要管理员权限；非管理员运行时若发现有残留，会明确告诉你该怎么做。
+#   - 清理旧版本留下的 hosts 托管块需要管理员权限；非管理员运行时若发现有残留，会明确告诉你该怎么做。
 #   - 证书装在「当前用户」存储，不需要管理员；若当初是以别的用户身份安装的，请用那个用户运行。
 param(
     [string]$Exe = "",
@@ -133,12 +133,12 @@ if ($procs.Count -eq 0) {
 } elseif ($exeExists) {
     Invoke-Tongtu @("stop") | Out-Null
     if (Wait-Until { (Get-TongtuProcesses).Count -eq 0 } 20) {
-        Write-Host "      已正常停止并还原系统代理 / hosts。" -ForegroundColor Gray
+        Write-Host "      已正常停止并还原系统代理。" -ForegroundColor Gray
     } else {
         $left = Get-TongtuProcesses
         Write-Host ("      正常停止超时（pid {0}），改为强制结束——系统状态可能没还原，见下一步。" -f ($left.Id -join ', ')) -ForegroundColor Yellow
         $left | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
-        $notes.Add("实例是被强制结束的：系统代理 / hosts 可能残留，本脚本会在后面的步骤里兜底清理。")
+        $notes.Add("实例是被强制结束的：系统代理可能残留，本脚本会在后面的步骤里兜底清理。")
     }
 } else {
     $procs | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
@@ -189,8 +189,8 @@ if ($KeepCert) {
     }
 }
 
-# —— 5. 系统代理与 hosts 兜底 ——
-Write-Host "[5/6] 兜底还原系统代理与 hosts…" -ForegroundColor Gray
+# —— 5. 系统代理兜底 + 旧版本 hosts 残留 ——
+Write-Host "[5/6] 兜底还原系统代理（并清理旧版本 hosts 残留）…" -ForegroundColor Gray
 $k = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
 $proxyPointsHere = ($null -ne $k) -and ([string]$k.ProxyServer -eq $listen)
 if (($null -ne $k) -and ($k.ProxyEnable -eq 1) -and $proxyPointsHere) {
@@ -204,13 +204,13 @@ if (Test-Path $hostsPath) {
     if ($hostsText.Contains($beginMark)) {
         try {
             if (Remove-HostsBlock) {
-                Write-Host "      已移除 hosts 托管块。" -ForegroundColor Gray
+                Write-Host "      已移除旧版本留下的 hosts 托管块。" -ForegroundColor Gray
             }
         } catch {
             $problems.Add("移除 hosts 托管块失败（需要管理员权限）：$($_.Exception.Message)")
         }
     } else {
-        Write-Host "      hosts 里没有托管块。" -ForegroundColor Gray
+        Write-Host "      hosts 里没有残留托管块。" -ForegroundColor Gray
     }
 }
 
@@ -248,7 +248,7 @@ if ($RemoveExe) {
 Write-Host ""
 foreach ($n in $notes) { Write-Host "注意：$n" -ForegroundColor DarkYellow }
 if ($problems.Count -eq 0) {
-    Write-Host "结论：清理完成。通途没有在系统里留下自启、证书、代理或 hosts 改动。" -ForegroundColor Green
+    Write-Host "结论：清理完成。通途没有在系统里留下自启、证书、代理或残留改动。" -ForegroundColor Green
     exit 0
 }
 Write-Host "结论：有项目没清理干净：" -ForegroundColor Red

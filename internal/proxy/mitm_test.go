@@ -569,9 +569,6 @@ func TestResetNetworkClearsGoodCache(t *testing.T) {
 		}
 	}
 	p.ResetNetwork() // 幂等
-	if p.Local443Up() {
-		t.Fatal("测试没有启动本地 :443，不应报告监听就绪")
-	}
 }
 
 // TestMITMDisablesHTTP2 客户端与上游都不得协商 HTTP/2：反代按 HTTP/1.1 逐请求转发。

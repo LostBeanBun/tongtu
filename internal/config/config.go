@@ -14,7 +14,11 @@ import (
 
 // CurrentVersion 是配置文件版本：低于该版本的配置会先备份，再在**保留用户设置**的
 // 前提下升级到新版本（见 Load 与 migrate）。
-const CurrentVersion = 4
+//
+// v5：移除 hosts 模式（hosts / hosts_refresh_minutes）。0.12 起只保留
+// 「系统代理 + 可选无 SNI 反代」这条免管理员链路，migrate 只丢这两个键，
+// mitm 一节原样保留（语义未变，yaml 也会忽略它不认识的旧键）。
+const CurrentVersion = 5
 
 // LogFileOff 是 log.file 的特殊值：不写日志文件，只在控制台与窗口里输出。
 // 留空表示用默认值（%APPDATA%\tongtu\tongtu.log）。
@@ -64,17 +68,15 @@ type CustomConfig struct {
 
 // Config 是 tongtu 的完整配置。
 type Config struct {
-	Version         int          `yaml:"version"`               // 配置文件版本
-	Listen          string       `yaml:"listen"`                // 本地代理监听地址
-	Control         string       `yaml:"control"`               // 控制 API 监听地址（仅回环）
-	SystemProxy     bool         `yaml:"system_proxy"`          // 启动时接管系统代理
-	Hosts           bool         `yaml:"hosts"`                 // 启动时接管 hosts
-	Services        []string     `yaml:"services"`              // 启用的服务组 id
-	HostsRefreshMin int          `yaml:"hosts_refresh_minutes"` // hosts IP 刷新周期
-	DNS             DNSConfig    `yaml:"dns"`
-	MITM            MITMConfig   `yaml:"mitm"`
-	Custom          CustomConfig `yaml:"custom"`
-	Log             LogConfig    `yaml:"log"`
+	Version     int          `yaml:"version"`      // 配置文件版本
+	Listen      string       `yaml:"listen"`       // 本地代理监听地址
+	Control     string       `yaml:"control"`      // 控制 API 监听地址（仅回环）
+	SystemProxy bool         `yaml:"system_proxy"` // 启动时接管系统代理
+	Services    []string     `yaml:"services"`     // 启用的服务组 id
+	DNS         DNSConfig    `yaml:"dns"`
+	MITM        MITMConfig   `yaml:"mitm"`
+	Custom      CustomConfig `yaml:"custom"`
+	Log         LogConfig    `yaml:"log"`
 
 	// UpgradedFrom 记录本次加载触发配置升级前的旧版本号（0 表示未升级）。
 	UpgradedFrom int `yaml:"-"`
@@ -83,17 +85,15 @@ type Config struct {
 // Default 返回内置默认配置。
 //
 // 默认只开「系统代理模式」——它不需要管理员权限、不需要安装根证书，装好就能用；
-// Hosts 模式（要写系统 hosts、需管理员）与无 SNI 反代（要先装本地根证书）
-// 都属于「需要用户额外准备」的接管方式，默认关闭，由用户在托盘 / 窗口里按需打开。
+// 无 SNI 反代（要先装本地根证书）属于「需要用户额外准备」的接管方式，
+// 默认关闭，由用户在托盘 / 窗口里按需打开。
 func Default() *Config {
 	return &Config{
-		Version:         CurrentVersion,
-		Listen:          "127.0.0.1:19180",
-		Control:         "127.0.0.1:19181",
-		SystemProxy:     true,
-		Hosts:           false,
-		Services:        []string{"steam", "github"},
-		HostsRefreshMin: 10,
+		Version:     CurrentVersion,
+		Listen:      "127.0.0.1:19180",
+		Control:     "127.0.0.1:19181",
+		SystemProxy: true,
+		Services:    []string{"steam", "github"},
 		DNS: DNSConfig{
 			// 境内可达的端点在前（1.1.1.1/8.8.8.8 在境内常被拒连，仅作后备）；
 			// 223.5.5.5 的 DoH 路径是 /resolve（旧版误用 /dns-query 导致 400）。
@@ -230,6 +230,11 @@ func Load(path string) (*Config, error) {
 // 都是他们自己的选择，升级没有理由替他们改掉。以后每次抬 CurrentVersion，
 // 都在这里补一段对应的修正逻辑，并在 config_test.go 里留下升级用例。
 func migrate(cfg *Config, from int) {
+	if from < 5 {
+		// v5 移除 hosts 模式：配置结构体里已没有 hosts / hosts_refresh_minutes，
+		// yaml 解析时这两个键被自然忽略（不会带进新配置）。这里只留说明，
+		// 真正生效的是「字段没了」——旧文件会在首次 Save 时被重写成不含它们的形态。
+	}
 	if from < 4 {
 		// v4 之前 223.5.5.5 的 DoH 路径写成了 /dns-query（阿里返回 400），
 		// 修正成 /resolve；只动这一个已知错误值，用户自己加的端点原样保留。
@@ -305,9 +310,6 @@ func (c *Config) Validate() error {
 	}
 	if c.DNS.CacheMaxSec <= c.DNS.CacheMinSec {
 		c.DNS.CacheMaxSec = c.DNS.CacheMinSec * 10
-	}
-	if c.HostsRefreshMin <= 0 {
-		c.HostsRefreshMin = 10
 	}
 	if strings.TrimSpace(c.Log.File) == "" {
 		// 日志默认落盘：出问题时要能翻到「刚才发生了什么」，而不是关了窗口就没了。
@@ -452,9 +454,4 @@ func (c *Config) LogFilePath() string {
 		return f
 	}
 	return filepath.Join(Dir(), f)
-}
-
-// HostsRefresh 返回 hosts 刷新周期。
-func (c *Config) HostsRefresh() time.Duration {
-	return time.Duration(c.HostsRefreshMin) * time.Minute
 }
