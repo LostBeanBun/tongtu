@@ -153,8 +153,9 @@ func (r *Resolver) mergeRemote(host string, out []net.IP) []net.IP {
 	return merged
 }
 
-// Lookup 查询 host 的 A 记录（IPv4），带缓存；DoH 全部失败时回退系统 DNS。
-// 回退可以用到 IPv6 地址（只有 AAAA 的域名在直连路径上仍然可用）。
+// Lookup 查询 host 的地址，带缓存：先查 A（IPv4），端点正常应答但没有 A 记录时
+// 再查 AAAA——只有 AAAA 的域名因此也能拿到干净解析，而不是回退系统 DNS。
+// 所有端点都拿不到可用地址时回退系统 DNS（可用性优先）。
 func (r *Resolver) Lookup(ctx context.Context, host string) ([]net.IP, error) {
 	host = normalizeHost(host)
 	if host == "" {
@@ -166,11 +167,14 @@ func (r *Resolver) Lookup(ctx context.Context, host string) ([]net.IP, error) {
 
 	var errs []string
 	for _, ep := range r.unionOrder() {
-		ips, ttl, err := r.query(ctx, ep, host)
-		if err == nil && len(ips) == 0 {
-			err = fmt.Errorf("无 A 记录")
-		}
+		ips, ttl, err := r.queryBest(ctx, ep, host)
 		if err != nil {
+			if isNoRecord(err) {
+				// 端点正常应答，只是这个域名没记录：端点是健康的，不能记进熔断账——
+				// 否则一个打错的自定义站点域名就能把全部端点降权一个冷却期。
+				r.markOK(ep)
+				continue
+			}
 			r.markFail(ep, err)
 			errs = append(errs, fmt.Sprintf("%s: %v", ep, err))
 			continue
@@ -180,21 +184,31 @@ func (r *Resolver) Lookup(ctx context.Context, host string) ([]net.IP, error) {
 		return ips, nil
 	}
 
-	// 全部 DoH 端点失败：回退系统 DNS，保证可用性优先（回退结果不写缓存）。
+	// 走到这里：要么端点全故障，要么每个端点都正常应答「没有记录」。
+	// 都回退系统 DNS，保证可用性优先（回退结果不写缓存）。
 	// 网络参数用 "ip"（IPv4+IPv6）：只有 AAAA 的域名也能拿到可用地址走 IPv6 直连。
 	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
 	if err != nil {
+		if len(errs) == 0 {
+			return nil, fmt.Errorf("DoH 无该域名记录且系统 DNS 失败: %w", err)
+		}
 		return nil, fmt.Errorf("DoH 解析失败且系统 DNS 失败 (%s): %w", strings.Join(errs, "; "), err)
 	}
-	r.log.Warn("DoH 端点全部失败，已回退系统 DNS", "host", host, "errors", errs)
+	if len(errs) > 0 {
+		r.log.Warn("DoH 端点全部失败，已回退系统 DNS", "host", host, "errors", errs)
+	} else {
+		r.log.Warn("DoH 各端点均无该域名记录，已回退系统 DNS", "host", host)
+	}
 	return ips, nil
 }
 
 // LookupPublic 与 Lookup 相同，但只保留公网 IPv4（供预热直连与批量解析使用）。
 //
-// 为什么把 IPv6 也滤掉：拿去预热 / 直连的地址会成为客户端的**首选**（IPv6 优先），
-// 而我们没有干净来源可以校验 AAAA（DoH 查询只取 A 记录）；用一个不可达/被污染的
-// 地址比不用更糟——它会把本来能通的连接也拖下水。
+// 为什么把 IPv6 也滤掉：这里的取址口径是**预热 / 直连 / 批量解析**，统一用 IPv4——
+// 本机 IPv6 出口常不可用（只开了 v4 路由、运营商 v6 半残的情况很常见），
+// 把 v6 候选混进预热只会把探测时间浪费在注定失败的地址上。
+// 请求路径确实需要 IPv6 时（只有 AAAA 记录的域名）走的是 Lookup / LookupAll 的
+// AAAA 兜底（见 queryBest），不经过这里。
 func (r *Resolver) LookupPublic(ctx context.Context, host string) ([]net.IP, error) {
 	ips, err := r.Lookup(ctx, host)
 	if err != nil {
@@ -262,7 +276,7 @@ func (r *Resolver) LookupAllUncached(ctx context.Context, host string) []net.IP 
 			// 若在途查询跟着一起死，宽限期后到达的结果就只剩「调用方取消」这一种错误，
 			// 无从判断端点好坏，记账（accountLate）也就无从谈起。
 			// 生命周期改由自己的超时（r.cfg.Timeout）约束，最迟 cfg.Timeout 后必有结果。
-			ips, ttl, err := r.query(context.WithoutCancel(ctx), ep, host)
+			ips, ttl, err := r.queryBest(context.WithoutCancel(ctx), ep, host)
 			resCh <- result{ep: ep, ips: ips, ttl: ttl, err: err}
 		}(ep)
 	}
@@ -273,15 +287,22 @@ func (r *Resolver) LookupAllUncached(ctx context.Context, host string) []net.IP 
 	// account 只做端点记账：成功记 OK、失败记 Fail，供 breaker（unionOrder 跳过
 	// 冷却期内的失败端点）降权。返回是否拿到了可用 IP。
 	account := func(res result) bool {
-		if res.err != nil || len(res.ips) == 0 {
-			if res.err == nil {
-				res.err = fmt.Errorf("无 A 记录")
+		if res.err != nil {
+			if isNoRecord(res.err) {
+				// 「正常应答但没有记录」是回答不是故障：端点保持健康，不降权。
+				r.markOK(res.ep)
+				return false
 			}
 			// 查询已与调用方取消解耦，失败只取决于端点本身；
 			// 仍保留 Canceled 判断，避免把「没人要了」误算成端点故障。
 			if !errors.Is(res.err, context.Canceled) {
 				r.markFail(res.ep, res.err)
 			}
+			return false
+		}
+		if len(res.ips) == 0 {
+			// queryBest 不会返回「成功但空」；防御性处理同样按应答算，不记失败。
+			r.markOK(res.ep)
 			return false
 		}
 		r.markOK(res.ep)
@@ -425,9 +446,44 @@ func (r *Resolver) Reset() {
 	r.client.CloseIdleConnections()
 }
 
-// query 执行一次 DoH 查询，返回 IPv4 地址与建议缓存时长。
-func (r *Resolver) query(ctx context.Context, endpoint, host string) ([]net.IP, time.Duration, error) {
-	u := endpoint + "?name=" + url.QueryEscape(host) + "&type=A"
+// DoH 查询用到的记录类型取值（URL 的 type 参数与 Answer.type 共用）。
+const (
+	qtypeA    = "A"
+	qtypeAAAA = "AAAA"
+
+	rrTypeA    = 1
+	rrTypeAAAA = 28
+
+	// dnsStatusNXDomain 是 DNS rcode 3：域名不存在。
+	dnsStatusNXDomain = 3
+)
+
+// errNoRecords / errNXDomain 标记「端点正常应答，但没有可用记录」。
+//
+// 它们是**回答**而不是**故障**：端点好好地把结果送回来了（该类型无记录，
+// 或域名根本不存在）。把这类回答记进熔断账会把健康端点降权、在冷却期内被跳过——
+// 一个打错的自定义站点域名、或只有 AAAA 记录的域名，就能让全部 DoH 端点
+// 「集体阵亡」90 秒，`tongtu status` 的 DNS 端点也会误报 [fail]。
+// 调用方用 isNoRecord 区分这两类与真正的端点故障。
+var (
+	errNoRecords = errors.New("无该类型记录")
+	errNXDomain  = errors.New("域名不存在 (NXDOMAIN)")
+)
+
+// isNoRecord 报告 err 是否属于「端点正常应答但没有记录」（NODATA / NXDOMAIN）。
+func isNoRecord(err error) bool {
+	return errors.Is(err, errNoRecords) || errors.Is(err, errNXDomain)
+}
+
+// query 执行一次指定记录类型的 DoH 查询，返回地址与建议缓存时长。
+//
+// 返回错误分两类，调用方必须区分：
+//   - **端点故障**（传输失败、HTTP 非 200、响应解析失败、rcode 2/5 之类）：
+//     记进熔断账（markFail），冷却期内降权；
+//   - **正常应答但没有记录**（errNoRecords / errNXDomain）：端点是健康的，
+//     见 isNoRecord 的说明。
+func (r *Resolver) query(ctx context.Context, endpoint, host, qtype string) ([]net.IP, time.Duration, error) {
+	u := endpoint + "?name=" + url.QueryEscape(host) + "&type=" + qtype
 	qctx, cancel := context.WithTimeout(ctx, r.cfg.Timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(qctx, http.MethodGet, u, nil)
@@ -451,24 +507,40 @@ func (r *Resolver) query(ctx context.Context, endpoint, host string) ([]net.IP, 
 	if err := json.Unmarshal(body, &msg); err != nil {
 		return nil, 0, fmt.Errorf("响应解析失败: %w", err)
 	}
+	// NXDOMAIN 是「这个名字不存在」的权威回答，端点本身没问题；
+	// 名字都不存在，其它类型也不必再查了。
+	if msg.Status == dnsStatusNXDomain {
+		return nil, 0, fmt.Errorf("%w: %s", errNXDomain, host)
+	}
 	if msg.Status != 0 {
 		return nil, 0, fmt.Errorf("DNS rcode %d", msg.Status)
+	}
+	rrType := rrTypeA
+	if qtype == qtypeAAAA {
+		rrType = rrTypeAAAA
 	}
 	var ips []net.IP
 	var minTTL time.Duration
 	for _, a := range msg.Answer {
-		if a.Type != 1 { // 只取 A 记录
+		if a.Type != rrType { // 只取本次查询的记录类型（跳过 CNAME 等）
 			continue
 		}
 		ip := net.ParseIP(a.Data)
 		if !validIP(ip) {
 			continue
 		}
-		ips = append(ips, ip.To4())
+		if rrType == rrTypeA {
+			ips = append(ips, ip.To4())
+		} else {
+			ips = append(ips, ip)
+		}
 		ttl := time.Duration(a.TTL) * time.Second
 		if ttl > 0 && (minTTL == 0 || ttl < minTTL) {
 			minTTL = ttl
 		}
+	}
+	if len(ips) == 0 {
+		return nil, 0, fmt.Errorf("无 %s 记录: %w", qtype, errNoRecords)
 	}
 	if minTTL <= 0 {
 		minTTL = r.cfg.CacheMin
@@ -480,6 +552,19 @@ func (r *Resolver) query(ctx context.Context, endpoint, host string) ([]net.IP, 
 		minTTL = r.cfg.CacheMax
 	}
 	return ips, minTTL, nil
+}
+
+// queryBest 先查 A；端点正常应答但没有 A 记录（NODATA）时对同一端点再查 AAAA。
+//
+// 这是「只有 AAAA 记录的域名」的干净解析来源：此前这类域名只能回退系统 DNS
+// （污染域名上会拿到假地址）。NXDOMAIN 不再往下查——名字不存在，其它类型必然也是空的。
+// A 记录存在的域名行为完全不变：只查一次 A，不引入 IPv6 候选。
+func (r *Resolver) queryBest(ctx context.Context, endpoint, host string) ([]net.IP, time.Duration, error) {
+	ips, ttl, err := r.query(ctx, endpoint, host, qtypeA)
+	if !errors.Is(err, errNoRecords) {
+		return ips, ttl, err
+	}
+	return r.query(ctx, endpoint, host, qtypeAAAA)
 }
 
 func (r *Resolver) fromCache(host string) ([]net.IP, bool) {

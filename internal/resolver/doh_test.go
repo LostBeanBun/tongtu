@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -96,7 +97,8 @@ func TestLookupPublicFiltersPrivate(t *testing.T) {
 }
 
 // TestPublicV4DropsIPv6AndPrivate 覆盖预热直连取址的口径：只保留公网 IPv4。
-// IPv6 必须被滤掉——它会成为客户端首选，而我们没有干净来源校验 AAAA。
+// IPv6 必须被滤掉——预热 / 批量解析统一用 v4（本机 v6 出口常不可用）；
+// 请求路径需要 v6 时走 queryBest 的 AAAA 兜底，不经过这里。
 func TestPublicV4DropsIPv6AndPrivate(t *testing.T) {
 	ips := []net.IP{
 		net.ParseIP("140.82.112.3"),        // 公网 v4：保留
@@ -294,5 +296,171 @@ func TestGraceWindowAccountsLateFailures(t *testing.T) {
 	}
 	if elapsed >= lookupGraceWindow {
 		t.Fatalf("breaker 生效后第二次并查不应再等宽限期，实际耗时 %v", elapsed)
+	}
+}
+
+// fakeDoHTyped 启动按 type 参数分类应答的 DoH 模拟服务：
+// A 查询返回 a、AAAA 查询返回 aaaa（均为 data 列表，空表示 0 条应答），
+// status 为响应的 DNS rcode（0 = NOERROR、2 = SERVFAIL、3 = NXDOMAIN…）。
+func fakeDoHTyped(t *testing.T, status int, a, aaaa []string) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var data []string
+		var rr int
+		switch r.URL.Query().Get("type") {
+		case "A":
+			data, rr = a, 1
+		case "AAAA":
+			data, rr = aaaa, 28
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		answers := make([]map[string]any, 0, len(data))
+		for _, d := range data {
+			answers = append(answers, map[string]any{"name": name, "type": rr, "TTL": 120, "data": d})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"Status": status, "Answer": answers})
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// TestNODATAFallsBackToAAAA 覆盖「只有 AAAA 记录的域名」：A 查询正常应答但 0 条
+// 记录（NODATA）时，对同一端点继续查 AAAA，拿到干净的 IPv6 候选；
+// 端点全程保持健康，第二次查询命中缓存不再打上游。
+func TestNODATAFallsBackToAAAA(t *testing.T) {
+	const v6 = "2606:50c0:8002::154"
+	srv, hits := fakeDoHTyped(t, 0, nil, []string{v6})
+	r := newTestResolver(srv.URL)
+	ctx := context.Background()
+
+	ips, err := r.Lookup(ctx, "v6only.example.com")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if len(ips) != 1 || ips[0].String() != v6 {
+		t.Fatalf("应拿到 AAAA 兜底结果，实际 %v", ips)
+	}
+	if n := hits.Load(); n != 2 {
+		t.Fatalf("应先查 A 再查 AAAA（2 次上游请求），实际 %d 次", n)
+	}
+	for _, h := range r.Health() {
+		if !h.OK {
+			t.Fatalf("端点应保持健康（NODATA 是回答不是故障）: %+v", h)
+		}
+	}
+	// 二次查询命中缓存
+	if _, err := r.Lookup(ctx, "v6only.example.com"); err != nil {
+		t.Fatalf("二次 Lookup: %v", err)
+	}
+	if n := hits.Load(); n != 2 {
+		t.Fatalf("缓存命中后不应再请求上游，实际 %d 次", n)
+	}
+	// 预热 / 批量解析的取址口径仍是 IPv4：v6-only 域名在这里应明确失败，而不是静默拿到 v6。
+	if _, err := r.LookupPublic(ctx, "v6only.example.com"); err == nil {
+		t.Fatal("LookupPublic 应拒绝只有 IPv6 的域名（预热口径只认 IPv4）")
+	}
+}
+
+// TestNXDOMAINIsAnswerNotFailure 覆盖 NXDOMAIN 的分类：端点正常应答「域名不存在」，
+// 端点必须保持健康、不进熔断冷却，且 NXDOMAIN 之后不再多查一次 AAAA。
+func TestNXDOMAINIsAnswerNotFailure(t *testing.T) {
+	srv, hits := fakeDoHTyped(t, 3, nil, nil)
+	r := newTestResolver(srv.URL)
+
+	if ips := r.LookupAllUncached(context.Background(), "nope.example.com"); ips != nil {
+		t.Fatalf("不存在的域名不应返回候选，实际 %v", ips)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("NXDOMAIN 后不应再查 AAAA，期望 1 次请求，实际 %d 次", n)
+	}
+	for _, h := range r.Health() {
+		if !h.OK || h.LastError != "" {
+			t.Fatalf("NXDOMAIN 后端点应保持健康: %+v", h)
+		}
+	}
+}
+
+// TestNXDOMAINDoesNotDemoteEndpoint 覆盖顺序 Lookup 路径：第一个端点答 NXDOMAIN、
+// 第二个端点有 A 记录时，解析应成功，且 NXDOMAIN 的端点**不被降权**（不挪到队尾）。
+// 此前 NXDOMAIN 会走 markFail：一个不存在的域名就能把健康端点降权一个冷却期。
+func TestNXDOMAINDoesNotDemoteEndpoint(t *testing.T) {
+	nx, _ := fakeDoHTyped(t, 3, nil, nil)
+	good, _ := fakeDoH(t, "7.7.7.7")
+	r := newTestResolver(nx.URL, good.URL)
+
+	ips, err := r.Lookup(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if len(ips) != 1 || ips[0].String() != "7.7.7.7" {
+		t.Fatalf("应拿到健康端点的结果，实际 %v", ips)
+	}
+	order := r.snapshotOrder()
+	if order[0] != nx.URL {
+		t.Fatalf("NXDOMAIN 端点不应被降权到队尾: %v", order)
+	}
+	for _, h := range r.Health() {
+		if h.Endpoint == nx.URL && (!h.OK || h.LastError != "") {
+			t.Fatalf("NXDOMAIN 端点应保持健康: %+v", h)
+		}
+	}
+}
+
+// TestSERVFAILStillMarksEndpointFailure 固定分类的另一半：rcode 2（SERVFAIL）
+// 仍是端点故障——它表示端点（或其上游）没能完成解析，应照旧降权进冷却。
+func TestSERVFAILStillMarksEndpointFailure(t *testing.T) {
+	bad, _ := fakeDoHTyped(t, 2, nil, nil)
+	good, _ := fakeDoH(t, "8.8.4.4")
+	r := newTestResolver(bad.URL, good.URL)
+
+	ips, err := r.Lookup(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if len(ips) != 1 || ips[0].String() != "8.8.4.4" {
+		t.Fatalf("应拿到健康端点的结果，实际 %v", ips)
+	}
+	order := r.snapshotOrder()
+	if order[0] != good.URL {
+		t.Fatalf("SERVFAIL 端点应被降权到队尾: %v", order)
+	}
+	for _, h := range r.Health() {
+		if h.Endpoint == bad.URL {
+			if h.OK {
+				t.Fatalf("SERVFAIL 端点不应标记为健康: %+v", h)
+			}
+			if !strings.Contains(h.LastError, "rcode 2") {
+				t.Fatalf("错误信息应保留 rcode: %+v", h)
+			}
+		}
+	}
+}
+
+// TestNoRecordsOnBothTypesIsNotFailure 覆盖「A 与 AAAA 都没有记录」：
+// 两次查询都是正常应答，端点保持健康、不进冷却（LookupAll 路径没有系统回退，
+// 返回空即到此为止）。
+func TestNoRecordsOnBothTypesIsNotFailure(t *testing.T) {
+	srv, hits := fakeDoHTyped(t, 0, nil, nil)
+	r := newTestResolver(srv.URL)
+
+	if ips := r.LookupAllUncached(context.Background(), "empty.example.com"); ips != nil {
+		t.Fatalf("无记录的域名不应返回候选，实际 %v", ips)
+	}
+	if n := hits.Load(); n != 2 {
+		t.Fatalf("应先查 A 再查 AAAA（2 次上游请求），实际 %d 次", n)
+	}
+	for _, h := range r.Health() {
+		if !h.OK {
+			t.Fatalf("端点应保持健康: %+v", h)
+		}
 	}
 }

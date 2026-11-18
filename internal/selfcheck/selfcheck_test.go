@@ -31,13 +31,33 @@ func TestSummaryCounts(t *testing.T) {
 }
 
 func TestSummaryNotesProxyDown(t *testing.T) {
-	rows := []Row{{Host: "a", Verdict: VerdictOK}, {Host: "b", Verdict: VerdictOK}}
+	// 代理没跑的真实形态：解析成功（DNSOK=true）、直连通、没做经代理测试。
+	rows := []Row{
+		{Host: "a", Verdict: VerdictOK, DNSOK: true},
+		{Host: "b", Verdict: VerdictOK, DNSOK: true},
+	}
 	got := Summary(rows)
 	if !strings.Contains(got, "本地代理未运行") {
 		t.Errorf("本地代理没跑时摘要要说清楚，实际 %q", got)
 	}
 	if strings.Contains(got, "仅直连") || strings.Contains(got, "不通") {
 		t.Errorf("没有这两类结果时不该出现它们的计数，实际 %q", got)
+	}
+}
+
+// TestSummaryNotesResolveFailure 覆盖「没测经代理」的另一种原因：解析全失败。
+// 此时本地代理可能正开着，摘要若还说「本地代理未运行」会把排查方向带偏。
+func TestSummaryNotesResolveFailure(t *testing.T) {
+	rows := []Row{
+		{Host: "nope1.example", Verdict: VerdictFail, DNSOK: false},
+		{Host: "nope2.example", Verdict: VerdictFail, DNSOK: false},
+	}
+	got := Summary(rows)
+	if !strings.Contains(got, "解析失败") {
+		t.Errorf("解析全失败时摘要要说明是解析问题，实际 %q", got)
+	}
+	if strings.Contains(got, "本地代理未运行") {
+		t.Errorf("解析失败不该归咎于本地代理，实际 %q", got)
 	}
 }
 

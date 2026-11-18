@@ -110,7 +110,7 @@ func Summary(rows []Row) string {
 	if len(rows) == 0 {
 		return "没有可体检的域名"
 	}
-	var ok, direct, fail, untested int
+	var ok, direct, fail, untested, noDNS int
 	for _, r := range rows {
 		switch r.Verdict {
 		case VerdictOK:
@@ -123,6 +123,9 @@ func Summary(rows []Row) string {
 		if !r.ProxyTested {
 			untested++
 		}
+		if !r.DNSOK {
+			noDNS++
+		}
 	}
 	s := fmt.Sprintf("%d 个域名：%d 可用", len(rows), ok)
 	if direct > 0 {
@@ -132,7 +135,14 @@ func Summary(rows []Row) string {
 		s += fmt.Sprintf(" · %d 不通", fail)
 	}
 	if untested == len(rows) {
-		s += "（本地代理未运行，只测了直连）"
+		// 「没测经代理」有两种完全不同的原因，不能都怪代理：代理真没跑，
+		// 或者压根没解析出来（例如域名不存在）。解析全失败时还说
+		// 「本地代理未运行」会把排查方向带偏（代理其实开着）。
+		if noDNS == len(rows) {
+			s += "（解析失败，未测经代理）"
+		} else {
+			s += "（本地代理未运行，只测了直连）"
+		}
 	}
 	return s
 }

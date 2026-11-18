@@ -48,6 +48,11 @@
   TTFB+吞吐对照，多轮取最好，不通非零退出）、`tools/accel-matrix.ps1`（系统DNS / 干净IP /
   经通途 / 无SNI出站四路归因矩阵，代理回归时非零退出）、`tools/nosni-probe`（无 SNI 出站
   探针，单目标按退出码判定，供矩阵 D 路与反代出站能力复验）。
+- **DoH 增加 AAAA 兜底查询**：A 记录为空（NODATA）时对同一端点继续查 AAAA，
+  只有 AAAA 记录的域名（此前只能回退系统 DNS，见 README「已知限制」）现在能拿到
+  干净解析；NXDOMAIN 不再往下查（名字不存在，其它类型必然也是空的）。
+  有 A 记录的域名行为完全不变（仍只查一次 A、只用 IPv4 候选），预热 / 自检的
+  `LookupPublic` 取址口径也保持 IPv4。
 
 ### 修复
 
@@ -61,6 +66,15 @@
   拿到结果即 `cancel()`，在途失败全变成 `context.Canceled` 无法记账。实测 `tongtu test`
   的 DNS 列从 15/15 全是 ~2000ms 降到除首个域名外 5-90ms。回归测试
   `TestGraceWindowAccountsLateFailures`。
+- **「域名没有记录」不再被算作 DoH 端点故障**：此前「无 A 记录」与 NXDOMAIN（rcode 3）
+  都会记入熔断账，把健康端点降权、在冷却期内跳过——一个打错的自定义站点域名、
+  或只有 AAAA 记录的域名，就能让全部 DoH 端点「集体阵亡」90 秒，
+  `tongtu status` 的 DNS 端点也误报 `[fail]`。现在端点正常应答（rcode 0 / 3）
+  即保持健康，只有传输失败、HTTP 错误与 rcode 2/5 之类才进熔断账；
+  两侧分类都有回归测试固定（`TestNXDOMAIN*` / `TestSERVFAILStillMarksEndpointFailure`）。
+- **`tongtu test` 摘要在解析全失败时误报「本地代理未运行」**：域名全部解析失败时
+  （本地代理其实开着），结尾后缀会打出「本地代理未运行，只测了直连」，把排查方向带偏。
+  现在区分「本地代理未运行，只测了直连」与「解析失败，未测经代理」两种原因。
 
 ### 变更
 
@@ -106,6 +120,15 @@
   拿到响应；`accel-matrix` 代理回归 0、通途救回 3、全败 0；`speed-test` 经代理 5/5、
   系统代理通道 5/5。测试后 `tongtu stop` 还原：无进程残留、`ProxyEnable=0`、
   `ProxyServer` 还原为接管前值、无 `guard.json`。
+- **AAAA 兜底与端点记账修复（2026-11-18）**：新增 resolver 回归 6 例
+  （NODATA→AAAA 兜底、NXDOMAIN 不降权不冷却的顺序 / 并查两条路径、rcode 2 仍降权、
+  A+AAAA 双空不记失败、预热口径拒绝纯 v6）与 selfcheck 摘要归因用例；全门槛
+  （gofmt / vet / staticcheck / go test -count=1）全绿。
+- 实机复验：`tongtu test` 15/15 无回归（DNS 列除首域名外 10–53ms）；
+  纯 AAAA 域名 `ipv6.google.com` 经真实端点拿到 `[垃圾合成A, 2404:6800:4012:6::200e]`
+  双候选（doh.pub 的 CNAME→AAAA 路径，阿里系端点会合成漂移的假 A，竞速中落选），
+  三个可达端点全程 `[ok]`；查询不存在的域名后端点保持 `[ok]`（修复前会被误判
+  `[fail]` 并降权 90 秒）。
 
 ### 已知风险
 
