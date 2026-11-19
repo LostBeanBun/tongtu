@@ -41,11 +41,15 @@ func init() {
 	// 并直接 os.Exit(1)——这会让「双击即开启」完全失效（双击时父进程名正是 explorer.exe）。
 	// 通途本就希望双击直接启动（等同 start），因此必须关闭它。回归测试见 root_test.go。
 	cobra.MousetrapHelpText = ""
+
+	// --config 是契约里的全局标志（README「1.0 兼容性承诺」），与其它持久标志
+	// 一样在 init 里注册：注册一次、随进程存活，契约测试才能在不执行 Execute
+	// 的前提下断言它存在（见 contract_test.go）。
+	rootCmd.PersistentFlags().StringVar(&flagConfig, "config", "", "配置文件路径（默认 %APPDATA%\\tongtu\\config.yaml）")
 }
 
 // Execute 运行 CLI 并返回退出码。
 func Execute() {
-	rootCmd.PersistentFlags().StringVar(&flagConfig, "config", "", "配置文件路径（默认 %APPDATA%\\tongtu\\config.yaml）")
 	if err := rootCmd.Execute(); err != nil {
 		reportFatal(err)
 		os.Exit(1)

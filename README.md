@@ -280,7 +280,9 @@ Release 流水线在发布完成后也会自动跑同一个脚本，核验不通
 
 - **命令与全局标志**：`start` / `stop` / `status` / `test` / `cert install|status|uninstall` /
   `autostart on|off|status` / `version`，以及 `--config`、`--no-sysproxy`、
-  `--no-mitm`、`--no-tray`、`--hidden`、`--json`、`--check`。新增命令或标志不受限制。
+  `--no-mitm`、`--no-tray`、`--hidden`、`--json`、`--check`。`--config` 与四个启动开关
+  是根命令的全局标志（`tongtu --hidden` 与 `tongtu start --hidden` 等价）；
+  `--json` 属于 `status`、`--check` 属于 `version`。新增命令或标志不受限制。
 - **退出码**：成功为 `0`，失败为非 `0`。脚本请只判断「是否为 0」，不要依赖具体的非零值。
 - **配置文件**：`%APPDATA%\tongtu\config.yaml` 的 `version: 5` 与「配置说明」里列出的键。
   版本升级只补新键、修正已知错误值，不会重置你显式写过的设置；升级前会备份为
@@ -296,6 +298,11 @@ Release 流水线在发布完成后也会自动跑同一个脚本，核验不通
 - 托盘菜单与窗口控件的具体位置、尺寸与绘制细节（只承诺功能可达、键盘可操作）；
 - 日志与提示文本的具体措辞；
 - `tools/` 下验收脚本的参数与输出格式。
+
+上面的承诺由 `cmd/tongtu/contract_test.go` 与 `internal/config/contract_test.go`
+在 CI 里逐条执行（命令树、全局标志、退出码、配置 `version` 与键集合、数据位置、
+出网白名单）：改坏任何一条，测试直接变红。要改契约本身，先改本节并抬 major，
+再改这两个文件。
 
 ## 快速开始
 
