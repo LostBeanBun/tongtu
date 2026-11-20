@@ -8,8 +8,16 @@ import "errors"
 // ErrUnsupported 表示当前平台不支持系统代理接管。
 var ErrUnsupported = errors.New("系统代理接管仅支持 Windows")
 
-// Values 是平台无关的占位类型。
-type Values struct{}
+// ErrHeldByPeer 占位（与 Windows 版同名同义，供跨平台代码引用）。
+var ErrHeldByPeer = errors.New("系统代理正被另一个仍在运行的通途实例持有")
+
+// Values 是平台无关的占位类型，字段形状与 Windows 版一致
+// （指针区分「不存在」与「零值」），跨平台代码才能按同一形状读取。
+type Values struct {
+	ProxyEnable   *uint
+	ProxyServer   *string
+	ProxyOverride *string
+}
 
 // StatePath 返回占位路径。
 func StatePath() string { return "" }
