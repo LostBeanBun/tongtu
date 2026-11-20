@@ -10,20 +10,16 @@ import (
 	"testing"
 )
 
-// TestProbeControlNoListener 没有监听者时 occupied=false。
+// TestProbeControlNoListener 没有监听者时返回 PortFree。
 func TestProbeControlNoListener(t *testing.T) {
 	addr := freeAddr(t)
-	occupied, foreign := ProbeControl(addr)
-	if occupied || foreign {
-		t.Fatalf("空端口应报告未占用: occupied=%v foreign=%v", occupied, foreign)
-	}
-	if IsTongtuControl(addr) {
-		t.Fatal("空端口不应被当作通途")
+	if got := ProbeControlState(addr); got != PortFree {
+		t.Fatalf("空端口应报告 PortFree，实际 %v", got)
 	}
 }
 
-// TestProbeControlForeignHTTP 别的 HTTP 服务占了端口时不能被当成通途——
-// 否则 start 会误报「tongtu 已在运行」。
+// TestProbeControlForeignHTTP 别的 HTTP 服务占了端口时必须被认成 PortForeignHTTP——
+// 否则 start 会误报「tongtu 已在运行」（拒绝启动），用户无从下手。
 func TestProbeControlForeignHTTP(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -32,16 +28,12 @@ func TestProbeControlForeignHTTP(t *testing.T) {
 	defer srv.Close()
 	addr := hostPort(t, srv.URL)
 
-	occupied, foreign := ProbeControl(addr)
-	if !occupied || !foreign {
-		t.Fatalf("别的 HTTP 服务应报告 occupied=true foreign=true: %v %v", occupied, foreign)
-	}
-	if IsTongtuControl(addr) {
-		t.Fatal("别的 HTTP 服务不应被当作通途")
+	if got := ProbeControlState(addr); got != PortForeignHTTP {
+		t.Fatalf("别的 HTTP 服务应报告 PortForeignHTTP，实际 %v", got)
 	}
 }
 
-// TestProbeControlTongtu 通途自己的 /status 形状应被识别。
+// TestProbeControlTongtu 通途自己的 /status 形状应被识别为 PortTongtu。
 func TestProbeControlTongtu(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/status" {
@@ -54,16 +46,13 @@ func TestProbeControlTongtu(t *testing.T) {
 	defer srv.Close()
 	addr := hostPort(t, srv.URL)
 
-	occupied, foreign := ProbeControl(addr)
-	if !occupied || foreign {
-		t.Fatalf("通途控制端口应报告 occupied=true foreign=false: %v %v", occupied, foreign)
-	}
-	if !IsTongtuControl(addr) {
-		t.Fatal("通途控制端口应被识别为通途")
+	if got := ProbeControlState(addr); got != PortTongtu {
+		t.Fatalf("通途控制端口应报告 PortTongtu，实际 %v", got)
 	}
 }
 
-// TestProbeControlNonHTTP 非 HTTP 程序占用端口时保守地不判定为「别的程序」。
+// TestProbeControlNonHTTP 非 HTTP 程序占用端口时是 PortUnknown——既不当通途
+// （stop/status 不许向陌生进程发指令），也不当可确认的外来服务（start 只拒绝不换口）。
 func TestProbeControlNonHTTP(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -80,9 +69,8 @@ func TestProbeControlNonHTTP(t *testing.T) {
 		}
 	}()
 
-	occupied, foreign := ProbeControl(ln.Addr().String())
-	if !occupied || foreign {
-		t.Fatalf("非 HTTP 占用应保守报告 occupied=true foreign=false: %v %v", occupied, foreign)
+	if got := ProbeControlState(ln.Addr().String()); got != PortUnknown {
+		t.Fatalf("非 HTTP 占用应报告 PortUnknown，实际 %v", got)
 	}
 }
 

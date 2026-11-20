@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -20,16 +21,34 @@ import (
 	"tongtu/internal/sysproxy"
 )
 
+// 系统代理的几个操作抽成包级变量，给单测留一个注入点：
+// 「还原失败」「接管失败」平时写不进注册表就复现不出来，而这些错误分支恰恰是
+// 状态一致性的关键（失败时必须继续报告「持有」，否则界面撒谎、原值丢失）。
+// 测试通过替换这几个变量注入失败，不碰测试机的真实注册表；生产路径行为不变。
+var (
+	sysHeld     = sysproxy.Held
+	sysEnable   = sysproxy.Enable
+	sysDisable  = sysproxy.Disable
+	sysRetarget = sysproxy.Retarget
+	// sysLive 读系统代理当前注册表原值，给「接管没生效」归因（见 proxyLossNote）。
+	sysLive = sysproxy.LiveState
+)
+
 // Status 是状态查询的返回体。
 type Status struct {
 	Running     bool   `json:"running"`
 	Listen      string `json:"listen"`
 	UptimeSec   int64  `json:"uptime_sec"`
-	SystemProxy bool   `json:"system_proxy"`         // 系统代理「实际生效中」（仍由本实例持有）
-	ProxyNote   string `json:"proxy_note,omitempty"` // 系统代理没生效的原因（如被别的程序接管）
-	MITM        bool   `json:"mitm"`                 // 无 SNI 反代是否启用
-	MITMNote    string `json:"mitm_note,omitempty"`  // 反代未启用的原因（启用时为空）
-	Paused      bool   `json:"paused"`               // 是否处于「一键暂停」（进程仍在，对外影响已撤回）
+	SystemProxy bool   `json:"system_proxy"` // 系统代理「实际生效中」（仍由本实例持有）
+	// WantSystemProxy 是「期望接管系统代理」的最新意图：启动意图（含 --no-sysproxy
+	// 这类一次性启动标志）与运行时托盘/窗口切换的合成。状态条与待办清单拿它对比
+	// 实际持有状态——拿配置文件当意图会把 --no-sysproxy 永远报成「部分生效」，
+	// 并误报「被其他程序占用」的待办。
+	WantSystemProxy bool   `json:"want_system_proxy"`
+	ProxyNote       string `json:"proxy_note,omitempty"` // 系统代理没生效的原因（如被别的程序接管）
+	MITM            bool   `json:"mitm"`                 // 无 SNI 反代是否启用
+	MITMNote        string `json:"mitm_note,omitempty"`  // 反代未启用的原因（启用时为空）
+	Paused          bool   `json:"paused"`               // 是否处于「一键暂停」（进程仍在，对外影响已撤回）
 	// PauseUntil 是定时暂停的到期时间（Unix 秒；0 = 未定时，只能手动恢复）。
 	// PauseRemainSec 是距自动恢复的秒数（未定时或已过期时为 0）。
 	// 两个字段都只在 Paused 为真时有意义：界面据此显示「还剩几分钟」。
@@ -217,8 +236,14 @@ func (a *App) Start() error {
 
 	// 接管系统代理（失败不致命，代理本身仍可用）
 	if a.wantSysProxy {
-		if saved, err := sysproxy.Enable(a.proxyAddr()); err != nil {
-			a.log.Error("接管系统代理失败", "err", err)
+		if saved, err := sysEnable(a.proxyAddr()); err != nil {
+			if errors.Is(err, sysproxy.ErrHeldByPeer) {
+				// 多实例下的预期分支：对方持有得好好的，本轮只是不接管
+				//（代理本身照常工作，界面会如实显示系统代理未接管）。
+				a.log.Warn("系统代理正被另一个通途实例持有，本次不接管", "err", err)
+			} else {
+				a.log.Error("接管系统代理失败", "err", err)
+			}
 		} else {
 			a.sysSaved = saved
 			a.sysOn = true
@@ -249,6 +274,8 @@ func (a *App) Shutdown(ctx context.Context) error {
 	cancel := a.cancel
 	srv := a.srv
 	sysOn, saved := a.sysOn, a.sysSaved
+	// 本轮接管地址：退出还原时的持有校验凭据（多实例下不能拿状态文件当凭据）
+	addr := a.proxyAddr()
 	a.sysOn, a.sysSaved = false, nil
 	a.health.State = HealthStopped
 	a.health.Reason = ""
@@ -264,7 +291,7 @@ func (a *App) Shutdown(ctx context.Context) error {
 	}
 	var errs []error
 	if sysOn {
-		out, err := sysproxy.Disable(saved)
+		out, err := sysDisable(saved, addr)
 		switch {
 		case err != nil:
 			errs = append(errs, err)
@@ -292,6 +319,10 @@ func (a *App) SetMode(sys bool) error {
 	if a.ln == nil {
 		return fmt.Errorf("服务未启动")
 	}
+	// 记录用户意图：状态条与待办清单拿它对比实际持有状态（拿配置文件当意图会把
+	// --no-sysproxy 这类一次性启动标志误报成「部分生效」）。即使本次操作因权限等
+	// 原因未生效，意图也已表达——界面据此如实报降级，而不是假装没这回事。
+	a.wantSysProxy = sys
 	var errs []error
 
 	held := a.sysProxyHeld()
@@ -299,7 +330,7 @@ func (a *App) SetMode(sys bool) error {
 
 	switch {
 	case sys && !held:
-		saved, err := sysproxy.Enable(a.proxyAddr())
+		saved, err := sysEnable(a.proxyAddr())
 		if err != nil {
 			errs = append(errs, err)
 		} else {
@@ -308,15 +339,21 @@ func (a *App) SetMode(sys bool) error {
 		}
 	case !sys && held:
 		// 我们确实还持有，用户要关：Disable 负责还原到接管前的值。
-		out, err := sysproxy.Disable(a.sysSaved)
+		out, err := sysDisable(a.sysSaved, a.proxyAddr())
 		switch {
 		case err != nil:
+			// 还原失败：注册表此刻仍指向我们，状态必须原样保留——
+			// 报成「已关」会让所有界面显示假状态；清掉 sysSaved 更是把原值
+			// 永久弄丢（下一次 Enable 会把我们自己的地址存成"原值"，从此
+			// 还原链被毒化）。错误照常返回，用户看得到失败原因。
 			errs = append(errs, err)
-		case out == sysproxy.NotHeld:
-			a.log.Warn("系统代理刚刚被其他程序接管，未还原（避免覆盖对方的设置）")
+		default:
+			if out == sysproxy.NotHeld {
+				a.log.Warn("系统代理刚刚被其他程序接管，未还原（避免覆盖对方的设置）")
+			}
+			a.sysOn = false
+			a.sysSaved = nil
 		}
-		a.sysOn = false
-		a.sysSaved = nil
 	}
 
 	// 把本次真正改变的开关写回配置，使托盘的操作在下次启动时仍然有效。
@@ -485,6 +522,12 @@ func (a *App) stopAllLocked() error {
 	if a.ln == nil || a.stopped {
 		return fmt.Errorf("服务未启动")
 	}
+	if a.paused.active() {
+		// 已经处于暂停中：幂等返回，绝不重算——暂停后 sysOn 已被清掉，从
+		// 「当前状态」重算会得出「没有暂停项」，把暂停记录整个抹掉（状态词
+		// 从「已暂停」跳回「运行中」）。重复 StopAll / PauseFor(0) 都走这里。
+		return nil
+	}
 	a.pauseGen++
 	a.pauseUntil = time.Time{}
 	p := &pauseState{
@@ -503,18 +546,27 @@ func (a *App) stopAllLocked() error {
 		}
 	}
 	if p.sys && a.sysOn {
-		out, err := sysproxy.Disable(a.sysSaved)
+		out, err := sysDisable(a.sysSaved, a.proxyAddr())
 		switch {
 		case err != nil:
+			// 还原失败：现实仍是「持有」，sysOn / sysSaved 保留（同 SetMode）；
+			// 这一项也没暂停成，从暂停记录里去掉，别让 Resume 之后误判。
 			errs = append(errs, err)
-		case out == sysproxy.NotHeld:
-			a.log.Warn("系统代理已被其他程序接管，暂停时未还原（避免覆盖对方的设置）")
+			p.sys = false
+		default:
+			if out == sysproxy.NotHeld {
+				a.log.Warn("系统代理已被其他程序接管，暂停时未还原（避免覆盖对方的设置）")
+			}
+			a.sysOn, a.sysSaved = false, nil
 		}
-		a.sysOn, a.sysSaved = false, nil
 	}
 	a.paused = p
+	if len(errs) > 0 {
+		a.log.Warn("暂停未完全生效（部分项目还原失败）", "可恢复", true, "err", errors.Join(errs...))
+		return errors.Join(errs...)
+	}
 	a.log.Info("已暂停加速：系统代理与反代均已还原", "可恢复", true)
-	return errors.Join(errs...)
+	return nil
 }
 
 // Paused 报告当前是否处于「一键暂停」状态。
@@ -559,7 +611,7 @@ func (a *App) resumeLocked(trigger string) error {
 		a.configureMITM(ca)
 	}
 	if p.sys && !a.sysOn {
-		if saved, err := sysproxy.Enable(a.proxyAddr()); err != nil {
+		if saved, err := sysEnable(a.proxyAddr()); err != nil {
 			errs = append(errs, err)
 		} else {
 			a.sysSaved, a.sysOn = saved, true
@@ -589,14 +641,46 @@ func (a *App) ConfigPath() string {
 func (a *App) DataDir() string { return config.Dir() }
 
 // saveConfigLocked 把当前配置持久化到配置文件（需持有 a.mu），失败仅记录日志。
+//
+// 写盘内容 = 磁盘文件为底 + 只覆盖「运行时权威」的五个字段（SystemProxy / MITM /
+// Services / Custom——托盘、窗口与热重载会改写它们）。其余字段（端口、DNS 端点、
+// 日志级别……）在运行期间只有「用户改配置文件」这一条更新路径，内存里仍是启动时的
+// 快照：整份回写会把用户运行期间的改动悄悄回滚（「改了配置怎么又变回去了」）。
+// 文件不存在或读不出来时退回整份写入（与旧行为一致，保证开关至少能落盘）。
 func (a *App) saveConfigLocked() {
 	if a.cfg == nil {
 		return
 	}
 	path := a.ConfigPath()
-	if err := config.Save(path, a.cfg); err != nil {
+	if err := config.Save(path, a.mergedConfigLocked(path)); err != nil {
 		a.log.Warn("保存配置失败", "path", path, "err", err)
 	}
+}
+
+// mergedConfigLocked 返回写盘用的配置（需持有 a.mu，口径见 saveConfigLocked）。
+func (a *App) mergedConfigLocked(path string) *config.Config {
+	if _, err := os.Stat(path); err != nil {
+		// 文件还不存在：内存快照就是全部真相。不走 config.Load——它对不存在的文件
+		// 会先写一份默认配置（多余的副作用），且默认值 ≠ 本实例实际在用的配置。
+		return a.cfg
+	}
+	disk, err := config.Load(path)
+	if err != nil {
+		// 磁盘上的文件读不出来（正被编辑器改写、损坏、版本比程序新……）：
+		// 退回整份写入，至少让本次开关操作落盘，别静默丢掉用户的托盘操作。
+		a.log.Warn("磁盘配置读不出来，按内存配置整体写回", "path", path, "err", err)
+		return a.cfg
+	}
+	merged := *disk
+	merged.SystemProxy = a.cfg.SystemProxy
+	merged.MITM = a.cfg.MITM
+	merged.MITM.Domains = append([]string(nil), a.cfg.MITM.Domains...)
+	merged.Services = append([]string(nil), a.cfg.Services...)
+	merged.Custom = config.CustomConfig{
+		Domains:     append([]string(nil), a.cfg.Custom.Domains...),
+		MITMDomains: append([]string(nil), a.cfg.Custom.MITMDomains...),
+	}
+	return &merged
 }
 
 // sysProxyHeld 报告系统代理是否仍由本实例持有（注册表里还是我们写入的地址）。
@@ -605,12 +689,29 @@ func (a *App) sysProxyHeld() bool {
 	if !a.sysOn {
 		return false
 	}
-	held, err := sysproxy.Held(a.proxyAddr())
+	held, err := sysHeld(a.proxyAddr())
 	if err != nil {
 		a.log.Debug("读取系统代理状态失败，按仍持有处理", "err", err)
 		return true
 	}
 	return held
+}
+
+// proxyLossNote 给「本轮接管过、但现在不持有」的系统代理归因（纯函数，便于单测）：
+//
+//   - 读不出注册表：老实说「状态读取失败」，不猜；
+//   - 代理还开着、地址却不是我们：被别的程序接管（Clash 之类顶掉了）；
+//   - 代理本身是关的：已被关闭——谁关的说不准（用户在系统设置里关、别的程序关），
+//     一律说「被其他程序接管」是把脏水泼错地方。
+func proxyLossNote(v *sysproxy.Values, err error) string {
+	switch {
+	case err != nil:
+		return "状态读取失败"
+	case v != nil && v.ProxyEnable != nil && *v.ProxyEnable == 1:
+		return "已被其他程序接管"
+	default:
+		return "已被关闭"
+	}
 }
 
 // freeLoopbackAddr 把 "host:port" 变成 "host:0"（保留配置里的回环主机），
@@ -624,10 +725,12 @@ func freeLoopbackAddr(addr string) string {
 }
 
 // SaveConfig 把当前配置持久化到配置文件（供调用方在改动配置后立即生效）。
+// 写盘口径与托盘操作一致：磁盘为底、只覆盖运行时权威字段（见 saveConfigLocked）。
 func (a *App) SaveConfig() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return config.Save(a.ConfigPath(), a.cfg)
+	path := a.ConfigPath()
+	return config.Save(path, a.mergedConfigLocked(path))
 }
 
 // Status 返回当前状态快照。
@@ -635,18 +738,21 @@ func (a *App) Status() Status {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	st := Status{
-		Running:     a.ln != nil && !a.stopped,
-		SystemProxy: a.sysOn && a.sysProxyHeld(),
-		MITM:        a.mitmCa != nil,
-		MITMNote:    a.mitmNote,
-		Services:    append([]string(nil), a.svcIDs...),
-		Paused:      a.paused.active(),
-		DNS:         a.res.Health(),
-		Health:      a.health,
+		Running:         a.ln != nil && !a.stopped,
+		SystemProxy:     a.sysOn && a.sysProxyHeld(),
+		WantSystemProxy: a.wantSysProxy,
+		MITM:            a.mitmCa != nil,
+		MITMNote:        a.mitmNote,
+		Services:        append([]string(nil), a.svcIDs...),
+		Paused:          a.paused.active(),
+		DNS:             a.res.Health(),
+		Health:          a.health,
 	}
 	if a.sysOn && !st.SystemProxy {
-		// 我们确实接管过，但注册表里已经不是我们了（Clash 之类顶掉了，或用户手动关掉）
-		st.ProxyNote = "已被其他程序接管"
+		// 我们确实接管过，但注册表里已经不是我们了。读一下当前值说清是「被别的
+		// 程序顶掉」还是「被关掉」，读不出来就老实说读不出来——一律栽给「别的
+		// 程序」会把用户自己关掉的也说成被接管（见 proxyLossNote）。
+		st.ProxyNote = proxyLossNote(sysLive())
 	}
 	if st.Paused {
 		st.Health.State = HealthPaused
@@ -701,7 +807,7 @@ func RecoverStale(log *slog.Logger) {
 		return
 	}
 	if sysproxy.Active() {
-		out, err := sysproxy.Disable(nil)
+		out, err := sysDisable(nil, "") // 崩溃恢复：原值与校验地址都取自状态文件
 		switch {
 		case err != nil:
 			log.Error("清理遗留系统代理状态失败", "err", err)

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"sync/atomic"
@@ -153,6 +154,50 @@ func TestPauseForZeroKeepsManualPause(t *testing.T) {
 	time.Sleep(80 * time.Millisecond)
 	if n := fired(); n != 0 {
 		t.Fatalf("不该有定时器触发，实际 %d 次", n)
+	}
+}
+
+// TestAutoResumeRetriesAfterFailure 【低1】到期恢复失败不能变成死暂停：
+// 暂停记录还在，就必须重新挂上倒计时与定时器，1 分钟后（测试里缩短）重试；
+// 重试成功后不再补枪。
+func TestAutoResumeRetriesAfterFailure(t *testing.T) {
+	a := newPauseTestApp(t)
+
+	var calls int32
+	oldHook, oldRetry := pauseExpireHook, autoResumeRetry
+	pauseExpireHook = func(*App) error {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return errors.New("模拟恢复失败（例如本地 CA 读不出）")
+		}
+		return nil
+	}
+	autoResumeRetry = 300 * time.Millisecond
+	t.Cleanup(func() {
+		pauseExpireHook, autoResumeRetry = oldHook, oldRetry
+	})
+
+	markPaused(a)
+	if err := a.PauseFor(30 * time.Millisecond); err != nil {
+		t.Fatalf("PauseFor: %v", err)
+	}
+
+	// 第一次到期：恢复动作被调用且失败
+	waitFor(t, 3*time.Second, func() bool { return atomic.LoadInt32(&calls) >= 1 })
+
+	// 失败之后：仍是暂停态，且倒计时被重新挂上——没有这一步就是死暂停
+	//（暂停记录还在、倒计时没了、也没有定时器在跑，永远等不到自动恢复）。
+	waitFor(t, 3*time.Second, func() bool {
+		_, ok := a.PauseDeadline()
+		return a.Status().Paused && ok
+	})
+
+	// 重试定时器到点：恢复动作被再次调用（这次成功）
+	waitFor(t, 3*time.Second, func() bool { return atomic.LoadInt32(&calls) >= 2 })
+
+	// 成功之后不该无限重试：再等超过一个重试间隔，调用次数保持不变
+	time.Sleep(500 * time.Millisecond)
+	if n := atomic.LoadInt32(&calls); n != 2 {
+		t.Fatalf("恢复成功后不应继续重试，实际调用 %d 次", n)
 	}
 }
 

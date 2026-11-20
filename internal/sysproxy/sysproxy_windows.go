@@ -156,6 +156,15 @@ func Enable(addr string) (*Values, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 不抢另一个**仍活着**的通途实例的接管：状态文件记录的地址不是本轮地址、
+	// 注册表确实指向它、而且那个地址还在监听（监听者就是建立那轮接管的实例）。
+	// 抢过来会把它的原值快照覆盖成它的地址——它退出时校验不过（NotHeld）只能干瞪眼，
+	// 我这轮退出时又会把系统代理还原到它已经死掉的地址上：两边都还原不回真正的原值。
+	// 启动路径与托盘「重新接管」共用这里，统一拒绝并把原因说清楚。
+	if st, rerr := readState(StatePath()); rerr == nil &&
+		peerHoldsSystemProxy(prev, st, addr, addrListening) {
+		return nil, fmt.Errorf("%w（代理地址 %s 仍在监听，多半是先启动的那个实例）", ErrHeldByPeer, st.Addr)
+	}
 	if err := os.MkdirAll(filepath.Dir(StatePath()), 0o755); err != nil {
 		return nil, err
 	}
@@ -198,20 +207,31 @@ const (
 // 此时原值已经找不回来，只能做「至少别让网络瘫着」的兜底（见 disableCorruptState）。
 var ErrStateCorrupt = errors.New("系统代理状态文件已损坏")
 
-// Disable 恢复系统代理。saved 为 nil 时读取状态文件（用于崩溃恢复），
-// 恢复成功后删除状态文件。
+// ErrHeldByPeer 表示系统代理此刻正被另一个仍活着的通途实例持有：本轮不接管。
+// 两个实例先后接管会互相覆盖状态文件，双方退出时都还原不回真正的原值，
+// 最后一次还原可能把系统代理留在无人监听的地址上（详见 Enable 的注释）。
+var ErrHeldByPeer = errors.New("系统代理正被另一个仍在运行的通途实例持有")
+
+// Disable 恢复系统代理。
 //
-// 还原前先确认「系统代理仍由通途持有」（注册表里的地址与状态文件记录一致、且代理是开着的）：
-// 若中途有别的程序接管了系统代理（Clash / v2rayN 之类），或用户手动关掉了它，这里就**不还原**，
-// 否则会把对方的设置覆盖回我们接管前的旧值。返回 NotHeld 报告这种情况，调用方据此提示用户。
-func Disable(saved *Values) (Outcome, error) {
+//	saved：接管前的原值（本轮 Enable 的返回值）；nil 表示崩溃恢复——原值与接管地址
+//	都取自状态文件，行为与历史版本一致（校验、清理均以文件记录为准）。
+//	heldAddr：调用方**本轮接管的代理地址**（saved 非 nil 时参与校验）。
+//
+// 还原前先确认「系统代理仍归本轮持有」：注册表里的地址必须仍指向 heldAddr。
+// **不拿状态文件做校验凭据**——多实例下它可能已被下一个接管的实例覆盖，
+// 拿它校验会让先退出的实例还原掉对方的接管、并删掉对方的原值记录（见 planDisable）。
+// 校验不过返回 NotHeld，不动注册表；状态文件去留按 planDisable 的归属规则处理。
+func Disable(saved *Values, heldAddr string) (Outcome, error) {
 	opMu.Lock()
 	defer opMu.Unlock()
 	st, serr := readState(StatePath())
 	if saved == nil {
+		// 崩溃恢复：调用方没有任何凭据，唯一真相就是状态文件
+		//（接管地址也以文件为准，后续校验语义与历史版本完全一致）。
 		switch {
 		case serr == nil:
-			saved = &st.Saved
+			saved, heldAddr = &st.Saved, st.Addr
 		case os.IsNotExist(serr):
 			return NotHeld, nil // 无待恢复状态
 		case errors.Is(serr, ErrStateCorrupt):
@@ -220,20 +240,61 @@ func Disable(saved *Values) (Outcome, error) {
 			return NotHeld, serr
 		}
 	}
-	if st != nil {
-		live, lerr := readValues()
-		if lerr != nil {
-			// 读不到注册表就无从判断，退回「按原值还原」的旧行为
-		} else if !heldIn(live, st.Addr) {
-			_ = os.Remove(StatePath())
-			return NotHeld, nil
+	if serr != nil {
+		// 文件读不出来（损坏 / 权限）但调用方自带原值：按「无文件」处理——
+		// 校验只依赖 heldAddr，不依赖文件。
+		st = nil
+	}
+	live, lerr := readValues()
+	act := planDisable(st, saved, heldAddr, live, lerr == nil)
+	if act.next != nil {
+		if err := apply(act.next); err != nil {
+			return NotHeld, fmt.Errorf("还原系统代理失败: %w", err)
 		}
 	}
-	if err := apply(saved); err != nil {
-		return NotHeld, fmt.Errorf("还原系统代理失败: %w", err)
+	if act.removeState {
+		_ = os.Remove(StatePath())
 	}
-	_ = os.Remove(StatePath())
-	return Restored, nil
+	return act.outcome, nil
+}
+
+// disableAction 是 planDisable 的结论：给 Disable 的三个执行动作。
+type disableAction struct {
+	outcome     Outcome
+	next        *Values // nil = 不动注册表
+	removeState bool
+}
+
+// planDisable 是 Disable 的决策内核（纯函数，仿 retargetPlan，见测试）。
+//
+// heldAddr 是**本轮接管地址**：只有注册表仍指向它，才轮到本调用方还原。
+// 状态文件属于哪一轮**不作凭据**——典型多实例链：
+//
+//	A 接管（文件: 原A/addrA）→ B 接管（文件被覆盖: addrA/addrB）→ A 先退出。
+//
+// 若拿文件记录（addrB）校验，A 会「校验通过」从而还原掉 B 的接管并删掉文件；
+// B 后退出时没有文件可校验，直接把系统代理还原到 A 已经死掉的地址上，
+// 而监护 / RunOnce 两条兜底此时都被正常退出流程撤掉——死代理从此无人收拾。
+// 用 heldAddr 校验后：A 校验不过（NotHeld，文件留给 B），B 仍持有则正常还原。
+func planDisable(st *stateFile, saved *Values, heldAddr string, live *Values, liveOK bool) disableAction {
+	// 注册表读不到：无从校验，退回「按原值还原」的旧行为（宁可还原也不留半吊子状态）。
+	if !liveOK {
+		return disableAction{outcome: Restored, next: saved, removeState: st != nil && st.Addr == heldAddr}
+	}
+	if !heldIn(live, heldAddr) {
+		// 不归本轮管：被其他程序接管、用户手动改过、或另一个实例换了自己的地址。
+		// 注册表一动不动；状态文件只在「记录的接管已不在注册表里」时清掉——
+		// 那是孤儿记录（其主人显然没在持有），留着只会让每次启动都误报一次；
+		// 记录的正是注册表当前值时必须留：那是另一个存活实例退出时唯一的原值凭据。
+		return disableAction{outcome: NotHeld, removeState: st != nil && !heldIn(live, st.Addr)}
+	}
+	// 本轮确实持有：按原值还原。文件只有记录的就是本轮接管时才删
+	//（崩溃恢复路径的 heldAddr 就取自文件，恒成立；记录着别人轮次的文件不归我们删）。
+	return disableAction{
+		outcome:     Restored,
+		next:        saved,
+		removeState: st != nil && st.Addr == heldAddr,
+	}
 }
 
 // disableCorruptState 处理「状态文件损坏、原值已不可知」的兜底。
@@ -372,11 +433,57 @@ func Held(addr string) (bool, error) {
 	return heldIn(v, addr), nil
 }
 
+// LiveState 返回系统代理的当前注册表原值，供调用方给「没生效」归因
+// （被别的程序顶掉 / 被关掉 / 读不出状态），而不是一律猜「被接管」。
+// 与 Held 同一把锁，读失败时返回错误（调用方按「无法判断」处理）。
+func LiveState() (*Values, error) {
+	opMu.Lock()
+	defer opMu.Unlock()
+	return readValues()
+}
+
 // heldIn 是 Held 的纯函数版本（便于单测）：判断给定注册表值是否仍指向 addr。
 func heldIn(v *Values, addr string) bool {
 	return v != nil && addr != "" &&
 		v.ProxyEnable != nil && *v.ProxyEnable == 1 &&
 		v.ProxyServer != nil && *v.ProxyServer == addr
+}
+
+// peerHoldsSystemProxy 报告「注册表此刻是否正被另一个仍活着的通途实例持有」
+// （纯函数，监听探测由调用方注入，便于单测）。三个条件缺一不可：
+//
+//   - 状态文件记录的接管地址不是本轮地址（自己不可能持有自己还没建立的接管）；
+//   - 注册表确实指向那个地址（那轮接管仍生效——不在注册表里就不算有人持有）；
+//   - 那个地址还在监听（监听者即建立接管的实例；地址死了就是遗留状态，
+//     该按正常接管处理，由启动时的 app.RecoverStale 负责清理）。
+func peerHoldsSystemProxy(live *Values, st *stateFile, selfAddr string, listening func(string) bool) bool {
+	return st != nil && st.Addr != "" && st.Addr != selfAddr &&
+		heldIn(live, st.Addr) && listening(st.Addr)
+}
+
+// addrListening 报告 addr 上是否已有进程在监听（300ms 上限）。
+//
+// 只探回环地址：状态文件里的地址本就该是通途自己的回环监听；出现别的形态
+// （手改、损坏）一律按「不活着」处理，不对外网地址发起任何连接。
+func addrListening(addr string) bool {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || port == "" {
+		return false
+	}
+	switch strings.ToLower(host) {
+	case "localhost", "::1":
+	default:
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			return false
+		}
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 300*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 // Active 报告是否存在待恢复的代理状态文件。

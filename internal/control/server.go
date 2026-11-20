@@ -157,37 +157,50 @@ func Running(addr string) bool {
 	return true
 }
 
-// ProbeControl 探测控制端口上的占用情况，供单实例检测与「端口被别的程序占用」分流使用：
+// PortState 是控制端口探测的结论（ProbeControlState）。
 //
-//	occupied：端口有人监听
-//	foreign： 监听者明确是一个「不是通途」的 HTTP 服务
-//
-// 若端口有人监听但拿不到我们认识的 TCP/HTTP 响应（例如被非 HTTP 程序占用），
-// foreign=false——按「可能就是通途自己」保守处理，避免误判成「可以再起一个实例」。
-func ProbeControl(addr string) (occupied, foreign bool) {
+// 三者分流的口径：stop / status 只对**确认是通途**的端口发指令、报「已在运行」；
+// start 对「确认是别的 HTTP 服务」的端口换口继续；识别不出的占用者单独成一类，
+// 既不当通途也不当可换口的外来服务（保守定位见 PortUnknown 注释）。
+type PortState int
+
+const (
+	// PortFree 端口无人监听。
+	PortFree PortState = iota
+	// PortTongtu 确认跑着一个通途实例：/status 返回我们认识的状态形状。
+	PortTongtu
+	// PortForeignHTTP 确认是一个「不是通途」的 HTTP 服务：响应了请求，但形状不对。
+	PortForeignHTTP
+	// PortUnknown 有人监听，但拿不到可识别的响应（非 HTTP 程序占用，或通途
+	// 恰好没在超时内应答）。
+	//
+	// 保守定位（两个方向都不越界）：
+	//   - 不当作通途：stop / status 不能对陌生进程发指令或报「已在运行」；
+	//   - 不当作可确认的外来服务：start 只拒绝启动并说明真实原因，**不换口**
+	//     （万一占用者只是响应超时的通途，换口就会起出第二个实例）。
+	PortUnknown
+)
+
+// ProbeControlState 探测控制端口上的占用情况，供单实例检测与
+// 「端口被别的程序占用」的分流使用。
+func ProbeControlState(addr string) PortState {
 	if !Running(addr) {
-		return false, false
+		return PortFree
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
 	defer cancel()
 	body, err := Call(ctx, addr, "/status", http.MethodGet)
 	if err != nil {
-		return true, false // 有人监听，但不是我们能识别的 HTTP 服务：保守当作通途
+		return PortUnknown
 	}
 	var probe struct {
 		Listen  string `json:"listen"`
 		Running bool   `json:"running"`
 	}
 	if err := json.Unmarshal(body, &probe); err != nil || (!probe.Running && probe.Listen == "") {
-		return true, true // 是个 HTTP 服务，但形状不对：别的程序
+		return PortForeignHTTP // 是个 HTTP 服务，但形状不对：别的程序
 	}
-	return true, false
-}
-
-// IsTongtuControl 报告控制端口上是否确实跑着一个通途实例。
-func IsTongtuControl(addr string) bool {
-	occupied, foreign := ProbeControl(addr)
-	return occupied && !foreign
+	return PortTongtu
 }
 
 // FreeLoopbackAddr 在 addr 所在的回环主机上找一个空闲端口，返回 "host:port"。

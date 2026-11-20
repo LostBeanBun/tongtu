@@ -22,8 +22,17 @@ var statusCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if !control.IsTongtuControl(cfg.Control) {
+		// 分流口径见 control.PortState：只对「确认是通途」的端口发查询，
+		// 其余情况把真实原因说清楚——「端口被别的程序占用」和「没在运行」不是一回事。
+		switch control.ProbeControlState(cfg.Control) {
+		case control.PortTongtu:
+			// 确认在跑：继续查状态
+		case control.PortFree:
 			return fmt.Errorf("tongtu 未在运行")
+		case control.PortForeignHTTP:
+			return fmt.Errorf("tongtu 未在运行（控制端口 %s 被其他 HTTP 程序占用）", cfg.Control)
+		default: // control.PortUnknown
+			return fmt.Errorf("无法确认 tongtu 是否在运行：控制端口 %s 有程序监听，但响应无法识别", cfg.Control)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

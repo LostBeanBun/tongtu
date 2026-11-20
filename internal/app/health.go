@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"tongtu/internal/resolver"
-	"tongtu/internal/sysproxy"
 )
 
 // Health 是运行健康度快照（供 status / 诊断 / 窗口状态条使用）。
@@ -55,7 +54,8 @@ const (
 	networkPollEvery = 5 * time.Second
 	// recoverDebounce 把同一次睡眠/换网引发的多个事件合并成一次恢复。
 	recoverDebounce = 3 * time.Second
-	// dnsResetCooldown 避免在长时间断网时每 15 秒就重置一次 DNS。
+	// dnsResetCooldown 限流 DNS 重置动作：长时间断网时每 15 秒重置一次没有意义。
+	// 只限制「动作」，不限制「问题报告」——冷却期内照样报降级（见 healthIssuesLocked）。
 	dnsResetCooldown = 2 * time.Minute
 )
 
@@ -70,6 +70,11 @@ type healthIssue struct {
 	kind     string
 	reason   string
 	healable bool
+	// actionOnly 表示「执行了自愈动作也不代表问题解决」：动作照做、自愈次数照记，
+	// 但问题仍留在 remain 里继续降级，直到问题真的消失。DNS 重置只是重排端点与缓存，
+	// 有没有恢复要等下一次真实查询才知道——若把它记成「已修复」，
+	// HealthDegraded 的 DNS 路径就永远走不到，断网时界面一路显示正常。
+	actionOnly bool
 }
 
 // healthLoop 定期检查健康度并轮询网络指纹，直到 ctx 取消。
@@ -159,6 +164,10 @@ func (a *App) checkHealthLocked() Health {
 			continue
 		}
 		healed = append(healed, iss.kind)
+		if iss.actionOnly {
+			// 动作完成 ≠ 问题解决：继续按未解决处理（见 actionOnly）。
+			remain = append(remain, iss)
+		}
 	}
 	if len(healed) > 0 {
 		a.health.LastHeal = now
@@ -188,14 +197,27 @@ func (a *App) healthIssuesLocked() []healthIssue {
 		out = append(out, healthIssue{kind: issueProxy, reason: "本地代理监听无响应", healable: true})
 	}
 
-	dnsFailed := dnsAllFailed(a.res.Health())
-	if dnsFailed && time.Since(a.lastDNSReset) >= dnsResetCooldown {
-		out = append(out, healthIssue{kind: issueDNS, reason: "所有 DoH 端点均失败", healable: true})
+	// DNS：报告与冷却分离。只要全部端点失败就必须报出来（状态降级），
+	// dnsResetCooldown 只决定这一轮是否真的执行重置动作。旧逻辑把冷却期内的
+	// 失败当成「问题不存在」（断网期间界面一路显示正常），重置动作成功后又把
+	// 问题整个抹掉（healable 恒成功 → 不进 remain），两条路都让降级走不到。
+	if dnsAllFailed(a.res.Health()) {
+		out = append(out, healthIssue{
+			kind:       issueDNS,
+			reason:     "所有 DoH 端点均失败",
+			healable:   time.Since(a.lastDNSReset) >= dnsResetCooldown,
+			actionOnly: true,
+		})
 	}
 
 	if a.sysOn && !a.sysProxyHeld() {
-		// 被别的程序接管：只降级，不抢回来（既有承诺）。
-		out = append(out, healthIssue{kind: issueSystemProxy, reason: "系统代理已被其他程序接管", healable: false})
+		// 没接管住：只降级，不抢回来（既有承诺）。原因照注册表实况归因，
+		// 别一律写「被其他程序接管」——代理被关掉时那样说是泼错脏水。
+		out = append(out, healthIssue{
+			kind:     issueSystemProxy,
+			reason:   "系统代理" + proxyLossNote(sysLive()),
+			healable: false,
+		})
 	}
 	return out
 }
@@ -253,7 +275,7 @@ func (a *App) restartProxyLocked() error {
 		a.log.Warn("代理监听已重新绑定", "旧", oldAddr, "新", newAddr)
 	}
 	if a.sysOn {
-		changed, rerr := sysproxy.Retarget(newAddr)
+		changed, rerr := sysRetarget(newAddr)
 		switch {
 		case rerr != nil:
 			a.log.Warn("系统代理换口失败（注册表可能仍指向旧端口）", "err", rerr)
@@ -303,14 +325,14 @@ func (a *App) RecoverNetwork(reason string) error {
 	a.mu.Lock()
 	if a.sysOn {
 		addr := a.proxyAddr()
-		held, err := sysproxy.Held(addr)
+		held, err := sysHeld(addr)
 		switch {
 		case err != nil:
 			a.log.Debug("网络恢复：读取系统代理状态失败", "err", err)
 		case !held:
 			a.log.Warn("网络恢复：系统代理已被其他程序接管，保持不覆盖")
 		default:
-			if changed, rerr := sysproxy.Retarget(addr); rerr != nil {
+			if changed, rerr := sysRetarget(addr); rerr != nil {
 				errs = append(errs, fmt.Errorf("更新系统代理地址: %w", rerr))
 			} else if changed {
 				a.log.Info("网络恢复：系统代理地址已更新", "addr", addr)

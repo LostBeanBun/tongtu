@@ -44,7 +44,7 @@ func runSelfCheck(ctx context.Context, a *app.App, cfg *config.Config) []selfche
 		Listen:       listen,
 		ProxyUp:      control.Running(listen),
 		MITMOn:       st.MITM,
-		MITMPatterns: cfg.MITM.Domains,
+		MITMPatterns: cfg.MITMPatterns(), // 生效全集：mitm.domains + 自定义 mitm_domains
 		Timeout:      20 * time.Second,
 	}
 	ctx, cancel := context.WithTimeout(ctx, selfCheckTimeout)

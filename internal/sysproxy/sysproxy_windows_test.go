@@ -236,3 +236,91 @@ func TestHeldIn(t *testing.T) {
 		t.Error("接管地址为空时不应算作持有")
 	}
 }
+
+// TestPlanDisableOwnership 【高2】Disable 的持有校验必须绑在「本轮接管地址」上，
+// 且状态文件的去留按归属决定——多实例先后接管的还原链全靠这两条不出错。
+func TestPlanDisableOwnership(t *testing.T) {
+	off := uint(0)
+	origA, addrA, addrB, clash := "127.0.0.1:1080", "127.0.0.1:19180", "127.0.0.1:19181", "127.0.0.1:7890"
+	pointsTo := func(addr string, enable uint) *Values {
+		return &Values{ProxyEnable: &enable, ProxyServer: ptr(addr)}
+	}
+	savedA := &Values{ProxyEnable: &off, ProxyServer: ptr(origA)} // A 接管前的原值
+	stA := func() *stateFile { return &stateFile{Saved: *savedA, Addr: addrA} }
+
+	cases := []struct {
+		name       string
+		st         *stateFile
+		saved      *Values
+		heldAddr   string
+		live       *Values
+		liveOK     bool
+		want       Outcome
+		wantNext   bool // 是否执行「按原值还原」
+		wantRemove bool // 是否删除状态文件
+	}{
+		{"单实例正常退出", stA(), savedA, addrA, pointsTo(addrA, 1), true, Restored, true, true},
+
+		// 多实例链（核心）：B 接管后文件被覆盖成「原值=addrA、地址=addrB」。
+		// A 先退出：注册表已是 addrB ≠ A 的本轮地址 → 不动注册表、**不删文件**
+		//（文件里存着 B 退出时要用的原值，删了链就断了）。
+		{"A 先退出：文件已被 B 覆盖", &stateFile{Saved: Values{ProxyServer: ptr(addrA)}, Addr: addrB},
+			savedA, addrA, pointsTo(addrB, 1), true, NotHeld, false, false},
+
+		// B 后退出（其文件已被 A 的旧实现删掉的场景）：没有文件也不能跳过校验——
+		// 注册表指向的若已不是 B 的本轮地址，绝不能把死地址当原值还原回去。
+		{"B 后退出：无文件也不跳过校验", nil,
+			&Values{ProxyServer: ptr(addrA)}, addrB, pointsTo(clash, 1), true, NotHeld, false, false},
+
+		{"用户手动关掉了代理", stA(), savedA, addrA, pointsTo(addrA, off), true, NotHeld, false, true},
+		{"被其他程序接管", stA(), savedA, addrA, pointsTo(clash, 1), true, NotHeld, false, true},
+		{"读不到注册表时按原值还原", stA(), savedA, addrA, nil, false, Restored, true, true},
+		{"崩溃恢复：文件与注册表一致", stA(), &stA().Saved, addrA, pointsTo(addrA, 1), true, Restored, true, true},
+		{"崩溃恢复：已被其他程序接管", stA(), &stA().Saved, addrA, pointsTo(clash, 1), true, NotHeld, false, true},
+		{"校验地址为空：拒绝一切还原", stA(), savedA, "", pointsTo(addrA, 1), true, NotHeld, false, false},
+	}
+	for _, c := range cases {
+		got := planDisable(c.st, c.saved, c.heldAddr, c.live, c.liveOK)
+		if got.outcome != c.want {
+			t.Errorf("%s: outcome = %v, want %v", c.name, got.outcome, c.want)
+		}
+		if (got.next != nil) != c.wantNext {
+			t.Errorf("%s: 执行还原 = %v, want %v", c.name, got.next != nil, c.wantNext)
+		}
+		if c.wantNext && got.next != c.saved {
+			t.Errorf("%s: 还原值应是调用方本轮的原值", c.name)
+		}
+		if got.removeState != c.wantRemove {
+			t.Errorf("%s: 删除状态文件 = %v, want %v", c.name, got.removeState, c.wantRemove)
+		}
+	}
+}
+
+// TestPeerHoldsSystemProxy 「同袍实例正持有系统代理」的三条件缺一不可：
+// 少任何一个都会导致误抢（还原链被覆盖）或误拒（用户永远接管不上）。
+func TestPeerHoldsSystemProxy(t *testing.T) {
+	on := uint(1)
+	addrA, addrB := "127.0.0.1:19180", "127.0.0.1:19181"
+	pointsTo := func(addr string) *Values {
+		return &Values{ProxyEnable: &on, ProxyServer: ptr(addr)}
+	}
+	peerSt := &stateFile{Addr: addrB}
+	alwaysListen := func(string) bool { return true }
+	neverListen := func(string) bool { return false }
+
+	if !peerHoldsSystemProxy(pointsTo(addrB), peerSt, addrA, alwaysListen) {
+		t.Error("注册表指向同袍地址且它仍在监听：应判定为同袍持有（本轮不接管）")
+	}
+	if peerHoldsSystemProxy(pointsTo(addrB), nil, addrA, alwaysListen) {
+		t.Error("没有状态文件时不能凭空判定同袍持有")
+	}
+	if peerHoldsSystemProxy(pointsTo(addrB), peerSt, addrB, alwaysListen) {
+		t.Error("记录地址就是本轮地址：不是同袍（自己还没建立接管）")
+	}
+	if peerHoldsSystemProxy(pointsTo(addrA), peerSt, addrA, alwaysListen) {
+		t.Error("注册表不指向记录地址：那轮接管已不生效，不算有人持有")
+	}
+	if peerHoldsSystemProxy(pointsTo(addrB), peerSt, addrA, neverListen) {
+		t.Error("记录地址已无人监听：是遗留状态而非活的同袍，应按正常接管处理")
+	}
+}

@@ -108,6 +108,38 @@ func TestWindowStatusOfDegraded(t *testing.T) {
 	}
 }
 
+// TestWindowStatusOfNoSysproxy 【中4】配置要开系统代理、但本轮意图是不接管
+// （等价 --no-sysproxy 启动）：状态条必须是「运行中」，不能因为配置文件里
+// SystemProxy=true 就永远橙色「部分生效」——期望关、实际关，一切正常。
+func TestWindowStatusOfNoSysproxy(t *testing.T) {
+	rs, err := rules.Load([]string{"steam"})
+	if err != nil {
+		t.Fatalf("加载规则: %v", err)
+	}
+	cfg := config.Default() // 默认 SystemProxy=true、MITM 关
+	cfg.Listen = "127.0.0.1:0"
+
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// SysProxy 不设（false）＝命令行 --no-sysproxy：配置要开，本轮不接管
+	a := app.New(app.Options{Config: cfg, Rules: rs, Log: quiet})
+	if err := a.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = a.Shutdown(ctx)
+	}()
+
+	st := windowStatusOf(a, cfg)
+	if st.Level != stateOK || st.State != "运行中" {
+		t.Errorf("--no-sysproxy 下期望关、实际关，应为「运行中」（旧口径按配置文件判会永远「部分生效」），实际 level=%d state=%q", st.Level, st.State)
+	}
+	if len(st.Items) == 0 || st.Items[0].Label != "系统代理" || st.Items[0].On {
+		t.Errorf("状态条开关项应反映实际未接管，实际 %+v", st.Items)
+	}
+}
+
 // TestPauseRemainText 定时暂停的剩余时间文案：不足一分钟不说「0 分钟」。
 func TestPauseRemainText(t *testing.T) {
 	cases := []struct {

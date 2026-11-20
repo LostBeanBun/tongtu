@@ -48,13 +48,14 @@ var startCmd = &cobra.Command{
 		}
 
 		// 单实例：控制端口上确实跑着通途就退出。
-		// 端口被「别的程序」占用时不该误报成「通途已在运行」——直接换一个空闲端口继续，
-		// 并把新地址写回配置，使 tongtu status / stop 之后仍能连上本实例。
-		occupied, foreign := control.ProbeControl(cfg.Control)
-		if occupied && !foreign {
+		// 「确认是别的 HTTP 服务」时换一个空闲端口继续，并把新地址写回配置，
+		// 使 tongtu status / stop 之后仍能连上本实例（它那边自己会看到端口被占）。
+		// 「有人监听但识别不出」保守拒绝启动——占用者可能是响应超时的通途，
+		// 换口会起出第二个实例——但报错必须说实话，不能一口咬定「tongtu 已在运行」。
+		switch control.ProbeControlState(cfg.Control) {
+		case control.PortTongtu:
 			return fmt.Errorf("tongtu 已在运行（如需重启请先执行 tongtu stop）")
-		}
-		if foreign {
+		case control.PortForeignHTTP:
 			if addr, ok := control.FreeLoopbackAddr(cfg.Control); ok {
 				log.Warn("控制端口已被其他程序占用，改用空闲端口", "配置", cfg.Control, "实际", addr)
 				cfg.Control = addr
@@ -62,6 +63,9 @@ var startCmd = &cobra.Command{
 					log.Warn("写回控制端口配置失败（tongtu status / stop 可能连不上本实例）", "err", err)
 				}
 			}
+		case control.PortUnknown:
+			return fmt.Errorf("控制端口 %s 上有程序监听，但响应无法识别（可能不是通途，也可能是通途卡顿未响应）；"+
+				"为避免起出第二个实例暂不启动——可先执行 tongtu stop 试停，或修改配置里的 control 端口", cfg.Control)
 		}
 
 		// 崩溃防护第一步：先占住本轮监护令牌。这样上一轮可能还没退出的监护进程会发现
@@ -412,13 +416,13 @@ func onOff(b bool) string {
 
 // windowStatusOf 生成窗口顶部状态条的内容：一眼看清开关状态与流量。
 //
-// cfg 与 App 共享同一个配置对象（托盘切换会实时改它），因此「期望开什么」按当前配置判断：
-// 期望接管却没接上时状态词变成「部分生效」并用橙色，
-// 让界面自己把降级说出来，而不是只写在日志里。
+// 「期望开什么」取 App 的最新意图（st.WantSystemProxy，含 --no-sysproxy 等
+// 启动标志与运行时切换），不能拿配置文件当现实：期望接管却没接上时状态词
+// 变成「部分生效」并用橙色，让界面自己把降级说出来，而不是只写在日志里。
 func windowStatusOf(a *app.App, cfg *config.Config) windowStatus {
 	st := a.Status()
 	level := statusLevel(st.Running,
-		modeWish{cfg.SystemProxy, st.SystemProxy},
+		modeWish{st.WantSystemProxy, st.SystemProxy},
 		modeWish{cfg.MITM.Enabled, st.MITM})
 	state := "运行中"
 	switch {

@@ -172,6 +172,73 @@ func TestOneShotFlagsNotPersisted(t *testing.T) {
 	}
 }
 
+// TestSaveConfigPreservesDiskEdits 【中1】运行期间用户改过的非热字段不能被回滚：
+// 托盘切换只覆盖运行时权威的五个字段（SystemProxy / MITM / Services / Custom），
+// 端口、DNS 端点这类「只有改配置文件才更新」的字段一律以磁盘为准。
+func TestSaveConfigPreservesDiskEdits(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	// 启动那一刻磁盘上的配置（模拟启动时 loadConfig 读到的那份）
+	start := config.Default()
+	start.Listen = "127.0.0.1:0"
+	start.SystemProxy = true
+	if err := config.Save(cfgPath, start); err != nil {
+		t.Fatalf("写初始配置: %v", err)
+	}
+
+	rs, err := rules.Load([]string{"steam"})
+	if err != nil {
+		t.Fatalf("加载规则: %v", err)
+	}
+	cfg := config.Default()
+	cfg.Listen = "127.0.0.1:0"
+	cfg.SystemProxy = true
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	a := New(Options{Config: cfg, Rules: rs, ConfigPath: cfgPath, Log: quiet})
+	if err := a.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = a.Shutdown(ctx)
+	}()
+
+	// 运行期间用户直接改了配置文件里的非热字段（watcher 对这些字段不热更新）
+	edited, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("读配置: %v", err)
+	}
+	edited.Listen = "127.0.0.1:29999"
+	edited.DNS.Endpoints = []string{"https://user-edited.example/resolve"}
+	if err := config.Save(cfgPath, edited); err != nil {
+		t.Fatalf("用户改配置: %v", err)
+	}
+
+	// 托盘切换服务组 → 触发持久化
+	if err := a.SetServices([]string{"github"}); err != nil {
+		t.Fatalf("SetServices: %v", err)
+	}
+
+	saved, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("重新加载配置: %v", err)
+	}
+	// 非热字段：以磁盘为准，不能被启动时的内存快照回滚
+	if saved.Listen != "127.0.0.1:29999" {
+		t.Errorf("运行期间改的监听地址被回滚成 %q（用户已改成 127.0.0.1:29999）", saved.Listen)
+	}
+	if len(saved.DNS.Endpoints) != 1 || saved.DNS.Endpoints[0] != "https://user-edited.example/resolve" {
+		t.Errorf("运行期间改的 DNS 端点被回滚: %v", saved.DNS.Endpoints)
+	}
+	// 运行时权威字段：照常以本次操作为准
+	if len(saved.Services) != 1 || saved.Services[0] != "github" {
+		t.Errorf("服务组切换应落盘，实际 %v", saved.Services)
+	}
+	if !saved.SystemProxy {
+		t.Error("系统代理意图应原样保留")
+	}
+}
+
 // TestCustomPatternsInjected 自定义站点要在 New 之后就并入匹配集合：
 // 托盘/窗口里的分流靠同一个 Set，漏了这一步「加速自己的站点」就等于没开。
 func TestCustomPatternsInjected(t *testing.T) {

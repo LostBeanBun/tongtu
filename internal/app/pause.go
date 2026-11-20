@@ -27,6 +27,13 @@ var pauseExpireHook = func(a *App) error {
 	return a.resumeLocked("定时暂停到期")
 }
 
+// autoResumeRetry 是「到期自动恢复失败」之后的重试间隔。
+//
+// 恢复可能失败（本地 CA 读不出、根证书被移除、注册表写失败）：失败后暂停记录还在，
+// 不重挂定时器就成了死暂停——「暂停 30 分钟」永远等不到自动恢复。做成变量是
+// 给单测留的（真机上不能真等一分钟）。
+var autoResumeRetry = time.Minute
+
 // PauseFor 暂停加速，并在 d 之后自动恢复；d <= 0 表示一直暂停到手动恢复（等同 StopAll）。
 //
 // 已经处于暂停状态时调用它只改「到期时间」，不会重新撤一遍（避免重复还原系统设置）；
@@ -72,10 +79,32 @@ func (a *App) autoResume(gen int64) {
 	a.mu.Unlock()
 
 	if err := pauseExpireHook(a); err != nil {
-		a.log.Warn("定时暂停到期，自动恢复未完全成功", "err", err)
+		// 恢复失败（CA 读不出 / 根证书被移除 / 注册表写失败……）：暂停记录仍有效，
+		// 必须重挂定时器，否则倒计时消失、又没有任何定时器在跑——死暂停，
+		// 用户只能干等。1 分钟后重试；期间用户手动恢复或重新计时都会让代号作废，
+		// 迟到的旧定时器醒来即退（见 autoResume 的代号校验）。
+		a.rearmAutoResume(autoResumeRetry)
+		a.log.Warn("定时暂停到期，自动恢复未完全成功，稍后自动重试",
+			"err", err, "retry", autoResumeRetry.String())
 		return
 	}
 	a.CheckHealth()
+}
+
+// rearmAutoResume 恢复失败后重新挂上自动恢复定时器（需在 a.mu 外调用）。
+//
+// 只在暂停记录仍有效时重挂：用户若已手动恢复（记录已清），这次重试就是多余的，
+// 直接收手——代号校验兜底，迟到的定时器绝不会把已恢复的暂停再拉起来。
+func (a *App) rearmAutoResume(d time.Duration) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.paused.active() {
+		return
+	}
+	a.pauseGen++
+	gen := a.pauseGen
+	a.pauseUntil = time.Now().Add(d)
+	time.AfterFunc(d, func() { a.autoResume(gen) })
 }
 
 // PauseDeadline 返回定时暂停的到期时间；未定时（手动暂停或没暂停）时 ok=false。

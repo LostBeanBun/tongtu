@@ -33,7 +33,7 @@ const (
 )
 
 // Disable 在非 Windows 平台返回 ErrUnsupported。
-func Disable(saved *Values) (Outcome, error) { return NotHeld, ErrUnsupported }
+func Disable(saved *Values, heldAddr string) (Outcome, error) { return NotHeld, ErrUnsupported }
 
 // Retarget 在非 Windows 平台返回 ErrUnsupported（没有系统代理可换口）。
 func Retarget(addr string) (bool, error) { return false, ErrUnsupported }
@@ -43,3 +43,6 @@ func Active() bool { return false }
 
 // Held 在非 Windows 平台始终报告「未持有」。
 func Held(addr string) (bool, error) { return false, nil }
+
+// LiveState 在非 Windows 平台返回 ErrUnsupported。
+func LiveState() (*Values, error) { return nil, ErrUnsupported }

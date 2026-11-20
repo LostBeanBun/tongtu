@@ -104,11 +104,18 @@ func compileTodos(st app.Status, cfg *config.Config, autostartOn bool, certMissi
 			})
 		}
 
-		// 系统代理被别的程序顶掉了：一键夺回。
-		if st.Running && cfg.SystemProxy && !st.SystemProxy {
+		// 系统代理没生效：被别的顶掉了就一键夺回，接管本身没成功（注册表写失败等）
+		// 也一键重试——但意图只认 Status.WantSystemProxy：拿配置文件当意图会把
+		// --no-sysproxy 这类一次性启动标志报成「该开却没开」，凭空催用户「夺回」。
+		if st.Running && st.WantSystemProxy && !st.SystemProxy {
+			label := "重新接管系统代理（上次接管未生效，点击重试）"
+			if st.ProxyNote != "" {
+				// 有过接管、后来丢了：才谈得上「被占用」，原因照 Status 的备注说。
+				label = "重新接管系统代理（当前" + st.ProxyNote + "）"
+			}
 			out = append(out, uiTodoItem{
 				ID:    uiIDTodoTake,
-				Label: "重新接管系统代理（当前被其他程序占用）",
+				Label: label,
 			})
 		}
 	}

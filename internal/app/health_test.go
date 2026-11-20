@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -263,5 +264,83 @@ func TestNetworkFingerprintStable(t *testing.T) {
 	}
 	if second := networkFingerprint(); second != first {
 		t.Fatalf("连续两次指纹不一致: %q vs %q", first, second)
+	}
+}
+
+// TestDNSFailureStaysDegraded 【中3】DNS 全失败必须一路报到降级：
+// 报告与冷却分离——冷却只限制「重置动作」，不能把问题本身藏起来；
+// 重置动作做完也不算「已修复」（有没有恢复要等下一次真实查询才知道）。
+//
+// 不走 Start：healthLoop 的后台检查会与断言抢自愈动作，而这里要精确验证
+// 「冷却内不重复动作、但照样报降级」。手动摆一个「正在运行」的最小状态即可
+// （New 已建好 resolver，checkHealthLocked 只要求 ln 非空且未停止）。
+func TestDNSFailureStaysDegraded(t *testing.T) {
+	cfg := config.Default()
+	cfg.Listen = "127.0.0.1:0"
+	cfg.SystemProxy, cfg.MITM.Enabled = false, false
+	cfg.DNS.Endpoints = []string{"http://127.0.0.1:1/dns-query"} // 必然连不上的死端点
+	rs, err := rules.Load([]string{"steam"})
+	if err != nil {
+		t.Fatalf("加载规则: %v", err)
+	}
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	a := New(Options{Config: cfg, Rules: rs, Log: quiet})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.mu.Lock()
+	a.ln = ln
+	a.mu.Unlock()
+	t.Cleanup(func() { _ = ln.Close() })
+
+	// 触发一次真实查询：DoH 必失败并记上 LastError（系统 DNS 兜底成不成功不影响标记）
+	failDoH := func() {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = a.res.Lookup(ctx, "example.com")
+		if !dnsAllFailed(a.res.Health()) {
+			t.Fatalf("前置条件：端点应记上 LastError: %+v", a.res.Health())
+		}
+	}
+
+	failDoH()
+
+	// 冷却已过（lastDNSReset 是零值）：重置动作会执行，但问题必须报成降级
+	h1 := a.CheckHealth()
+	if h1.State != HealthDegraded || !strings.Contains(h1.Reason, "所有 DoH 端点均失败") {
+		t.Fatalf("DNS 全失败应报降级，实际 %q（%s）", h1.State, h1.Reason)
+	}
+	if h1.HealCount != 1 {
+		t.Fatalf("冷却已过应执行一次重置动作，自愈计数应为 1，实际 %d", h1.HealCount)
+	}
+
+	// 冷却内：动作不再执行，但报告必须继续（修复前唯一走不通的路径）
+	failDoH() // 上面的重置动作清掉了错误标记，模拟「下一次真实查询又失败了」
+	a.mu.Lock()
+	a.lastDNSReset = time.Now()
+	healBefore := a.health.HealCount
+	a.mu.Unlock()
+
+	h2 := a.CheckHealth()
+	if h2.State != HealthDegraded || !strings.Contains(h2.Reason, "所有 DoH 端点均失败") {
+		t.Fatalf("冷却期内仍必须报降级（旧逻辑在这里把问题藏起来），实际 %q（%s）", h2.State, h2.Reason)
+	}
+	if h2.HealCount != healBefore {
+		t.Fatalf("冷却期内不应重复执行重置动作: %d → %d", healBefore, h2.HealCount)
+	}
+
+	// 冷却结束：动作恢复执行，但「做了动作」不等于「问题解决」，仍要降级
+	a.mu.Lock()
+	a.lastDNSReset = time.Time{}
+	a.mu.Unlock()
+	h3 := a.CheckHealth()
+	if h3.HealCount != healBefore+1 {
+		t.Fatalf("冷却结束后应再次执行重置动作，自愈计数应为 %d，实际 %d", healBefore+1, h3.HealCount)
+	}
+	if h3.State != HealthDegraded || !strings.Contains(h3.Reason, "所有 DoH 端点均失败") {
+		t.Fatalf("重置动作执行后仍应降级（恢复与否要等下一次真实查询），实际 %q（%s）", h3.State, h3.Reason)
 	}
 }
