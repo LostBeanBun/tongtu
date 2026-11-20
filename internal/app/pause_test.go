@@ -43,13 +43,18 @@ func newPauseTestApp(t *testing.T) *App {
 func stubPauseExpire(t *testing.T) func() int32 {
 	t.Helper()
 	var n int32
-	old := pauseExpireHook
-	pauseExpireHook = func(*App) error {
+	restore := setPauseHooks(func(*App) error {
 		atomic.AddInt32(&n, 1)
 		return nil
-	}
-	t.Cleanup(func() { pauseExpireHook = old })
+	}, autoResumeRetryDuration())
+	t.Cleanup(restore)
 	return func() int32 { return atomic.LoadInt32(&n) }
+}
+
+// autoResumeRetryDuration 读当前重试间隔（stubPauseExpire 保持它不变用）。
+func autoResumeRetryDuration() time.Duration {
+	_, d := currentHooks()
+	return d
 }
 
 // markPaused 把实例置为「已暂停」，模拟 StopAll 之后的状态。
@@ -164,17 +169,13 @@ func TestAutoResumeRetriesAfterFailure(t *testing.T) {
 	a := newPauseTestApp(t)
 
 	var calls int32
-	oldHook, oldRetry := pauseExpireHook, autoResumeRetry
-	pauseExpireHook = func(*App) error {
+	restore := setPauseHooks(func(*App) error {
 		if atomic.AddInt32(&calls, 1) == 1 {
 			return errors.New("模拟恢复失败（例如本地 CA 读不出）")
 		}
 		return nil
-	}
-	autoResumeRetry = 300 * time.Millisecond
-	t.Cleanup(func() {
-		pauseExpireHook, autoResumeRetry = oldHook, oldRetry
-	})
+	}, 300*time.Millisecond)
+	t.Cleanup(restore)
 
 	markPaused(a)
 	if err := a.PauseFor(30 * time.Millisecond); err != nil {
