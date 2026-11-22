@@ -16,8 +16,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"tongtu/internal/app"
-	"tongtu/internal/autostart"
 	"tongtu/internal/config"
+	"tongtu/internal/sysproxy"
 )
 
 // 崩溃 / 强杀防护（「监护进程」）。
@@ -50,6 +50,10 @@ type guardInfo struct {
 
 // guardStatePath 返回监护令牌文件路径。
 func guardStatePath() string { return filepath.Join(config.Dir(), "guard.json") }
+
+// stateActive 报告系统里是否还有待还原的代理状态（注入点，测试用）。
+// 语义与 sysproxy.Active 一致：状态文件存在即「仍有人持有」。
+var stateActive = sysproxy.Active
 
 // guardLogPath 返回监护进程的日志文件（调试用；监护进程没有界面）。
 func guardLogPath() string { return filepath.Join(config.Dir(), "guard.log") }
@@ -164,6 +168,25 @@ func recycleStaleGuard() bool {
 	guardLog("回收上一轮陈旧令牌 pid=%d（该进程已退出）", gi.PID)
 	return true
 }
+
+// guardClaimed 报告本轮是否已经占用过监护令牌。
+func guardClaimed() bool {
+	guard.mu.Lock()
+	defer guard.mu.Unlock()
+	return guard.token != ""
+}
+
+// shouldClaimGuard 报告启动早期是否该占用本轮监护令牌。
+//
+// 另一个实例还活着时，系统状态归它管，guard.json 是它监护进程的还原依据：
+// 覆盖会让它在主进程崩溃时以「令牌已更换」为由放弃还原（实测缺陷13②）。
+func shouldClaimGuard(foreignLive bool) bool { return !foreignLive }
+
+// needLateClaim 报告启动完成后是否需要补占令牌。
+//
+// 启动时检测到别的实例活着所以没占；若它随后退出、本轮实际接管成功，
+// 不补令牌就没有监护进程守着（实测缺陷13②的补救路径）。
+func needLateClaim(wantSys, held bool) bool { return wantSys && held && !guardClaimed() }
 
 // releaseGuard 在优雅退出时回收本轮令牌：只删属于自己的那一轮。
 //
@@ -301,7 +324,11 @@ func watchGuard(a *app.App, log *slog.Logger, quit <-chan struct{}) {
 			startGuard(log)
 		} else {
 			// 暂停 / 手动关掉接管之后已经没有需要还原的东西：撤掉自愈项。
-			disarmRunOnce(log)
+			// 但系统里若还有待还原状态（多半是另一个活着的实例持有），那是它的掉电兜底，
+			// 不能替它撤（实测缺陷13①：第二实例每 1.5s 撤掉持有实例的 RunOnce，双方互抢）。
+			if shouldDisarmRunOnce() {
+				disarmRunOnce(log)
+			}
 		}
 		select {
 		case <-quit:
@@ -310,6 +337,10 @@ func watchGuard(a *app.App, log *slog.Logger, quit <-chan struct{}) {
 		}
 	}
 }
+
+// shouldDisarmRunOnce 报告本轮巡检时是否该撤掉断电自愈项：
+// 只有系统里确实没有待还原状态时才撤，免得替另一个活着的实例撤掉兜底（实测缺陷13①）。
+func shouldDisarmRunOnce() bool { return !stateActive() }
 
 // guardSubcommand 是监护进程的子命令名（不出现在帮助里）。
 const guardSubcommand = "__guard"
@@ -360,13 +391,25 @@ func runGuard(pid int, token string) {
 	}
 	guardLog("开始还原系统代理")
 	app.RecoverStale(nil)
-	// 状态已经还原：撤掉「下次登录还原」项，别在系统里留下指向本程序的常驻命令。
-	// （如果这期间又有实例接管，它会在下一轮巡检里重新登记。）
-	if err := autostart.ClearRunOnce(); err != nil {
+	finishGuardCleanup()
+	guardLog("还原完成")
+}
+
+// finishGuardCleanup 收尾「还原之后」的清理。
+//
+// 只有确认状态文件真的清掉了，才撤断电自愈项、回收令牌：RecoverStale 可能因为
+// 「状态仍由另一个活着的实例持有」而收手（staleOwnerAlive），此时撤 RunOnce 会让对方的
+// 掉电兜底失效，删 guard.json 会让对方的监护进程在主进程崩溃时以「优雅退出」为由放弃还原
+// ——两者叠加就是裸奔（实测缺陷12）。
+func finishGuardCleanup() {
+	if stateActive() {
+		guardLog("系统状态仍由存活的持有者掌管，保留断电自愈项与监护令牌")
+		return
+	}
+	if err := runOnceClear(); err != nil {
 		guardLog("撤掉断电自愈项失败: %v", err)
 	}
 	_ = os.Remove(guardStatePath())
-	guardLog("还原完成")
 }
 
 // guardStillOurs 判断令牌文件里的这一轮是否仍然属于「我们要守护的那个进程」。

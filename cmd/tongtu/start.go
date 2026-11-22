@@ -72,14 +72,14 @@ var startCmd = &cobra.Command{
 		// 令牌已经换人，从而不会误清掉本实例马上要建立的状态。
 		// 顺序注意：claimGuard 会覆盖 guard.json，所以「是否还有别的实例活着」必须在它之前判断。
 		foreignPID, foreignLive := foreignLiveSession()
-		claimGuard()
-		// 清理上次崩溃/强杀遗留的系统状态。
-		// 但如果还有别的实例活着（例如用另一份配置、换了控制端口的第二个实例），系统代理与
-		// hosts 归它管：这里必须收手，否则会把它的接管清掉。
-		if foreignLive {
-			log.Warn("检测到另一个通途实例仍在运行，已跳过遗留状态清理", "pid", foreignPID)
-		} else {
+		if shouldClaimGuard(foreignLive) {
+			claimGuard()
+			// 清理上次崩溃/强杀遗留的系统状态。
 			app.RecoverStale(log)
+		} else {
+			// 另一个实例活着、系统代理与 hosts 归它管：guard.json 是它监护进程的还原依据，
+			// 这里绝不能覆盖——否则它被强杀/崩溃时会以「令牌已更换」为由放弃还原（实测缺陷13②）。
+			log.Warn("检测到另一个通途实例仍在运行，已跳过遗留状态清理", "pid", foreignPID)
 		}
 
 		wantSys := cfg.SystemProxy && !flagNoSysProxy
@@ -89,8 +89,9 @@ var startCmd = &cobra.Command{
 		// 接管发生在 a.Start() 里（写状态文件 + 改注册表），如果等启动流程走完
 		// 再拉监护，中间这段时间崩溃就没人还原了。此刻可能还什么都没接管：监护进程醒来
 		// 走的 RecoverStale 是幂等的，没有待还原状态时它什么都不会做。
-		if wantSys {
+		if wantSys && !foreignLive {
 			// 断电自愈项也要在接管之前登记：万一刚写进注册表就掉电，__recover 是幂等的。
+			// foreignLive 时系统状态归对方，本轮不接管，也就不该替它登记或拉起监护。
 			armRunOnce(log)
 			startGuard(log)
 		}
@@ -117,6 +118,13 @@ var startCmd = &cobra.Command{
 		})
 		if err := a.Start(); err != nil {
 			return err
+		}
+		// 启动时若另一个实例还活着，本轮没占监护令牌；若它在启动过程中退出、本轮实际
+		// 接管成功（例如它已暂停、状态文件已空），这里补上令牌与监护进程，
+		// 保证「持有系统状态 ⇒ 有监护」这个不变式。
+		if needLateClaim(wantSys, a.Status().SystemProxy) {
+			claimGuard()
+			startGuard(log)
 		}
 
 		quit := make(chan struct{}, 1)
@@ -267,8 +275,11 @@ var startCmd = &cobra.Command{
 			// 还原失败时故意留着——监护进程还能凭它做兜底还原。
 			releaseGuard()
 			// 同样撤掉断电自愈项：系统里已经没有需要还原的东西了。
-			// （还原失败时不撤，留给下次登录的 __recover 兜底。）
-			disarmRunOnce(log)
+			// （还原失败时不撤，留给下次登录的 __recover 兜底；系统状态仍被别的活着的
+			//  实例持有时也不撤——那是它的兜底，撤了会让它裸奔。）
+			if shouldDisarmRunOnce() {
+				disarmRunOnce(log)
+			}
 		}
 		if err := cs.Shutdown(ctx); err != nil {
 			errs = append(errs, err)

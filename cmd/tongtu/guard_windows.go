@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -47,22 +48,46 @@ func guardSysProcAttr(breakaway bool) *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{CreationFlags: flags, HideWindow: true}
 }
 
+// waitPollInterval 是「拿不到句柄」时轮询进程存活状态的间隔（测试可调小）。
+var waitPollInterval = 500 * time.Millisecond
+
+// openForWait 是 OpenProcess(SYNCHRONIZE) 的注入点（测试模拟「活着但打不开」）。
+var openForWait = func(pid int) (windows.Handle, error) {
+	return windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
+}
+
+// aliveForWait 是轮询存活检查的注入点（测试用）。
+var aliveForWait = processAlive
+
 // waitProcessExit 等待 pid 对应的进程退出。
 //
-// 返回 true 表示「成功等到它退出」（或者它在我们等待期间退出）；
-// 返回 false 表示拿不到进程句柄——最常见的原因是进程已经不在了，
-// 此时调用方应当立即执行还原。
+// 返回 true 表示「一直等到它退出」；返回 false 表示拿不到句柄、且已确认进程不在
+// （调用方应当立即执行还原）。
 //
-// 之所以等「进程句柄」而不是轮询进程是否存在：句柄在进程结束的瞬间就进入已通知状态，
+// 拿不到句柄时必须区分两种情况：进程真的没了（ERROR_INVALID_PARAMETER），还是
+// 活着但权限打不开（ACCESS_DENIED）。后者绝不能当成「已退出」——否则监护进程会在
+// 主进程还活着的时候就跑去「还原」，把正在生效的断电自愈项与监护令牌一起清掉，
+// 等主进程真的崩溃时已经没人能还原（实测缺陷12）。口径与 processAlive 保持一致：
+// 打不开就按活着处理，轮询等它退出。
+//
+// 之所以优先等「进程句柄」而不是轮询进程是否存在：句柄在进程结束的瞬间就进入已通知状态，
 // 不受 PID 复用影响，也不会有轮询间隔带来的延迟。
 func waitProcessExit(pid int) bool {
-	h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
-	if err != nil {
+	if pid <= 0 {
 		return false
 	}
-	defer windows.CloseHandle(h)
-	if _, err := windows.WaitForSingleObject(h, windows.INFINITE); err != nil {
+	if h, err := openForWait(pid); err == nil {
+		defer windows.CloseHandle(h)
+		if _, werr := windows.WaitForSingleObject(h, windows.INFINITE); werr == nil {
+			return true
+		}
+		// 等待失败（极少见）：下面退化为轮询，别把「活着」误判成「已退出」。
+	}
+	if !aliveForWait(pid) {
 		return false
+	}
+	for aliveForWait(pid) {
+		time.Sleep(waitPollInterval)
 	}
 	return true
 }

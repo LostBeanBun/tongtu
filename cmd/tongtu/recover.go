@@ -103,8 +103,12 @@ var recoverCmd = &cobra.Command{
 		// 掉电时 guard.json 也会留在数据目录里；主人已经不在了就顺手回收。
 		recycleStaleGuard()
 		app.RecoverStale(log)
-		if err := autostart.ClearRunOnce(); err != nil {
-			log.Warn("断电自愈：清理重启还原项失败", "err", err)
+		// 只在确实没有待还原状态时才清 RunOnce：若系统代理仍由另一个活着的实例持有，
+		// 撤掉它的掉电兜底会让它裸奔（与 stop / watchGuard 的口径一致）。
+		if !stateActive() {
+			if err := autostart.ClearRunOnce(); err != nil {
+				log.Warn("断电自愈：清理重启还原项失败", "err", err)
+			}
 		}
 		log.Info("断电自愈：已检查并还原上次遗留的系统代理")
 		return nil
