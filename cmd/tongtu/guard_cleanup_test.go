@@ -2,14 +2,25 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+// ensureGuardDir 保证数据目录存在：Linux CI 里 APPDATA 为空，
+// config.Dir() 会落到相对路径 ./tongtu，直接写 guard.json 会报 no such file。
+func ensureGuardDir(t *testing.T) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(guardStatePath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // TestFinishGuardCleanupKeepsRunOnceWhileStateHeld 覆盖实测缺陷12：
 // RecoverStale 因为「状态仍由活着的持有者掌管」而收手时，监护进程绝不能撤 RunOnce、
 // 也不能删 guard.json——否则持有者的掉电兜底与崩溃防护会同时失效。
 func TestFinishGuardCleanupKeepsRunOnceWhileStateHeld(t *testing.T) {
+	ensureGuardDir(t)
 	restore := stashGuardState(t)
 	defer restore()
 	writeGuardState(t, guardInfo{PID: 1, Token: "t", At: time.Now()})
@@ -34,6 +45,7 @@ func TestFinishGuardCleanupKeepsRunOnceWhileStateHeld(t *testing.T) {
 // TestFinishGuardCleanupClearsWhenStateGone 覆盖正常收尾：状态文件确实没了，
 // 撤 RunOnce、回收令牌。
 func TestFinishGuardCleanupClearsWhenStateGone(t *testing.T) {
+	ensureGuardDir(t)
 	restore := stashGuardState(t)
 	defer restore()
 	writeGuardState(t, guardInfo{PID: 1, Token: "t", At: time.Now()})
