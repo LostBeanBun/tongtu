@@ -33,7 +33,7 @@ $maj = [int]$Matches[1]; $min = [int]$Matches[2]; $pat = [int]$Matches[3]
 switch ($Target.ToLower()) {
     "patch" { $new = "$maj.$min." + ($pat + 1) }
     "minor" { $new = "$maj." + ($min + 1) + ".0" }
-    "major" { $new = ($maj + 1) + ".0.0" }
+    "major" { $new = "$($maj + 1).0.0" }
     default {
         if ($Target -notmatch '^(\d+)\.(\d+)\.(\d+)$') {
             throw "参数要 patch / minor / major，或者一个 x.y.z 版本号；收到: $Target"
