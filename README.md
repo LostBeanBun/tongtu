@@ -199,6 +199,7 @@ tools/genicon/        把图标重绘成多尺寸 ICO（开发工具）
 tools/crash-test.ps1  崩溃防护验收：强杀主进程，验证系统状态被自动还原
 tools/recover-test.ps1 断电自愈验收：杀监护 → 杀主进程 → `__recover`，断言状态干净且幂等
 tools/ui-smoke.ps1    界面点击验收：读 `/ui/layout` 精确定位按钮，点暂停→选 15 分钟→恢复并断言标签翻转
+tools/ui-smoke-intent.ps1 口径冒烟（非交互）：意图/实际分离、被顶掉归因、待办出现与回落、`--no-sysproxy` 不误报
 tools/soak-test.ps1   长时间浸泡测试（默认 24 小时）：采样内存/句柄/连接，结束时给出结论
 tools/start-soak.ps1  后台启动浸泡（脱离终端运行），并把实例副本放在 LOCALAPPDATA
 tools/uninstall.ps1   卸载清理：撤销自启、证书、RunOnce 与系统代理残留（可选删数据与 exe）
